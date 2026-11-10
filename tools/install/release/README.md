@@ -17,6 +17,15 @@ overwrite an existing release, and prints the ZIP hash. Send players the ZIP.
 They extract it and double-click `Update-Dawn.cmd` to keep an existing save,
 or `Install-Dawn.cmd` to start fresh.
 
+To include the MultiDawn launcher beside the installer, build it with
+`tools/launcher/Build-Launcher.ps1 -RunTests`, then add
+`-LauncherPath 'build/launcher/MultiDawn.Launcher.exe'` to the publisher command.
+It remains outside the game payload. Players open `MultiDawn.Launcher.exe` after
+installation and choose their separate Dawn folder. This preview supports solo
+launch and launcher pairing; multiplayer gameplay and in-game invites are not
+implemented. `tools/install/New-MultiDawnLauncherRelease.ps1` packages the
+launcher separately without requiring a Dawn DLL or game files.
+
 ## Uninstalling
 
 Close Destiny 2 and double-click `Uninstall-Dawn.cmd`, then enter the game folder.

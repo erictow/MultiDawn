@@ -14,7 +14,8 @@ param(
     [Parameter(Mandatory)] [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$')] [string] $Release,
     [string] $DllPath,
     [string] $OutputDirectory,
-    [string] $ReleaseNotesPath
+    [string] $ReleaseNotesPath,
+    [string] $LauncherPath
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -27,6 +28,19 @@ if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repo "build/releases/
 $output = [IO.Path]::GetFullPath($OutputDirectory).TrimEnd('\', '/')
 $zip = $output + '.zip'
 if ((Test-Path -LiteralPath $output) -or (Test-Path -LiteralPath $zip)) { throw "Output already exists: $output (or its ZIP). Choose a new release directory." }
+
+# The optional launcher stays beside the installer, outside the game payload.
+# Build it separately so the runtime publisher tool still builds no code.
+$launcher = $null
+$launcherHash = $null
+if ($LauncherPath) {
+    $launcher = Get-Item -LiteralPath $LauncherPath
+    if ($launcher.PSIsContainer -or ($launcher.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+        $launcher.VersionInfo.ProductName -cne 'MultiDawn Launcher' -or $launcher.VersionInfo.IsDebug) {
+        throw 'Use a Release MultiDawn Launcher EXE from tools/launcher/Build-Launcher.ps1.'
+    }
+    $launcherHash = (Get-FileHash -LiteralPath $launcher.FullName -Algorithm SHA256).Hash
+}
 
 # An explicit list separates release content from ignored local player state.
 $inputs = New-Object 'System.Collections.Generic.List[object]'
@@ -70,6 +84,15 @@ foreach ($name in @('Install-Dawn.ps1', 'Install-Dawn.cmd', 'Update-Dawn.ps1', '
 if ($ReleaseNotesPath) {
     Copy-Item -LiteralPath $ReleaseNotesPath -Destination (Join-Path $output 'RELEASE-NOTES.md')
 }
+if ($null -ne $launcher) {
+    $launcherDestination = Join-Path $output 'MultiDawn.Launcher.exe'
+    Copy-Item -LiteralPath $launcher.FullName -Destination $launcherDestination
+    if ((Get-FileHash -LiteralPath $launcherDestination -Algorithm SHA256).Hash -cne $launcherHash) {
+        throw 'Launcher input changed while packaging.'
+    }
+    Copy-Item -LiteralPath (Join-Path $repo 'Launch-MultiDawn.cmd') -Destination $output
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'release/READ-ME-MultiDawn.txt') -Destination $output
+}
 $manifest = [ordered]@{
     schema = 1; release = $Release; gameBuild = 86657; runtimeDirectory = 'Dawn';
     createdUtc = [DateTime]::UtcNow.ToString('o'); files = $files
@@ -88,5 +111,5 @@ try {
 } finally { $archive.Dispose() }
 Write-Host "Player ZIP: $zip"
 Write-Host "SHA256: $((Get-FileHash -LiteralPath $zip).Hash)"
-Write-Host 'Contains only the installer and runtime payload. Test this release on a separate game installation before publication.'
+Write-Host 'Contains the installer and runtime payload, plus the launcher when requested. Test this release on a separate game installation before publication.'
 return $zip

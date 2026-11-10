@@ -1,0 +1,44 @@
+name: Build and test MultiDawn launcher
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'tools/launcher/**'
+      - 'tools/install/New-MultiDawnLauncherRelease.ps1'
+      - 'tools/install/New-DawnRelease.ps1'
+      - 'tools/install/tests/launcher_release.tests.ps1'
+      - 'tools/install/release/READ-ME-MultiDawn.txt'
+      - 'Launch-MultiDawn.cmd'
+      - '.github/workflows/launcher.yml'
+  pull_request:
+    paths:
+      - 'tools/launcher/**'
+      - 'tools/install/**'
+      - 'Launch-MultiDawn.cmd'
+      - '.github/workflows/launcher.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  launcher:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test launcher
+        shell: powershell
+        run: ./tools/launcher/Build-Launcher.ps1 -RunTests
+      - name: Test release archives
+        shell: powershell
+        run: ./tools/install/tests/launcher_release.tests.ps1
+      - name: Package launcher preview
+        shell: powershell
+        run: ./tools/install/New-MultiDawnLauncherRelease.ps1 -Release "0.1.0-preview.${{ github.run_number }}"
+      - name: Upload portable launcher ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: MultiDawn-Launcher
+          path: build/releases/*.zip
+          if-no-files-found: error

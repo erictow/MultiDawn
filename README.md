@@ -22,6 +22,36 @@ Dawn adds authored Lua missions, native gameplay systems, and an in-game loadout
 The player release includes the DLL, mission scripts, default settings, vendor rules, and event
 presets together. The game itself is not included.
 
+## MultiDawn launcher preview
+
+This fork adds a portable Windows launcher with solo Play, a Multiplayer switch,
+and Host/Join pair codes. **Pairing currently connects the launchers only.
+Two-player gameplay, remote server handoff, in-game friends, and invites still
+require native runtime work. Multiplayer Play is disabled in this preview.**
+
+From this source checkout, double-click [`Launch-MultiDawn.cmd`](Launch-MultiDawn.cmd).
+It builds the launcher using Windows' .NET Framework compiler on the first run.
+Select your separate Dawn game installation to play solo. A packaged launcher
+ZIP includes the compiled EXE and needs no build tools.
+
+To build, test, and package a portable launcher ZIP for GitHub:
+
+```powershell
+.\tools\launcher\Build-Launcher.ps1 -RunTests
+.\tools\install\tests\launcher_release.tests.ps1
+.\tools\install\New-MultiDawnLauncherRelease.ps1 -Release '0.1.0-preview.1'
+```
+
+The ZIP is written under `build/releases/`. The **Build and test MultiDawn
+launcher** GitHub Actions workflow also builds a downloadable ZIP artifact.
+It does not publish a release automatically. To include the compiled launcher
+beside a complete Dawn installer, pass `-LauncherPath
+'build/launcher/MultiDawn.Launcher.exe'` to `New-DawnRelease.ps1`.
+
+Pairing requires reachable IPv4 addresses on a LAN or VPN. Codes do not provide
+NAT traversal or an internet relay. See the [launcher guide](tools/launcher/README.md)
+and the [runtime implementation requirements](docs/MULTIPLAYER-RUNTIME.md).
+
 ## Requirements
 
 - Windows with **Windows PowerShell 5.1 or newer**.

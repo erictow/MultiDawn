@@ -18,6 +18,8 @@
 *.exe
 *.dll
 *.obj
+*/expectedOutput
+/expectedOutput/
 # Pinned historical hotfix input, required by its reproducible package recipe.
 !/tools/one_au_hotfix/activity-script.obj
 *.pdb

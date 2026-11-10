@@ -1,0 +1,39 @@
+MULTIDAWN LAUNCHER PREVIEW
+
+Extract the entire ZIP, then open MultiDawn.Launcher.exe or Launch-MultiDawn.cmd.
+Choose your separate Dawn game folder, the folder containing destiny2.exe.
+Leave Multiplayer off and select Play for ordinary solo play.
+
+This launcher needs an existing Dawn installation for Destiny 2 build
+86657.20.08.23.1800.d2_rc. It does not include or download the game. Keep it
+separate from your current retail Destiny 2 installation.
+
+HOST AND JOIN
+
+Turn Multiplayer on to test the connection between two launchers. Both PCs
+must use the same launcher version and a reachable LAN or VPN connection.
+The host selects its LAN/VPN address and Host, then shares the displayed pair
+code privately with the guest. The guest enters that code and selects Join.
+Disconnect ends the connection. Allow the launcher through your firewall if
+Windows asks and you intend to accept that connection.
+
+The pair code contains the host's address and a temporary connection secret.
+Treat it as private. A code does not create an internet relay or open a router.
+Use a trusted LAN or encrypted VPN when testing across machines.
+
+CURRENT LIMIT
+
+Host and Join connect the launchers only. Two-player Destiny gameplay, the
+guest's remote game backend, in-game friends, party invites, and notifications
+are not implemented in this preview. Multiplayer Play is disabled. Pairing does
+not stop a running game or shut down its embedded server.
+
+No game files, saves, or Dawn settings are changed by the pairing controls.
+Use the Dawn installer/updater supplied with your game runtime separately.
+
+Windows with .NET Framework 4.8 is required. Current Windows installations
+normally include it. Players do not need Visual Studio or a source checkout.
+
+The accompanying launcher-release.json records SHA-256 hashes for the launcher
+bundle when packaged separately. Hashes detect changed files; obtain the ZIP
+from a publisher you trust.
