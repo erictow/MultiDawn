@@ -14,6 +14,7 @@
 #include "context/steam_context_state.h"
 #include "internal.h"
 #include "runtime.h"
+#include "social.h"
 
 namespace dawn::steam {
 namespace {
@@ -116,6 +117,7 @@ bool shutdown() noexcept {
 
     // Callback pointers are released only after Client hooks stop producing events.
     runtime::callbacks::clear();
+    social::reset();
     g_initialized.store(false, std::memory_order_release);
     g_mainActivationDone = false;
     g_mainActivationResult = false;

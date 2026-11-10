@@ -1,0 +1,68 @@
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Net;
+using System.Threading.Tasks;
+
+namespace MultiDawn.Launcher
+{
+    /** Runs the actual native companion implementation in disposable test workers, never a game. */
+    internal static class NativeCompanionTest
+    {
+        internal static string Run(string harness) { return RunAsync(Path.GetFullPath(harness)).GetAwaiter().GetResult(); }
+        private static async Task<string> RunAsync(string harness)
+        {
+            if (!File.Exists(harness)) throw new FileNotFoundException("Build the native companion_bridge_harness project first.", harness);
+            using (PairSession host = new PairSession())
+            using (PairSession guest = new PairSession())
+            {
+                await host.HostAsync(IPAddress.Loopback, 0).ConfigureAwait(false);
+                await guest.JoinAsync(host.Code).ConfigureAwait(false);
+                using (RuntimeBridge firstBridge = new RuntimeBridge(host, 0x0110000100001011UL, "Native test A"))
+                using (RuntimeBridge secondBridge = new RuntimeBridge(guest, 0x0110000100002022UL, "Native test B"))
+                {
+                    for (int i = 0; i < 170 && (firstBridge.PeerSteamId == 0 || secondBridge.PeerSteamId == 0); ++i)
+                        await Task.Delay(30).ConfigureAwait(false);
+                    if (firstBridge.PeerSteamId == 0 || secondBridge.PeerSteamId == 0) throw new IOException("Native test launchers failed to exchange identities.");
+                    Process first = null, second = null;
+                    try
+                    {
+                        first = Start(harness, "side-a", firstBridge);
+                        second = Start(harness, "side-b", secondBridge);
+                        Task<string> firstOut = first.StandardOutput.ReadToEndAsync(), firstError = first.StandardError.ReadToEndAsync();
+                        Task<string> secondOut = second.StandardOutput.ReadToEndAsync(), secondError = second.StandardError.ReadToEndAsync();
+                        bool[] completed = await Task.WhenAll(Task.Run(delegate { return first.WaitForExit(25000); }), Task.Run(delegate { return second.WaitForExit(25000); })).ConfigureAwait(false);
+                        if (!completed[0] || !completed[1]) throw new TimeoutException("Native companion test workers exceeded 25 seconds.");
+                        string output = "Native side A:" + Environment.NewLine + await firstOut.ConfigureAwait(false) + await firstError.ConfigureAwait(false)
+                            + "Native side B:" + Environment.NewLine + await secondOut.ConfigureAwait(false) + await secondError.ConfigureAwait(false);
+                        if (first.ExitCode != 0 || second.ExitCode != 0)
+                            throw new IOException("Native companion test worker failed (" + first.ExitCode + ", " + second.ExitCode + ")." + Environment.NewLine + output);
+                        await Task.Delay(250).ConfigureAwait(false);
+                        if (!host.IsPaired || !guest.IsPaired) throw new IOException("Native worker exit incorrectly terminated launcher pairing.");
+                        return output + "PASS: actual C++ companion framing, nonce authentication, identity publication, bidirectional invitations, and native exit cleanup." + Environment.NewLine
+                            + "No Destiny process or game DLL was started. No account or save was opened." + Environment.NewLine;
+                    }
+                    finally { Stop(first); Stop(second); }
+                }
+            }
+        }
+        private static Process Start(string harness, string side, RuntimeBridge bridge)
+        {
+            ProcessStartInfo start = new ProcessStartInfo(harness, side);
+            start.WorkingDirectory = Path.GetDirectoryName(harness);
+            start.UseShellExecute = false;
+            start.CreateNoWindow = true;
+            start.RedirectStandardOutput = start.RedirectStandardError = true;
+            bridge.ApplyEnvironment(start);
+            Process process = Process.Start(start);
+            if (process == null) throw new IOException("Native companion test worker did not start.");
+            return process;
+        }
+        private static void Stop(Process worker)
+        {
+            if (worker == null) return;
+            try { if (!worker.HasExited) { worker.Kill(); worker.WaitForExit(5000); } }
+            finally { worker.Dispose(); }
+        }
+    }
+}

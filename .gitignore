@@ -1,4 +1,6 @@
 # Game installation and downloaded content
+# Match the game folder even if it is moved out of expectedOutput.
+Destiny 2 Dawn/
 /packages/
 /bin/
 /fonts/
@@ -18,7 +20,6 @@
 *.exe
 *.dll
 *.obj
-*/expectedOutput
 /expectedOutput/
 # Pinned historical hotfix input, required by its reproducible package recipe.
 !/tools/one_au_hotfix/activity-script.obj

@@ -42,6 +42,19 @@ namespace dawn::server::gameplay::group {
                                       std::uint64_t sessionId) noexcept;
 
 /**
+ * Authorizes one actual human in an existing group, before its native join request.
+ * This is an internal authenticated-runtime boundary, never a packet-level admission hook.
+ * Both local and remote humans must be registered with distinct stable machine/player IDs.
+ * At most two humans may share a group. No session id or identity is synthesized here.
+ * Identity slots survive endpoint disconnects until group runtime reset. A missing
+ * lower member slot pauses publication; the recovered codec cannot encode holes.
+ */
+[[nodiscard]] bool authorize_shared_peer(std::uint64_t sessionId,
+                                        const state::gameplay::Endpoint& endpoint,
+                                        std::uint64_t machineId,
+                                        std::uint64_t initialPlayerId) noexcept;
+
+/**
  * Reports one region's activity host session, allocating it on first use.
  * One id per region, because the peer routes every activity push by it alone. The id must not
  * change while the region keeps its slot, or the peer errors `public_activity_host_mismatch`.
@@ -94,6 +107,11 @@ struct AdmittedRow {
     bool hasPlayer{};
     /** Set once a snapshot naming the peer's player is on that channel. */
     bool playerPublished{};
+    std::uint64_t machineId{};
+    std::uint64_t playerId{};
+    bool sharedAuthorized{};
+    /** Stable global player slot; 2 means this row is not a shared human. */
+    std::uint32_t sharedPlayerSlot{2};
 };
 
 /** Copies every admitted group-session record. @param count Receives the copied row count. */
@@ -115,6 +133,9 @@ void service(std::uint64_t now) noexcept;
  */
 [[nodiscard]] bool publish_join_parameters(std::uint64_t sessionId) noexcept;
 
+[[nodiscard]] bool publish_join_parameters(const state::gameplay::Endpoint& endpoint,
+                                          std::uint64_t sessionId) noexcept;
+
 /**
  * Reports whether replication may produce entity output for one peer.
  * View establishment is a hard gate: a mismatched signature means no entity output at all.
@@ -122,6 +143,9 @@ void service(std::uint64_t now) noexcept;
  * @return True only once a compatible view is bound.
  */
 [[nodiscard]] bool view_accepted(std::uint64_t sessionId) noexcept;
+
+[[nodiscard]] bool view_accepted(const state::gameplay::Endpoint& endpoint,
+                                std::uint64_t sessionId) noexcept;
 
 /**
  * Frees every admitted record at one endpoint.

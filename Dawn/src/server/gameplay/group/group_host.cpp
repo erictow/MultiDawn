@@ -23,6 +23,8 @@
 #include "../gameplay_log.h"
 #include "../peer/peer_transport.h"
 #include "group_host_sessions.h"
+#include "shared_membership.h"
+#include "../../../steam/runtime/social.h"
 
 namespace dawn::server::gameplay::group {
 
@@ -52,8 +54,8 @@ constexpr std::size_t kPeerMemberIndex = 1;
 constexpr std::size_t kSnapshotMemberCount = 2;
 /** Registry index the join-latch update names. Any of the 25 would do; none is ever filled. */
 constexpr std::uint8_t kJoinLatchParameter = 0;
-/** Peers this host tracks at once. The public POC admits one. */
-constexpr std::size_t kAdmittedCapacity = 4;
+/** Two humans each retain current/target regions and may stage one replacement before eviction. */
+constexpr std::size_t kAdmittedCapacity = 6;
 /** Loopback address the BAP listener binds, in host order. */
 constexpr std::uint32_t kLoopbackAddress = 0x7F000001;
 /** Every member index the `activity-host` parameter covers. The peer needs its own bit set. */
@@ -85,6 +87,14 @@ struct Admitted {
     std::uint64_t playerId{};
     /** Group-session id the peer named in its join request, which its parameters must echo. */
     std::uint64_t sessionId{};
+    /** Populated only by the authenticated shared-session boundary. */
+    std::uint64_t machineId{};
+    std::uint64_t initialPlayerId{};
+    std::uint64_t joinOrder{};
+    std::uint32_t playerAddSequence{};
+    std::uint32_t sharedPlayerSlot{kInvalidSharedHumanSlot};
+    bool sharedAuthorized{};
+    bool membershipDirty{};
     bool occupied{};
     bool hasPlayer{};
     /** Set once the initial ready-state membership for this exact join attempt was queued. */
@@ -151,19 +161,22 @@ SRWLOCK g_admittedLock{SRWLOCK_INIT};
 /** Admitted peers. A join claims a slot and a leave never reclaims one in this POC. */
 std::array<Admitted, kAdmittedCapacity> g_admitted{};
 
-/** Reads one raw little-endian scalar from an opaque native identity block. */
+/** Endpoint authorization is transient; slot identity survives disconnect/rejoin. */
+struct SharedGroupSlots {
+    std::uint64_t sessionId{};
+    SharedSlotAssignments assignments{};
+};
+// Bounded independently of live endpoint slots. A full table refuses a new shared
+// group; reset clears these reservations together with the held host sessions.
+std::array<SharedGroupSlots, kHostRecordRetirementCapacity> g_sharedGroupSlots{};
+
+/** Reports presence without exposing security material in gameplay logs. */
 template <std::size_t Size>
-[[nodiscard]] std::uint64_t identity_word(const std::array<std::byte, Size>& bytes,
-                                          std::size_t offset,
-                                          std::size_t width = sizeof(std::uint64_t)) noexcept {
-    if (offset >= Size || width > sizeof(std::uint64_t) || offset + width > Size) {
-        return 0;
+[[nodiscard]] bool identity_present(const std::array<std::byte, Size>& bytes) noexcept {
+    for (const auto value : bytes) {
+        if (value != std::byte{}) { return true; }
     }
-    std::uint64_t value = 0;
-    for (std::size_t index = 0; index < width; ++index) {
-        value |= std::to_integer<std::uint64_t>(bytes[offset + index]) << (index * 8U);
-    }
-    return value;
+    return false;
 }
 
 /** Member state this host publishes for every member carrying the join id. */
@@ -187,7 +200,8 @@ static_assert(kJoinMemberState == wire::MemberState::ready,
  * @return True when the message was queued.
  */
 template <typename Body>
-[[nodiscard]] bool send_reliable(std::uint64_t sessionId,
+[[nodiscard]] bool send_reliable(const state::gameplay::Endpoint& to,
+                                 std::uint64_t sessionId,
                                  std::uint8_t id,
                                  std::uint32_t declaredSize,
                                  Body write) noexcept {
@@ -206,7 +220,7 @@ template <typename Body>
         return false;
     }
     const bool queued = peer::enqueue_reliable(
-        sessionId, id, declaredSize, {body.data(), size}, writer.bit_count());
+        to, sessionId, id, declaredSize, {body.data(), size}, writer.bit_count());
     if (!queued) {
         report(core::log::Level::debug,
                "ev=gameplay stage=reliable_enqueue result=deferred session=0x%016llX id=%u "
@@ -227,19 +241,29 @@ template <typename Body>
  * @return Record for that session, or null when the table is full.
  */
 [[nodiscard]] Admitted* claim(const state::gameplay::Endpoint& peer,
-                              std::uint64_t sessionId) noexcept {
+                              std::uint64_t sessionId,
+                              bool authorizing = false) noexcept {
     if (sessionId == 0) {
         return nullptr;
     }
-    // Keyed by session, not endpoint: one client holds a record per public region and both records
-    // name the same endpoint.
+    // Each human has its own native link, while both can name the same actual group session.
     const std::uint64_t use = g_admitClock.fetch_add(1) + 1;
+    bool sharedGroup = false;
+    for (const auto& slots : g_sharedGroupSlots) {
+        sharedGroup = sharedGroup || slots.sessionId == sessionId;
+    }
+    for (const auto& entry : g_admitted) {
+        sharedGroup = sharedGroup || (entry.occupied && entry.sessionId == sessionId && entry.sharedAuthorized);
+    }
     for (Admitted& entry : g_admitted) {
-        if (entry.occupied && entry.sessionId == sessionId) {
+        if (entry.occupied && entry.sessionId == sessionId
+            && entry.endpoint.address == peer.address && entry.endpoint.port == peer.port) {
+            if (sharedGroup && !authorizing && !entry.sharedAuthorized) { return nullptr; }
             entry.lastUse = use;
             return &entry;
         }
     }
+    if (sharedGroup && !authorizing) { return nullptr; }
     for (Admitted& entry : g_admitted) {
         if (!entry.occupied) {
             entry.occupied = true;
@@ -252,6 +276,78 @@ template <typename Body>
     return nullptr;
 }
 
+/** The caller holds the admitted lock. Every recipient gets its own reliable publication. */
+void dirty_shared_membership(std::uint64_t sessionId) noexcept {
+    for (auto& entry : g_admitted) {
+        if (entry.occupied && entry.sharedAuthorized && entry.sessionId == sessionId) {
+            entry.membershipDirty = true;
+        }
+    }
+}
+
+/** Builds a shared update only from explicitly authorized humans and captured native data. */
+[[nodiscard]] bool publish_shared_snapshot(const Admitted& record) noexcept {
+    std::array<SharedHuman, 2> humans{};
+    std::size_t count = 0;
+    const Admitted* joining = nullptr;
+    for (const auto& held : g_admitted) {
+        if (!held.occupied || !held.sharedAuthorized || held.sessionId != record.sessionId) { continue; }
+        const auto& entry = held.endpoint.address == record.endpoint.address
+            && held.endpoint.port == record.endpoint.port ? record : held;
+        if (entry.joinId == 0) { continue; }
+        if (count == humans.size()) { return false; }
+        auto& human = humans[count++];
+        human.endpoint = entry.endpoint;
+        human.machineId = entry.machineId;
+        human.joinId = entry.joinId;
+        human.playerId = entry.playerId;
+        human.addSequence = entry.playerAddSequence;
+        human.slot = entry.sharedPlayerSlot;
+        human.hasPlayer = entry.hasPlayer;
+        human.established = entry.joinComplete;
+        if (!peer::remote_address(entry.endpoint, entry.sessionId, human.address)) {
+            // Never fabricate the peer's own native identity blob in the shared path.
+            return false;
+        }
+        if (joining == nullptr || (!entry.joinComplete && joining->joinComplete)
+            || (entry.joinComplete == joining->joinComplete && entry.joinOrder > joining->joinOrder)) {
+            joining = &entry;
+        }
+    }
+    if (joining == nullptr) { return false; }
+    std::uint32_t slots = 0;
+    for (const auto& human : std::span(humans).first(count)) {
+        if (human.slot >= kSharedHumanCapacity) { return false; }
+        slots |= 1U << human.slot;
+    }
+    if (slots != (1U << count) - 1U) {
+        report(core::log::Level::debug,
+            "ev=gameplay stage=shared_membership result=deferred reason=member_slot_gap session=0x%016llX",
+            static_cast<unsigned long long>(record.sessionId));
+        return false;
+    }
+    std::array<std::byte, descriptor::kNetAddrSize> hostAddress{};
+    const auto host = endpoint::advertised();
+    descriptor::write_net_addr(host.address, host.port, hostAddress);
+    SharedMembershipSnapshot snapshot{};
+    if (!build_shared_membership(record.sessionId, hostAddress, joining->joinId,
+                                  g_membershipRevision.fetch_add(1) + 1,
+                                  std::span(humans).first(count), snapshot)) { return false; }
+    std::array<std::byte, 1024> body{};
+    bits::Writer writer(body);
+    std::size_t size = 0;
+    const auto update = snapshot.update();
+    if (!wire::write_membership_update(writer, update) || !writer.finish(size)) { return false; }
+    const bool queued = peer::enqueue_reliable(record.endpoint, record.sessionId,
+        static_cast<std::uint8_t>(wire::SessionMessageId::membershipUpdate),
+        wire::kMembershipUpdateSize, std::span(body).first(size), writer.bit_count());
+    report(queued ? core::log::Level::info : core::log::Level::debug,
+        "ev=gameplay stage=shared_membership result=%s session=0x%016llX humans=%zu players=%zu revision=%u",
+        queued ? "queued" : "deferred", static_cast<unsigned long long>(record.sessionId),
+        count, update.players.size(), update.revision);
+    return queued;
+}
+
 /**
  * Publishes one snapshot naming this host, one admitted peer, and that peer's player if it has
  * one. The caller holds the admitted lock.
@@ -259,6 +355,15 @@ template <typename Body>
  * @return True when the snapshot was queued on the peer's reliable channel.
  */
 [[nodiscard]] bool publish_snapshot(const Admitted& record) noexcept {
+    if (record.sharedAuthorized) { return publish_shared_snapshot(record); }
+    for (const auto& slots : g_sharedGroupSlots) {
+        if (slots.sessionId == record.sessionId) { return false; }
+    }
+    for (const auto& entry : g_admitted) {
+        if (entry.occupied && entry.sharedAuthorized && entry.sessionId == record.sessionId) {
+            return false;
+        }
+    }
     const state::activity::ActivityInstanceKey activity = held_host_activity(record.sessionId);
     state::activity::ActivityInstanceKey identityActivity = activity;
     std::uint64_t peerMachineId = state::activity::membership::member_key(identityActivity);
@@ -286,7 +391,7 @@ template <typename Body>
     members[kHostMemberIndex].machineId = record.sessionId;
     // The consumer refuses a table with no entry it recognises as itself, so the peer's own blob is
     // echoed. A blob rebuilt from the endpoint it arrived from is not the same bytes.
-    if (!peer::remote_address(record.sessionId, members[kPeerMemberIndex].address)) {
+    if (!peer::remote_address(record.endpoint, record.sessionId, members[kPeerMemberIndex].address)) {
         descriptor::write_net_addr(
             record.endpoint.address, record.endpoint.port, members[kPeerMemberIndex].address);
     }
@@ -313,7 +418,7 @@ template <typename Body>
     players[0].slot = kPeerPlayerSlot;
     players[0].playerId = record.playerId;
     players[0].memberIndex = static_cast<std::uint32_t>(kPeerMemberIndex);
-    players[0].addSequence = kFirstAddSequence;
+    players[0].addSequence = record.playerAddSequence;
     if (record.hasPlayer) {
         members[kPeerMemberIndex].ownsPlayerSlot = true;
         members[kPeerMemberIndex].playerSlot = kPeerPlayerSlot;
@@ -350,7 +455,7 @@ template <typename Body>
            static_cast<unsigned long long>(record.playerId),
            record.hasPlayer ? "steam_local" : "none");
     return peer::enqueue_reliable(
-        record.sessionId,
+        record.endpoint, record.sessionId,
         static_cast<std::uint8_t>(wire::SessionMessageId::membershipUpdate),
         wire::kMembershipUpdateSize,
         {body.data(), size},
@@ -403,7 +508,7 @@ void fill_activity_host(wire::ActivityHostParameter& body, std::uint64_t groupSe
     fill_activity_host(update.activityHost, parameterSessionId);
 
     const bool sent = send_reliable(
-        record.sessionId,
+        record.endpoint, record.sessionId,
         wire::kParameterUpdateId,
         wire::kParameterUpdateSize,
         [&update](bits::Writer& writer) { return wire::write_parameter_update(writer, update); });
@@ -457,6 +562,9 @@ void fill_activity_host(wire::ActivityHostParameter& body, std::uint64_t groupSe
     state::activity::ActivityInstanceKey identityActivity =
         held_host_activity(record.sessionId);
     machineId = state::activity::membership::member_key(identityActivity);
+    if (record.sharedAuthorized) {
+        machineId = record.machineId;
+    }
     if (machineId == 0) {
         identityActivity = state::activity::newest_joined_activity();
         machineId = state::activity::membership::member_key(identityActivity);
@@ -465,7 +573,7 @@ void fill_activity_host(wire::ActivityHostParameter& body, std::uint64_t groupSe
     if (machineId == 0) {
         return false;
     }
-    if (!peer::remote_address(record.sessionId, address)) {
+    if (!peer::remote_address(record.endpoint, record.sessionId, address)) {
         descriptor::write_net_addr(record.endpoint.address, record.endpoint.port, address);
     }
     return true;
@@ -518,7 +626,7 @@ void resolve_host_member(const Admitted& record,
     }
 
     const bool sent = send_reliable(
-        record.sessionId,
+        record.endpoint, record.sessionId,
         static_cast<std::uint8_t>(wire::SessionMessageId::hostHandoff),
         wire::kHostHandoffSize,
         [&body](bits::Writer& writer) noexcept { return wire::write_host_handoff(writer, body); });
@@ -546,7 +654,7 @@ void resolve_host_member(const Admitted& record,
     wire::HostTransition body{};
     body.sessionId = record.sessionId;
     const bool sent = send_reliable(
-        record.sessionId,
+        record.endpoint, record.sessionId,
         static_cast<std::uint8_t>(wire::SessionMessageId::hostTransition),
         wire::kHostTransitionSize,
         [&body](bits::Writer& writer) noexcept {
@@ -594,7 +702,7 @@ void resolve_host_member(const Admitted& record,
     }
 
     const bool sent = send_reliable(
-        record.sessionId,
+        record.endpoint, record.sessionId,
         static_cast<std::uint8_t>(wire::SessionMessageId::hostReestablish),
         wire::kHostReestablishSize,
         [&body](bits::Writer& writer) noexcept {
@@ -632,7 +740,8 @@ void resolve_host_member(const Admitted& record,
  * @param sessionId Group session the link carries.
  * @param view Decoded view body.
  */
-void bind_view(std::uint64_t sessionId, const wire::ViewEstablishment& view) noexcept {
+void bind_view(const state::gameplay::Endpoint& from,
+               std::uint64_t sessionId, const wire::ViewEstablishment& view) noexcept {
     state::gameplay::ViewSignature signature{};
     signature.token = view.sessionToken;
     signature.kind = view.kind;
@@ -640,19 +749,21 @@ void bind_view(std::uint64_t sessionId, const wire::ViewEstablishment& view) noe
     signature.hasList = view.hasList;
     signature.list = view.list;
     signature.bound = true;
-    peer::bind_view(sessionId, signature);
-
     const bool sent = send_reliable(
-        sessionId,
+        from, sessionId,
         wire::kViewMessageId,
         wire::kViewMessageSize,
         [&view](bits::Writer& writer) noexcept { return wire::write_view(writer, view); });
+    if (sent) { peer::bind_view(from, sessionId, signature); }
     report(sent ? core::log::Level::info : core::log::Level::warn,
-           "ev=gameplay stage=view result=%s kind=%u token=0x%llX list=%u",
+           "ev=gameplay stage=view result=%s kind=%u token=0x%llX list=%u "
+           "group=0x%016llX endpoint=0x%08X:%u reason=%s",
            sent ? "bound" : "fail",
            static_cast<unsigned>(view.kind),
            static_cast<unsigned long long>(view.sessionToken),
-           static_cast<unsigned>(view.listCount));
+           static_cast<unsigned>(view.listCount),
+           static_cast<unsigned long long>(sessionId), from.address, static_cast<unsigned>(from.port),
+           sent ? "echo_queued" : sessionId == 0 ? "unresolved_group" : "enqueue_refused");
 }
 
 /**
@@ -662,7 +773,8 @@ void bind_view(std::uint64_t sessionId, const wire::ViewEstablishment& view) noe
  * @param sessionId Session the request named, which is also the link it goes back on.
  * @param requested Requested parameter mask, already reduced to its meaningful bits.
  */
-void answer_parameters(std::uint64_t sessionId, std::uint64_t requested) noexcept {
+void answer_parameters(const state::gameplay::Endpoint& from,
+                       std::uint64_t sessionId, std::uint64_t requested) noexcept {
     std::uint64_t carried = requested & wire::kEncodableParameters;
     const std::uint64_t activityHostBit =
         std::uint64_t{1} << static_cast<std::uint8_t>(wire::Parameter::activityHost);
@@ -690,7 +802,7 @@ void answer_parameters(std::uint64_t sessionId, std::uint64_t requested) noexcep
     fill_activity_host(update.activityHost, sessionId);
 
     const bool sent = send_reliable(
-        sessionId,
+        from, sessionId,
         wire::kParameterUpdateId,
         wire::kParameterUpdateSize,
         [&update](bits::Writer& writer) { return wire::write_parameter_update(writer, update); });
@@ -725,16 +837,18 @@ void answer_time(const state::gameplay::Endpoint& from,
  * A leave names one region's session, and the client's other region must keep its own link.
  * @param sessionId Session the peer is leaving.
  */
-void release(std::uint64_t sessionId) noexcept {
-    peer::drop(sessionId);
+void release(const state::gameplay::Endpoint& from, std::uint64_t sessionId) noexcept {
+    peer::drop(from, sessionId);
     // The region's activity host stays. A leave is also how the peer fast travels to the region it
     // is already in, and a fresh id there is `public_activity_host_mismatch`.
     AcquireSRWLockExclusive(&g_admittedLock);
     for (Admitted& entry : g_admitted) {
-        if (entry.occupied && entry.sessionId == sessionId) {
+        if (entry.occupied && entry.sessionId == sessionId
+            && entry.endpoint.address == from.address && entry.endpoint.port == from.port) {
             entry = {};
         }
     }
+    dirty_shared_membership(sessionId);
     ReleaseSRWLockExclusive(&g_admittedLock);
 }
 
@@ -747,8 +861,10 @@ void release_endpoint(const state::gameplay::Endpoint& endpoint) noexcept {
     for (Admitted& entry : g_admitted) {
         if (entry.occupied && entry.endpoint.address == endpoint.address
             && entry.endpoint.port == endpoint.port) {
+            const auto sharedSession = entry.sharedAuthorized ? entry.sessionId : 0;
             ++count;
             entry = {};
+            if (sharedSession != 0) { dirty_shared_membership(sharedSession); }
         }
     }
     ReleaseSRWLockExclusive(&g_admittedLock);
@@ -780,7 +896,7 @@ bool consume(const state::gameplay::Endpoint& from,
         if (!wire::read_view(reader, view)) {
             return false;
         }
-        bind_view(sessionId, view);
+        bind_view(from, sessionId, view);
         return true;
     }
     if (id == static_cast<std::uint8_t>(wire::SessionMessageId::leaveSession)) {
@@ -799,7 +915,7 @@ bool consume(const state::gameplay::Endpoint& from,
                "ev=gameplay stage=leave result=%s session=0x%016llX",
                sent ? "acknowledged" : "fail",
                static_cast<unsigned long long>(leaving));
-        release(leaving);
+        release(from, leaving);
         return true;
     }
     if (id == static_cast<std::uint8_t>(wire::SessionMessageId::peerEstablish)) {
@@ -950,18 +1066,14 @@ bool consume(const state::gameplay::Endpoint& from,
         report(core::log::Level::info,
                "ev=gameplay stage=host_reestablish_capture result=%s session=0x%016llX "
                "machine=0x%016llX identity_nonzero=%u "
-               "identity128=0x%016llX,0x%016llX "
-               "identity144=0x%016llX,0x%016llX,0x%04llX "
+               "identity128_present=%u identity144_present=%u "
                "address_method=%u",
                retained ? "retained" : record == nullptr ? "missing_session" : "empty_identity",
                static_cast<unsigned long long>(body.sessionId),
                static_cast<unsigned long long>(body.machineId),
                static_cast<unsigned>(identityNonzero ? 1U : 0U),
-               static_cast<unsigned long long>(identity_word(body.identity128, 0)),
-               static_cast<unsigned long long>(identity_word(body.identity128, 8)),
-               static_cast<unsigned long long>(identity_word(body.identity144, 0)),
-               static_cast<unsigned long long>(identity_word(body.identity144, 8)),
-               static_cast<unsigned long long>(identity_word(body.identity144, 16, 2)),
+               static_cast<unsigned>(identity_present(body.identity128)),
+               static_cast<unsigned>(identity_present(body.identity144)),
                static_cast<unsigned>(body.address[descriptor::kNetAddrSize - 1]));
         return true;
     }
@@ -978,7 +1090,14 @@ bool consume(const state::gameplay::Endpoint& from,
         bool queued = false;
         const bool owed = record != nullptr && !record->joinPublished;
         if (record != nullptr) {
+            if (record->sharedAuthorized && record->machineId != body.machineId) {
+                ReleaseSRWLockExclusive(&g_admittedLock);
+                report(core::log::Level::warn,
+                    "ev=gameplay stage=shared_membership result=rejected reason=machine_identity");
+                return true;
+            }
             record->joinComplete = true;
+            if (record->sharedAuthorized) { dirty_shared_membership(record->sessionId); }
             // A pre-establishment player remove is the first half of the managed-session handoff
             // from the seeded platform row to the player's native id. The peer must first receive
             // that removal before it sends player-add. Hold the promotion until that add arrives,
@@ -1017,7 +1136,7 @@ bool consume(const state::gameplay::Endpoint& from,
         report(core::log::Level::info,
                "ev=gameplay stage=join result=abort session=0x%016llX",
                static_cast<unsigned long long>(notice.sessionId));
-        release(notice.sessionId);
+        release(from, notice.sessionId);
         return true;
     }
     if (id == wire::kParameterRequestId) {
@@ -1034,7 +1153,7 @@ bool consume(const state::gameplay::Endpoint& from,
                static_cast<unsigned>(mask),
                static_cast<unsigned>(header.modeFlag ? 1U : 0U),
                wire::parameter_names(mask, names.data(), names.size()));
-        answer_parameters(header.sessionId, mask);
+        answer_parameters(from, header.sessionId, mask);
         return false;
     }
     if (id == wire::kPeerPropertiesId) {
@@ -1063,12 +1182,29 @@ bool consume(const state::gameplay::Endpoint& from,
         bool published = false;
         bool held = false;
         if (record != nullptr) {
-            const bool samePlayer = record->hasPlayer && record->playerId == request.playerId;
+            bool duplicateIdentity = request.playerId == 0;
+            if (record->sharedAuthorized) {
+                for (const auto& other : g_admitted) {
+                    if (&other != record && other.occupied && other.sharedAuthorized
+                        && other.sessionId == record->sessionId && other.hasPlayer
+                        && other.playerId == request.playerId) { duplicateIdentity = true; }
+                }
+            }
+            if (duplicateIdentity) {
+                ReleaseSRWLockExclusive(&g_admittedLock);
+                report(core::log::Level::warn,
+                    "ev=gameplay stage=player result=rejected reason=duplicate_or_empty_identity");
+                return false;
+            }
+            const bool samePlayer = record->hasPlayer && record->playerId == request.playerId
+                && record->playerAddSequence == request.sequence;
             held = samePlayer && record->playerPublished;
             if (!held) {
                 record->hasPlayer = true;
                 record->playerId = request.playerId;
+                record->playerAddSequence = request.sequence;
                 record->playerReplacementPending = false;
+                if (record->sharedAuthorized) { dirty_shared_membership(record->sessionId); }
                 published = publish_snapshot(*record);
                 // The queue is at its fullest here, right after the join promotion, so a refusal
                 // is ordinary and the service slice retries it. A duplicate request must not
@@ -1106,7 +1242,10 @@ bool consume(const state::gameplay::Endpoint& from,
         Admitted* const record = claim(from, request.sessionId);
         bool published = false;
         bool held = false;
-        bool supported = request.playerIndex == kPeerPlayerSlot;
+        // This request indexes the sender's LOCAL-player array, not the global
+        // membership player table. Each human owns local index 0 even when its
+        // stable global player slot is 1.
+        const bool supported = request.playerIndex == kPeerPlayerSlot;
         if (record != nullptr && supported) {
             held = !record->hasPlayer;
             if (!held) {
@@ -1125,6 +1264,7 @@ bool consume(const state::gameplay::Endpoint& from,
                     // During the join the client immediately replaces the seeded platform row.
                     // Outside that handoff, a removal is final and needs no withheld promotion.
                     record->playerReplacementPending = !record->joinComplete;
+                    if (record->sharedAuthorized) { dirty_shared_membership(record->sessionId); }
                 }
             }
         }
@@ -1162,8 +1302,10 @@ bool publish_membership(const state::gameplay::Endpoint& peer,
             // snapshot must still name a player: that remove/add handoff starts only after the
             // peer has accepted membership.
             record->joinId = peerJoinId;
+            record->joinOrder = g_admitClock.fetch_add(1) + 1;
             record->sessionId = sessionId;
-            record->playerId = steam::kLocalSteamId;
+            record->playerId = record->sharedAuthorized ? record->initialPlayerId : steam::social::local_steam_id();
+            record->playerAddSequence = kFirstAddSequence;
             record->hasPlayer = record->playerId != 0;
             record->initialMembershipPublished = false;
             record->initialParametersPublished = false;
@@ -1185,6 +1327,7 @@ bool publish_membership(const state::gameplay::Endpoint& peer,
             record->playerPublished = false;
             record->playerReplacementPending = false;
             record->lastRetry = 0;
+            if (record->sharedAuthorized) { dirty_shared_membership(record->sessionId); }
         }
         held = record->initialMembershipPublished;
         if (!held) {
@@ -1203,6 +1346,74 @@ bool publish_membership(const state::gameplay::Endpoint& peer,
     return published || held;
 }
 
+bool authorize_shared_peer(std::uint64_t sessionId,
+                            const state::gameplay::Endpoint& endpoint,
+                            std::uint64_t machineId,
+                            std::uint64_t initialPlayerId) noexcept {
+    if (sessionId == 0 || machineId == 0 || machineId == sessionId || initialPlayerId == 0
+        || endpoint.address == 0 || endpoint.port == 0
+        || !static_cast<bool>(held_host_activity(sessionId))) { return false; }
+    AcquireSRWLockExclusive(&g_admittedLock);
+    std::size_t humans = 0;
+    const Admitted* existing = nullptr;
+    for (const auto& entry : g_admitted) {
+        if (entry.occupied && entry.sessionId == sessionId
+            && entry.endpoint.address == endpoint.address && entry.endpoint.port == endpoint.port) {
+            existing = &entry;
+            break;
+        }
+    }
+    for (const auto& entry : g_admitted) {
+        if (!entry.occupied || !entry.sharedAuthorized || entry.sessionId != sessionId) { continue; }
+        const bool sameEndpoint = entry.endpoint.address == endpoint.address && entry.endpoint.port == endpoint.port;
+        if (sameEndpoint) {
+            // Idempotent registration is allowed, but a live identity cannot be reassigned.
+            const bool same = entry.machineId == machineId && entry.initialPlayerId == initialPlayerId;
+            ReleaseSRWLockExclusive(&g_admittedLock);
+            return same;
+        }
+        if (entry.machineId == machineId || entry.initialPlayerId == initialPlayerId
+            || (entry.hasPlayer && entry.playerId == initialPlayerId)
+            || (existing != nullptr && existing->hasPlayer && entry.hasPlayer
+                && existing->playerId == entry.playerId)) {
+            ReleaseSRWLockExclusive(&g_admittedLock);
+            return false;
+        }
+        ++humans;
+    }
+    SharedGroupSlots* slots = nullptr;
+    SharedGroupSlots* freeSlots = nullptr;
+    for (auto& held : g_sharedGroupSlots) {
+        if (held.sessionId == sessionId) { slots = &held; break; }
+        if (held.sessionId == 0 && freeSlots == nullptr) { freeSlots = &held; }
+    }
+    if (slots == nullptr) { slots = freeSlots; }
+    auto assignments = slots == nullptr ? SharedSlotAssignments{} : slots->assignments;
+    std::uint32_t slot = kInvalidSharedHumanSlot;
+    const bool assigned = slots != nullptr && assignments.reserve(machineId, initialPlayerId, slot);
+    // A previously published solo member is already member 1/player 0. Converting
+    // it to a different slot would silently reassign native ownership.
+    const bool stableUpgrade = existing == nullptr || !existing->initialMembershipPublished || slot == 0;
+    Admitted* record = humans < 2 && assigned && stableUpgrade ? claim(endpoint, sessionId, true) : nullptr;
+    if (record != nullptr) {
+        slots->sessionId = sessionId;
+        slots->assignments = assignments;
+        record->sharedAuthorized = true;
+        record->machineId = machineId;
+        record->initialPlayerId = initialPlayerId;
+        record->sharedPlayerSlot = slot;
+        dirty_shared_membership(sessionId);
+    }
+    ReleaseSRWLockExclusive(&g_admittedLock);
+    if (record == nullptr) {
+        report(core::log::Level::warn,
+            "ev=gameplay stage=shared_authorization result=rejected reason=%s",
+            slots == nullptr ? "slot_registry_full" : !assigned ? "slot_identity_conflict"
+            : !stableUpgrade ? "live_member_slot_change" : "endpoint_capacity");
+    }
+    return record != nullptr;
+}
+
 /** Retries any publish a full reliable queue refused. */
 void service(std::uint64_t now) noexcept {
     // Outside any staged push, so the state revision it advances cannot fail a transaction guard.
@@ -1210,6 +1421,7 @@ void service(std::uint64_t now) noexcept {
     // The peer drops a stale target locally and sends no leave for it. Such a record shows up
     // only as the least recently named one over the capacity.
     std::uint64_t retired = 0;
+    state::gameplay::Endpoint retiredEndpoint{};
     AcquireSRWLockExclusive(&g_admittedLock);
     std::size_t occupied = 0;
     Admitted* oldest = nullptr;
@@ -1218,15 +1430,30 @@ void service(std::uint64_t now) noexcept {
             continue;
         }
         ++occupied;
-        if (oldest == nullptr || record.lastUse < oldest->lastUse) {
+        std::size_t endpointSessions = 0;
+        for (const auto& other : g_admitted) {
+            if (other.occupied && other.endpoint.address == record.endpoint.address
+                && other.endpoint.port == record.endpoint.port) { ++endpointSessions; }
+        }
+        if (endpointSessions > kPublicSessionCapacity
+            && (oldest == nullptr || record.lastUse < oldest->lastUse)) {
             oldest = &record;
         }
     }
-    if (occupied > kPublicSessionCapacity && oldest != nullptr) {
+    if (oldest != nullptr) {
         retired = oldest->sessionId;
+        retiredEndpoint = oldest->endpoint;
         *oldest = {};
+        dirty_shared_membership(retired);
     }
     for (Admitted& record : g_admitted) {
+        if (record.occupied && record.sharedAuthorized && record.membershipDirty
+            && record.initialMembershipPublished
+            && now - record.lastRetry >= kRetryInterval) {
+            record.lastRetry = now;
+            record.membershipDirty = !publish_snapshot(record);
+            continue;
+        }
         const bool owed =
             record.occupied
             && ((record.joinComplete && !record.joinPublished
@@ -1237,7 +1464,8 @@ void service(std::uint64_t now) noexcept {
                     < record.peerReestablishGeneration)
                 || (record.migratedSessionId != 0
                     && !record.migratedActivityHostPublished)
-                || (state::activity::forced::mission_host_reestablishment_enabled()
+                || (!record.sharedAuthorized
+                    && state::activity::forced::mission_host_reestablishment_enabled()
                     && record.activityHostPublished
                     && record.activityHostPublishedAt != 0
                     && ((!record.initialHostReestablishPublished
@@ -1309,7 +1537,7 @@ void service(std::uint64_t now) noexcept {
     // Outside the lock, in the order `release` already uses. The region's activity host stays: the
     // peer rotates back into a region it has not left, and a fresh id there is a hard error.
     if (retired != 0) {
-        peer::drop(retired);
+        peer::drop(retiredEndpoint, retired);
         report(core::log::Level::info,
                "ev=gameplay stage=admitted result=retired session=0x%016llX held=%zu",
                static_cast<unsigned long long>(retired),
@@ -1318,7 +1546,8 @@ void service(std::uint64_t now) noexcept {
 }
 
 /** Publishes the parameter update a joining peer needs before it will finish its join. */
-bool publish_join_parameters(std::uint64_t sessionId) noexcept {
+bool publish_join_parameters(const state::gameplay::Endpoint& endpoint,
+                              std::uint64_t sessionId) noexcept {
     // A joining peer finishes only once it has applied one parameter update. Any update with a
     // named parameter and no body sets that latch. This host has no values, so it releases a slot
     // the peer never filled, which leaves the peer's state alone.
@@ -1329,7 +1558,8 @@ bool publish_join_parameters(std::uint64_t sessionId) noexcept {
     AcquireSRWLockExclusive(&g_admittedLock);
     Admitted* record = nullptr;
     for (Admitted& candidate : g_admitted) {
-        if (candidate.occupied && candidate.sessionId == sessionId) {
+        if (candidate.occupied && candidate.sessionId == sessionId
+            && candidate.endpoint.address == endpoint.address && candidate.endpoint.port == endpoint.port) {
             record = &candidate;
             break;
         }
@@ -1337,7 +1567,7 @@ bool publish_join_parameters(std::uint64_t sessionId) noexcept {
     const bool held = record != nullptr && record->initialParametersPublished;
     const bool sent = record != nullptr && !held
                       && send_reliable(
-                          sessionId,
+                          endpoint, sessionId,
                           wire::kParameterUpdateId,
                           wire::kParameterUpdateSize,
                           [&update](bits::Writer& writer) {
@@ -1357,9 +1587,27 @@ bool publish_join_parameters(std::uint64_t sessionId) noexcept {
     return sent || held;
 }
 
+bool publish_join_parameters(std::uint64_t sessionId) noexcept {
+    state::gameplay::Endpoint selected{};
+    bool found = false;
+    AcquireSRWLockShared(&g_admittedLock);
+    for (const auto& entry : g_admitted) {
+        if (!entry.occupied || entry.sessionId != sessionId) { continue; }
+        if (found) { ReleaseSRWLockShared(&g_admittedLock); return false; }
+        selected = entry.endpoint;
+        found = true;
+    }
+    ReleaseSRWLockShared(&g_admittedLock);
+    return found && publish_join_parameters(selected, sessionId);
+}
+
 /** Reports whether replication may produce entity output for one peer. */
 bool view_accepted(std::uint64_t sessionId) noexcept {
     return peer::view_bound(sessionId);
+}
+
+bool view_accepted(const state::gameplay::Endpoint& endpoint, std::uint64_t sessionId) noexcept {
+    return peer::view_bound(endpoint, sessionId);
 }
 
 /** Copies every admitted group-session record. */
@@ -1375,7 +1623,11 @@ void snapshot_admitted(std::span<AdmittedRow> output, std::size_t& count) noexce
                          entry.joinComplete,
                          entry.activityHostPublished,
                          entry.hasPlayer,
-                         entry.playerPublished};
+                         entry.playerPublished,
+                         entry.machineId,
+                         entry.playerId,
+                         entry.sharedAuthorized,
+                         entry.sharedPlayerSlot};
         ++count;
     }
     ReleaseSRWLockShared(&g_admittedLock);
@@ -1388,6 +1640,7 @@ void reset() noexcept {
     reset_host_sessions();
     AcquireSRWLockExclusive(&g_admittedLock);
     g_admitted = {};
+    g_sharedGroupSlots = {};
     ReleaseSRWLockExclusive(&g_admittedLock);
 }
 

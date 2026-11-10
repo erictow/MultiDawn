@@ -200,6 +200,8 @@
     <ClCompile Include="src\core\settings\state\key_bindings_parser.cpp" />
     <ClCompile Include="src\core\settings\state\social_parser.cpp" />
     <ClCompile Include="src\core\runtime\core_runtime.cpp" />
+    <ClCompile Include="src\core\multiplayer\companion.cpp" />
+    <ClCompile Include="src\steam\ui\social_panel.cpp" />
     <ClCompile Include="src\core\runtime\host_environment.cpp" />
     <ClCompile Include="src\core\ui\modules\ui_module_descriptor.cpp" />
     <ClCompile Include="src\core\ui\modules\registry\ui_module_registry.cpp" />
@@ -939,6 +941,12 @@
     <ClInclude Include="src\core\settings\server\definition.h" />
     <ClInclude Include="src\core\settings\steam\definition.h" />
     <ClInclude Include="src\core\runtime\core_runtime.h" />
+    <ClInclude Include="src\core\multiplayer\companion.h" />
+    <ClInclude Include="src\core\multiplayer\companion_protocol.h" />
+    <ClInclude Include="src\steam\runtime\social.h" />
+    <ClInclude Include="src\steam\ui\social_panel.h" />
+    <ClInclude Include="src\server\gameplay\group\shared_membership.h" />
+    <ClInclude Include="src\server\gameplay\peer\peer_link_lookup.h" />
     <ClInclude Include="src\core\runtime\host_environment.h" />
     <ClInclude Include="src\core\ui\imgui_user_config.h" />
     <ClInclude Include="src\core\ui\modules\ui_module_descriptor.h" />

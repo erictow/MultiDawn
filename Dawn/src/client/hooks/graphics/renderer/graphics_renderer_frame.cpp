@@ -13,6 +13,7 @@
 #include "../../../../core/ui/runtime/ui_visibility_runtime.h"
 #include "../../../../core/ui/scaling/dpi/ui_dpi_scaling.h"
 #include "../../../../core/ui/theme/dawn_ui_theme.h"
+#include "../../../../steam/ui/social_panel.h"
 #include "../input/input.h"
 #include "graphics_renderer_report.h"
 #include "graphics_splash_invert.h"
@@ -163,7 +164,9 @@ void render_frame_locked() noexcept {
     const bool surfaceDrawn = core::ui::layout::render(visibility.visible);
     const bool busyDrawn = core::ui::busy::draw();
     const bool noticeDrawn = core::ui::notice::draw();
-    if (!hudDrawn && !surfaceDrawn && !busyDrawn && !noticeDrawn && !invertDrawn && !filigreeDrawn) {
+    const bool invitationDrawn = visibility.enabled && !client::camera::camera_only()
+                                 && steam::ui::draw_invitation_notice();
+    if (!hudDrawn && !surfaceDrawn && !busyDrawn && !noticeDrawn && !invitationDrawn && !invertDrawn && !filigreeDrawn) {
         // A frame nobody claimed still drains backend state, and sends no draw data.
         ImGui::EndFrame();
         return;

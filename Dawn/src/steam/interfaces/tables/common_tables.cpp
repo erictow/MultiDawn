@@ -56,9 +56,23 @@ enum class UtilsSlot : std::size_t {
 /** Slots used from SteamFriends017. */
 enum class FriendsSlot : std::size_t {
     personaName = 0,
+    personaState = 2,
+    friendCount = 3,
+    friendByIndex = 4,
+    friendRelationship = 5,
+    friendPersonaState = 6,
+    friendPersonaName = 7,
+    friendGamePlayed = 8,
+    friendPersonaNameHistory = 9,
+    hasFriend = 17,
+    requestUserInformation = 37,
+    setRichPresence = 43,
+    clearRichPresence = 44,
+    friendRichPresence = 45,
+    friendRichPresenceKeyCount = 46,
+    friendRichPresenceKeyByIndex = 47,
+    requestFriendRichPresence = 48,
     inviteUserToGame = 49,
-    richPresence = 64,
-    inviteRichPresence = 65,
 };
 
 /** Slots used from SteamUser020. */
@@ -131,10 +145,24 @@ void initialize_common() noexcept {
     set_method(g_utilsMethods[index(UtilsSlot::filterText)], &methods::filter_text);
 
     set_method(g_friendsMethods[index(FriendsSlot::personaName)], &methods::persona_name);
+    set_method(g_friendsMethods[index(FriendsSlot::personaState)], &methods::persona_state);
+    set_method(g_friendsMethods[index(FriendsSlot::friendCount)], &methods::get_friend_count);
+    set_method(g_friendsMethods[index(FriendsSlot::friendByIndex)], &methods::get_friend_by_index);
+    set_method(g_friendsMethods[index(FriendsSlot::friendRelationship)], &methods::get_friend_relationship);
+    set_method(g_friendsMethods[index(FriendsSlot::friendPersonaState)], &methods::get_friend_persona_state);
+    set_method(g_friendsMethods[index(FriendsSlot::friendPersonaName)], &methods::get_friend_persona_name);
+    set_method(g_friendsMethods[index(FriendsSlot::friendGamePlayed)], &methods::get_friend_game_played);
+    set_method(g_friendsMethods[index(FriendsSlot::friendPersonaNameHistory)], &methods::get_friend_persona_name_history);
+    set_method(g_friendsMethods[index(FriendsSlot::hasFriend)], &methods::has_friend);
+    set_method(g_friendsMethods[index(FriendsSlot::requestUserInformation)], &methods::request_user_information);
+    set_method(g_friendsMethods[index(FriendsSlot::setRichPresence)], &methods::set_rich_presence);
+    set_method(g_friendsMethods[index(FriendsSlot::clearRichPresence)], &methods::clear_rich_presence);
+    set_method(g_friendsMethods[index(FriendsSlot::friendRichPresence)], &methods::get_friend_rich_presence);
+    set_method(g_friendsMethods[index(FriendsSlot::friendRichPresenceKeyCount)], &methods::get_friend_rich_presence_key_count);
+    set_method(g_friendsMethods[index(FriendsSlot::friendRichPresenceKeyByIndex)], &methods::get_friend_rich_presence_key_by_index);
+    set_method(g_friendsMethods[index(FriendsSlot::requestFriendRichPresence)], &methods::request_friend_rich_presence);
     set_method(g_friendsMethods[index(FriendsSlot::inviteUserToGame)],
                &methods::invite_user_to_game);
-    set_method(g_friendsMethods[index(FriendsSlot::richPresence)], &methods::return_true);
-    set_method(g_friendsMethods[index(FriendsSlot::inviteRichPresence)], &methods::return_true);
 
     set_method(g_userMethods[index(UserSlot::handle)], &methods::get_user_handle);
     set_method(g_userMethods[index(UserSlot::loggedOn)], &methods::return_true);

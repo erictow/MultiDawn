@@ -16,8 +16,10 @@
 #include "../../state/entitlements/entitlement_runtime.h"
 #include "../../state/runtime/runtime.h"
 #include "../../state/unlocks/unlocks_runtime.h"
+#include "../../steam/ui/social_panel.h"
 #include "../filesystem/path.h"
 #include "../logging/log.h"
+#include "../multiplayer/companion.h"
 #include "../provenance/build_provenance.h"
 #include "../settings/settings.h"
 #include "../ui/modules/hud/hud.h"
@@ -119,6 +121,8 @@ bool initialize(void* module) noexcept {
         }
         if (stage != nullptr) {
             // The named provenance stage is reported by the shared failure path below.
+        } else if (!multiplayer::initialize()) {
+            stage = "multiplayer_companion";
         } else if (!ui::runtime::initialize(settings::get().client.userInterface)) {
             stage = "ui";
         } else if (!ui::modules::hud::initialize(module)) {
@@ -130,6 +134,8 @@ bool initialize(void* module) noexcept {
             stage = "ui_loadout";
         } else if (!ui::layout::credits::initialize()) {
             stage = "ui_credits";
+        } else if (!steam::ui::initialize()) {
+            stage = "ui_friends";
         } else if (!state::entitlements::publish(settings::get().server.entitlements)) {
             stage = "entitlements";
         } else if (!state::initialize(module,
@@ -154,9 +160,11 @@ bool initialize(void* module) noexcept {
         log::write_elapsed(log::Channel::core, "ev=initialize phase=complete", startedTick, "fail");
         // Reverse every stage because the failing expression may have completed earlier stages.
         (void)client::shutdown();
+        multiplayer::shutdown();
         server::shutdown();
         middleware::shutdown();
         state::content_manifest::shutdown();
+        steam::ui::shutdown();
         ui::modules::loadout::shutdown();
         ui::layout::credits::shutdown();
         state::shutdown();
@@ -192,9 +200,11 @@ bool shutdown() noexcept {
         return false;
     }
     g_initialized.store(false, std::memory_order_release);
+    multiplayer::shutdown();
     server::shutdown();
     middleware::shutdown();
     state::content_manifest::shutdown();
+    steam::ui::shutdown();
     ui::modules::loadout::shutdown();
     ui::layout::credits::shutdown();
     state::shutdown();

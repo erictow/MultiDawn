@@ -2,6 +2,7 @@
 #include <cstring>
 
 #include "../../../core/settings/settings.h"
+#include "../../runtime/social.h"
 #include "../internal.h"
 
 namespace dawn::steam::interfaces::methods {
@@ -71,7 +72,7 @@ UserHandle get_user_handle([[maybe_unused]] void* self) noexcept {
  */
 SteamId* get_steam_id([[maybe_unused]] void* self, SteamId* result) noexcept {
     if (result != nullptr) {
-        result->value = kLocalSteamId;
+        result->value = social::local_steam_id();
     }
     return result;
 }

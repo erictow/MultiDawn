@@ -38,6 +38,16 @@ struct SteamId {
     std::uint64_t value{};
 };
 
+/** SteamFriends017 FriendGameInfo_t under the Windows x64 8-byte ABI. */
+struct FriendGameInfo {
+    std::uint64_t gameId{};
+    std::uint32_t ipv4{};
+    std::uint16_t gamePort{};
+    std::uint16_t queryPort{};
+    std::uint64_t lobbyId{};
+};
+static_assert(sizeof(FriendGameInfo) == 24);
+
 namespace versions {
 
 /** The exact apps interface version the Client asks for. */
@@ -87,6 +97,22 @@ namespace methods {
 ULONG_PTR empty(void*) noexcept;
 bool return_true(void*) noexcept;
 const char* persona_name(void*) noexcept;
+int persona_state(void*) noexcept;
+int get_friend_count(void*, int flags) noexcept;
+SteamId* get_friend_by_index(void*, SteamId*, int index, int flags) noexcept;
+int get_friend_relationship(void*, std::uint64_t id) noexcept;
+int get_friend_persona_state(void*, std::uint64_t id) noexcept;
+const char* get_friend_persona_name(void*, std::uint64_t id) noexcept;
+const char* get_friend_persona_name_history(void*, std::uint64_t id, int index) noexcept;
+bool get_friend_game_played(void*, std::uint64_t id, FriendGameInfo*) noexcept;
+bool has_friend(void*, std::uint64_t id, int flags) noexcept;
+bool request_user_information(void*, std::uint64_t id, bool nameOnly) noexcept;
+bool set_rich_presence(void*, const char* key, const char* value) noexcept;
+void clear_rich_presence(void*) noexcept;
+const char* get_friend_rich_presence(void*, std::uint64_t id, const char* key) noexcept;
+int get_friend_rich_presence_key_count(void*, std::uint64_t id) noexcept;
+const char* get_friend_rich_presence_key_by_index(void*, std::uint64_t id, int index) noexcept;
+void request_friend_rich_presence(void*, std::uint64_t id) noexcept;
 bool invite_user_to_game(void*, std::uint64_t friendSteamId, const char* connectString) noexcept;
 const char* language(void*) noexcept;
 const char* country(void*) noexcept;

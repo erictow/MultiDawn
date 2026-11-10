@@ -37,6 +37,14 @@ void deliver(const state::gameplay::Endpoint& from,
                                     std::span<const std::byte> body,
                                     std::size_t bodyBits) noexcept;
 
+/** Endpoint-scoped routing for multiple humans carrying the same group session. */
+[[nodiscard]] bool enqueue_reliable(const state::gameplay::Endpoint& endpoint,
+                                    std::uint64_t sessionId,
+                                    std::uint8_t id,
+                                    std::uint32_t declaredSize,
+                                    std::span<const std::byte> body,
+                                    std::size_t bodyBits) noexcept;
+
 /**
  * Reports the NetAddr one peer sent in its own connect request.
  * The membership update must name an address the peer recognises as its own.
@@ -48,6 +56,11 @@ void deliver(const state::gameplay::Endpoint& from,
 remote_address(std::uint64_t sessionId,
                std::array<std::byte, state::gameplay::kNetAddrBlobSize>& output) noexcept;
 
+[[nodiscard]] bool remote_address(
+    const state::gameplay::Endpoint& endpoint,
+    std::uint64_t sessionId,
+    std::array<std::byte, state::gameplay::kNetAddrBlobSize>& output) noexcept;
+
 /**
  * Reports whether a link has completed the establishment exchange and then received a normal
  * connected packet. Group-session messages must wait for this or the peer acknowledges their
@@ -55,6 +68,9 @@ remote_address(std::uint64_t sessionId,
  * @param sessionId Group session carried by the link.
  */
 [[nodiscard]] bool application_ready(std::uint64_t sessionId) noexcept;
+
+[[nodiscard]] bool application_ready(const state::gameplay::Endpoint& endpoint,
+                                      std::uint64_t sessionId) noexcept;
 
 /** One out-of-band body is staged here before its container is built. */
 inline constexpr std::size_t kOutOfBandBodyCapacity = 128;
@@ -103,8 +119,15 @@ template <typename Body>
  */
 void bind_view(std::uint64_t sessionId, const state::gameplay::ViewSignature& signature) noexcept;
 
+void bind_view(const state::gameplay::Endpoint& endpoint,
+               std::uint64_t sessionId,
+               const state::gameplay::ViewSignature& signature) noexcept;
+
 /** @return True once a view signature is bound for that session's link. */
 [[nodiscard]] bool view_bound(std::uint64_t sessionId) noexcept;
+
+[[nodiscard]] bool view_bound(const state::gameplay::Endpoint& endpoint,
+                               std::uint64_t sessionId) noexcept;
 
 /**
  * Reports how far the link carrying one group session has got.
@@ -125,6 +148,9 @@ void service(std::uint64_t now) noexcept;
  * @param sessionId Group session the link carries.
  */
 void drop(std::uint64_t sessionId) noexcept;
+
+/** Removes only the named human's binding, preserving other humans in that session. */
+void drop(const state::gameplay::Endpoint& endpoint, std::uint64_t sessionId) noexcept;
 
 /**
  * Drops every link at one endpoint.

@@ -4,6 +4,33 @@ MultiDawn's launcher provides solo launch and a two-person pairing connection.
 Pairing does not yet put two Guardians into the same Destiny activity. Multiplayer
 game launch is blocked until the game runtime supports that behavior.
 
+## Native implementation added
+
+The source now includes these native components:
+
+- Endpoint-scoped reliable queues, addresses, views, readiness and disconnects.
+  Two human peers that name the same group no longer resolve to the first link.
+- A two-human membership builder using the existing native encoder and state
+  hash. `authorize_shared_peer` requires actual group, endpoint, machine and
+  player identities. A launcher pair code does not authorize a game descriptor.
+- SteamFriends017 enumeration, persona, presence, and invitation methods.
+  Incoming invitations stay pending until explicit acceptance queues the
+  native 264-byte `GameRichPresenceJoinRequested_t` callback.
+- A Dawn Friends page and an invitation notice in the game overlay.
+- A local named-pipe companion client, bound to the launcher's process ID and
+  a per-launch nonce. The launcher restricts the pipe to the current Windows
+  user and forwards social messages through the authenticated pairing channel.
+  A paired launcher is distinguished from a running native game consumer.
+
+These changes have not been installed over the existing game. The approved
+Windows SDK is installed locally, and the native component tests now compile
+and pass with Clang 23.1.5. The installed Dawn 1.7.2 DLL does not gain these
+features from a launcher update alone.
+
+The shared membership path is not activated by the social companion. It still
+needs authenticated native descriptors, complete player properties, and working
+view/entity authority before multiplayer Play can be enabled.
+
 ## What the launcher connection means
 
 The standalone Windows launcher is built with
@@ -35,9 +62,9 @@ not a claim about an untested two-machine game session.
 | Accounts and secrets | `src/state/runtime/state.h`, `State`, contains one `AccountState`, one `SignOnState`, and one `BapState`. `src/state/runtime/storage/internal.h` exposes one process-wide root State. | Two network connections are not two isolated player accounts. |
 | Account mutation | `src/server/bap/bap_route.cpp`, `publish_account_mutation`, refreshes other active sessions from the shared account. `src/server/web_service/web_service_runtime.cpp` can change the primary account globally. | Forwarding a guest into the host's current backend could operate on the host's save. |
 | Gameplay endpoint | `src/server/gameplay/endpoint/gameplay_endpoint.cpp`, `initialize`, can bind the configured embedded UDP endpoint. Defaults in `src/core/settings/server/gameplay/definition.h` use loopback addresses. | A UDP endpoint exists, but its presence does not establish a shared two-player world. |
-| Group membership | `src/server/gameplay/group/group_host.cpp`, `publish_snapshot`, builds host and admitted-peer member records with an array of one player. `publish_membership` seeds the player with `steam::kLocalSteamId`. | Existing snapshots do not describe two human players with independent identities. |
+| Group membership | `src/server/gameplay/group/shared_membership.h` builds a control host and up to two authenticated humans. `group_host.cpp` requires endpoint-scoped authorization and real captured NetAddr values. | The base native roster now has a shared path, but the companion does not yet have the actual game descriptors needed to activate it. |
 | Player properties | `group_host.cpp`, `consume`, reads the peer-properties header and player-add identity prefix; its comments explicitly identify undecoded profile/property bodies. `bind_view` echoes the peer's view signature. | The existing handshake is insufficient evidence of complete remote Guardian replication. |
-| Steam friend interface | `src/steam/interfaces/tables/common_tables.cpp`, `initialize_common`, registers persona and invite methods but does not implement friend enumeration. `src/steam/interfaces/methods/friends.cpp`, `invite_user_to_game`, returns false. | The paired player cannot currently appear and accept an invitation through this shim. |
+| Steam friend interface | `src/steam/interfaces/tables/common_tables.cpp` registers Friends017 enumeration, persona, presence and invitation methods. `src/steam/interfaces/methods/friends.cpp` exposes only a peer published by the authenticated companion. | The native APIs and Dawn Friends overlay are implemented in source. Visibility in the game's own roster and party acceptance still require actual game verification and a joinable native session. |
 | Steam networking | `src/steam/interfaces/methods/serialized_networking.cpp` drops rendezvous notifications, connection-state messages, and relay tickets, and returns no certificate. | Pairing is not a substitute for a working native peer connection path. |
 | Lobby shim | `src/steam/interfaces/methods/matchmaking.cpp` retains process-local lobby metadata and synthesizes local callbacks. | A successful local lobby callback does not confirm membership on another machine. |
 
@@ -81,12 +108,53 @@ launcher pairing protocol.
    loaded runtime implements the above contract. A launcher flag or editable file
    is not sufficient proof that a stock installed DLL can host multiplayer.
 
-The current launcher blocks multiplayer Play. The native runtime has not been
-changed and does not consume the launcher's session-mode environment variable.
-If a later version adds host or guest game startup, its native startup guard must
-run before persistent State initialization and server registration. An unsupported
-mode must fail before starting another backend or opening a save. Direct launch
-currently retains the existing solo runtime behavior.
+The current launcher blocks multiplayer Play. The updated native startup rejects
+unsupported `DAWN_SESSION_MODE` values before persistent State initialization.
+An optional `DAWN_COMPANION_*` configuration enables the social IPC preflight while
+the game remains in solo mode. Ordinary solo launches strip inherited companion
+configuration. Direct launch without these variables retains the existing solo
+runtime behavior.
+
+The account backend remains local to each player. This avoids forwarding a
+guest's inventory transactions into the host's single process-wide account.
+Changing the platform identity can still affect the account's sign-in identity;
+native game testing must use isolated copies of saves until preservation is
+verified. No automated live server shutdown or account migration is implemented.
+
+## Component verification
+
+The launcher self-tests exercise authenticated TCP pairing, bounded control
+messages, native pipe framing/authentication, identity binding, invitations,
+disconnects and UI state using test native clients. Connection generations
+prevent queued profiles, invitations, sends, and errors from affecting a later
+pairing, including reconnection to the same identity. They do not start the game.
+
+Local verification on November 10, 2026 passed 98 launcher assertions and 207
+native checks (40 protocol, 33 IPC, 90 social, and 44 membership/link checks).
+
+The native test projects are:
+
+- `Dawn/unit/companion_protocol_tests.vcxproj`: numeric, framing-field and
+  text validation at the IPC boundary.
+- `Dawn/unit/companion_client_tests.vcxproj`: the production native pipe client
+  against an isolated Windows pipe server, including fragmented input.
+- `Dawn/unit/steam_social_tests.vcxproj`: social ABI values, callback payloads,
+  invitation acceptance, stale IDs, transport failures and queue backpressure.
+- `Dawn/unit/shared_membership_tests.vcxproj`: two distinct human rows, native
+  membership encoding/hash state and endpoint-scoped link lookup.
+
+`companion_bridge_harness.vcxproj` builds a small native test worker that links
+the production companion client with test social/log sinks. The launcher's
+`--native-companion-test <harness.exe> <report.txt>` command runs two workers
+through two real paired launchers. This verifies cross-language IPC and control
+forwarding without loading Destiny or opening a player database. This two-worker
+test passed locally in both directions with the production C++ companion client.
+It does not verify the game's friend roster or a shared activity.
+
+Native build instructions are in
+[`tools/build/PORTABLE-WINDOWS.md`](../tools/build/PORTABLE-WINDOWS.md).
+The native GitHub workflow builds and runs the four component test projects;
+preparing the workflow does not mean a remote run has passed.
 
 ## Acceptance checks before enabling multiplayer Play
 

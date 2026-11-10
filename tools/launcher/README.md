@@ -4,6 +4,10 @@
 Framework. It launches an already installed Dawn copy; it does not download game
 files, install the DLL, or change saves and settings.
 
+Launcher 0.2 uses the `MD2` pairing protocol and pair codes. Both people need
+the same compatible build. Earlier `MD1` codes and handshakes are rejected
+before pairing because their launchers do not support native social controls.
+
 ## Build
 
 From the repository root:
@@ -31,17 +35,18 @@ it must also identify as Dawn and have its matching settings. Each installed
 launcher reports configuration conflicts without changing the files. It starts
 the game in its own folder, watches only the process it starts, and never kills
 another game or server process. Closing the launcher leaves a solo game running.
-The only saved preference is the folder path under `%LOCALAPPDATA%/MultiDawn`.
+The saved folder path lives under `%LOCALAPPDATA%/MultiDawn`. Creating a pairing
+bridge also creates `steam-id.txt` there once, so each device retains its own
+distinct native social identity. This file does not change a Dawn save.
 The child environment includes `DAWN_FOREST_BASELINE=1`, matching the existing
 `launch-destiny.cmd` normal launch behavior.
 
 ## Host and Join pairing preview
 
 The Multiplayer switch opens an actual two-person pairing lobby. It does **not**
-enable multiplayer gameplay. This fork still needs native player replication,
-shared activity authority, per-player server state, friends, invites, and game
-notifications. MP Play is disabled until those systems exist. No remote server
-handoff or local server shutdown is attempted.
+enable multiplayer gameplay. Native player replication and shared activity
+authority still need implementation and verification. MP Play stays disabled.
+No remote account-server handoff or local server shutdown is attempted.
 
 1. Both people enable Multiplayer. The game folder is then locked.
 2. The host selects the IPv4 address reachable by their partner, then Host.
@@ -65,8 +70,39 @@ typing mistakes; it is not encryption.
 ## Verification
 
 `-RunTests` exercises code parsing, loopback TCP pairing and disconnect behavior,
-plus solo validation and process environment isolation. Tests do not launch
-Destiny 2 or prove gameplay compatibility.
+solo validation, process environment isolation, and the native companion pipe
+protocol through two fake native consumers. These tests do not launch Destiny 2
+or prove gameplay compatibility.
+
+## Native social companion
+
+This source branch adds bounded social control messages to an authenticated
+pair. An optional named pipe connects a newly built native runtime to its local
+launcher. The pipe permits the current Windows user and denies network logons;
+the runtime verifies the launcher PID and a per-bridge nonce before publishing
+the paired identity. The launcher checks invitation sender and recipient IDs,
+and distinguishes a connected launcher from a connected native game consumer.
+
+The native companion does not forward account or gameplay packets. Its supplied
+environment uses `DAWN_SESSION_MODE=solo`; it does not assert that a shared native
+world exists. The current installed Dawn 1.7.2 binary has no companion support.
+Normal UI Play therefore remains solo, and MP Play remains unavailable while
+the gameplay path is incomplete. Native source and C# pipe tests are separate
+from an in-game friend-roster or party-invitation test.
+
+After building the standalone `Dawn/unit/companion_bridge_harness.vcxproj`, test
+the actual C++ companion across two disposable native workers:
+
+```powershell
+$p = Start-Process .\build\launcher\MultiDawn.Launcher.exe `
+  -ArgumentList '--native-companion-test', '"C:\Path\companion_bridge_harness.exe"', '"C:\Temp\native-pipe-test.txt"' `
+  -PassThru -WindowStyle Hidden
+$p.WaitForExit()
+Get-Content C:\Temp\native-pipe-test.txt
+```
+
+The workers have a 25-second execution deadline and use the actual pipe client,
+separate identities, and invitations. They do not load Destiny or a game DLL.
 
 Capture the form without starting the game:
 
@@ -100,8 +136,7 @@ This creates two local test peers, checks mutual authentication and heartbeat,
 and closes both connections. It does not verify reachability from a second PC.
 Use your own PC's LAN address when running the check on another computer.
 
-Reserved `DAWN_SESSION_*` variables are removed from the solo child environment,
-then `DAWN_SESSION_MODE=solo` is set for a future explicit launch contract. The
-current Dawn DLL does not consume that variable. No MP variables are passed.
-A future gameplay implementation needs a real authenticated runtime
-contract rather than trusting a launcher flag or a capability text file.
+Reserved `DAWN_SESSION_*` and `DAWN_COMPANION_*` variables are removed from an
+ordinary solo child environment, then `DAWN_SESSION_MODE=solo` is set. Explicit
+native-social preflight can add pipe credentials to that isolated child only.
+A gameplay implementation still needs a verified native session contract.

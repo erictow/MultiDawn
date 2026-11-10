@@ -1,0 +1,60 @@
+name: Native multiplayer component checks
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'Dawn/src/core/multiplayer/**'
+      - 'Dawn/src/server/gameplay/**'
+      - 'Dawn/src/steam/**'
+      - 'Dawn/unit/*companion*'
+      - 'Dawn/unit/*shared_membership*'
+      - 'Dawn/unit/*steam_social*'
+      - '.github/workflows/native-multiplayer.yml'
+  pull_request:
+    paths:
+      - 'Dawn/src/core/multiplayer/**'
+      - 'Dawn/src/server/gameplay/**'
+      - 'Dawn/src/steam/**'
+      - 'Dawn/unit/*companion*'
+      - 'Dawn/unit/*shared_membership*'
+      - 'Dawn/unit/*steam_social*'
+      - '.github/workflows/native-multiplayer.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  component-tests:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - name: Build and run native component tests
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($suite in @('companion_protocol', 'companion_client', 'steam_social', 'shared_membership')) {
+            $destination = Join-Path $PWD "build/native-ci/$suite/"
+            & msbuild "Dawn/unit/$($suite)_tests.vcxproj" /nologo /v:minimal /m:2 /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0 "/p:OutDir=$destination" "/p:IntDir=$($destination)obj/"
+            if ($LASTEXITCODE -ne 0) { throw "$suite compilation failed" }
+            & (Join-Path $destination "$($suite)_tests.exe")
+            if ($LASTEXITCODE -ne 0) { throw "$suite tests failed" }
+          }
+      - name: Build production companion test workers
+        shell: powershell
+        run: |
+          $destination = Join-Path $PWD 'build/native-ci/companion_bridge/'
+          & msbuild Dawn/unit/companion_bridge_harness.vcxproj /nologo /v:minimal /m:2 /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0 "/p:OutDir=$destination" "/p:IntDir=$($destination)obj/"
+          if ($LASTEXITCODE -ne 0) { throw 'Native companion workers failed to build' }
+      - name: Test C++ and launcher interoperability
+        shell: powershell
+        run: |
+          ./tools/launcher/Build-Launcher.ps1 -RunTests
+          $harness = Join-Path $PWD 'build/native-ci/companion_bridge/companion_bridge_harness.exe'
+          $report = Join-Path $PWD 'build/native-ci/native-companion-results.txt'
+          $worker = Start-Process -FilePath ./build/launcher/MultiDawn.Launcher.exe -ArgumentList @('--native-companion-test', ('"' + $harness + '"'), ('"' + $report + '"')) -WindowStyle Hidden -PassThru
+          if (-not $worker.WaitForExit(40000)) { $worker.Kill(); throw 'Native interoperability test timed out' }
+          if (Test-Path -LiteralPath $report) { Get-Content -LiteralPath $report }
+          if ($worker.ExitCode -ne 0) { throw 'Native interoperability test failed' }

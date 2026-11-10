@@ -5,6 +5,7 @@
 
 #include "../../../core/logging/log.h"
 #include "../internal.h"
+#include "../../runtime/social.h"
 
 namespace dawn::steam::interfaces::methods {
 namespace {
@@ -263,8 +264,8 @@ ApiCall create_lobby([[maybe_unused]] void* self,
     if (!queue_callback(kLobbyEnterCallback, 0, &entered, sizeof(entered))) {
         return 0;
     }
-    const bool retained = retain_lobby(lobby, kLocalSteamId);
-    report_lobby("create", lobby, kLocalSteamId, retained);
+    const bool retained = retain_lobby(lobby, social::local_steam_id());
+    report_lobby("create", lobby, social::local_steam_id(), retained);
     const bool notified = retained && queue_lobby_data_update(lobby, lobby);
     report_lobby_data("create_update", lobby, lobby, "", "", notified);
     return notified ? call : 0;
@@ -306,7 +307,7 @@ void leave_lobby([[maybe_unused]] void* self, std::uint64_t lobby) noexcept {
 int get_num_lobby_members([[maybe_unused]] void* self, std::uint64_t lobby) noexcept {
     AcquireSRWLockShared(&g_lobbyLock);
     const LobbyState* const entry = find_lobby_locked(lobby);
-    const int count = entry == nullptr || !entry->joined ? 0 : entry->owner == kLocalSteamId ? 1 : 2;
+    const int count = entry == nullptr || !entry->joined ? 0 : entry->owner == social::local_steam_id() ? 1 : 2;
     const std::uint64_t owner = entry == nullptr ? 0 : entry->owner;
     ReleaseSRWLockShared(&g_lobbyLock);
     report_lobby("member_count", lobby, owner, count != 0);
@@ -325,8 +326,8 @@ SteamId* get_lobby_member_by_index([[maybe_unused]] void* self,
         if (memberIndex == 0) {
             member = entry->owner;
         }
-        else if (memberIndex == 1 && entry->owner != kLocalSteamId) {
-            member = kLocalSteamId;
+        else if (memberIndex == 1 && entry->owner != social::local_steam_id()) {
+            member = social::local_steam_id();
         }
     }
     ReleaseSRWLockShared(&g_lobbyLock);
@@ -365,7 +366,7 @@ bool set_lobby_data([[maybe_unused]] void* self,
     bool updated = false;
     AcquireSRWLockExclusive(&g_lobbyLock);
     LobbyState* const state = find_lobby_locked(lobby);
-    if (state != nullptr && state->joined && state->owner == kLocalSteamId &&
+    if (state != nullptr && state->joined && state->owner == social::local_steam_id() &&
         valueLength < kLobbyDataValueCapacity) {
         LobbyDataEntry* const entry = claim_data_locked(state->data, key);
         if (entry != nullptr) {
@@ -437,7 +438,7 @@ bool delete_lobby_data([[maybe_unused]] void* self,
     LobbyState* const state = find_lobby_locked(lobby);
     LobbyDataEntry* const entry =
         state == nullptr ? nullptr : find_data_locked(state->data, key);
-    if (state != nullptr && state->joined && state->owner == kLocalSteamId && entry != nullptr) {
+    if (state != nullptr && state->joined && state->owner == social::local_steam_id() && entry != nullptr) {
         *entry = {};
         removed = true;
     }
@@ -457,7 +458,7 @@ const char* get_lobby_member_data([[maybe_unused]] void* self,
     LobbyDataEntry* entry = nullptr;
     AcquireSRWLockShared(&g_lobbyLock);
     LobbyState* const state = find_lobby_locked(lobby);
-    if (state != nullptr && state->joined && member == kLocalSteamId) {
+    if (state != nullptr && state->joined && member == social::local_steam_id()) {
         entry = find_data_locked(state->localMemberData, key);
         if (entry != nullptr) {
             value = entry->value.data();
@@ -486,8 +487,8 @@ void set_lobby_member_data([[maybe_unused]] void* self,
         }
     }
     ReleaseSRWLockExclusive(&g_lobbyLock);
-    const bool notified = updated && queue_lobby_data_update(lobby, kLocalSteamId);
-    report_lobby_data("member_set", lobby, kLocalSteamId, key, value, updated && notified);
+    const bool notified = updated && queue_lobby_data_update(lobby, social::local_steam_id());
+    report_lobby_data("member_set", lobby, social::local_steam_id(), key, value, updated && notified);
 }
 
 /** Drops a lobby chat payload. Nothing is kept. @return True for a size of zero or more. */

@@ -14,7 +14,7 @@ if (-not (Test-Path -LiteralPath $compiler)) { $compiler = Join-Path $env:WINDIR
 if (-not (Test-Path -LiteralPath $compiler)) { throw 'The Windows .NET Framework 4 C# compiler was not found.' }
 [IO.Directory]::CreateDirectory($output) | Out-Null
 $exe = Join-Path $output 'MultiDawn.Launcher.exe'
-$sources = @((Join-Path $PSScriptRoot 'Program.cs'), (Join-Path $PSScriptRoot 'Pairing.cs'))
+$sources = @((Join-Path $PSScriptRoot 'Program.cs'), (Join-Path $PSScriptRoot 'Pairing.cs'), (Join-Path $PSScriptRoot 'RuntimeBridge.cs'), (Join-Path $PSScriptRoot 'RuntimeBridgeTests.cs'), (Join-Path $PSScriptRoot 'NativeCompanionTest.cs'))
 & $compiler /nologo /target:winexe /platform:x64 /optimize+ /warnaserror+ /out:$exe /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll $sources
 if ($LASTEXITCODE -ne 0) { throw 'Launcher compilation failed.' }
 if ($RunTests) {

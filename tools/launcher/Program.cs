@@ -13,8 +13,8 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("MultiDawn Launcher")]
 [assembly: System.Reflection.AssemblyProduct("MultiDawn Launcher")]
-[assembly: System.Reflection.AssemblyVersion("0.1.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.1.0.0")]
+[assembly: System.Reflection.AssemblyVersion("0.2.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.2.0.0")]
 
 namespace MultiDawn.Launcher
 {
@@ -23,6 +23,12 @@ namespace MultiDawn.Launcher
         [STAThread]
         private static int Main(string[] args)
         {
+            if (args.Length > 0 && args[0] == "--native-companion-test")
+            {
+                if (args.Length != 3) return 2;
+                try { File.WriteAllText(args[2], NativeCompanionTest.Run(args[1])); return 0; }
+                catch (Exception error) { File.WriteAllText(args[2], "FAIL: " + error + Environment.NewLine); return 1; }
+            }
             if (args.Length > 0 && args[0] == "--validate-install")
             {
                 if (args.Length != 3) return 2;
@@ -44,7 +50,8 @@ namespace MultiDawn.Launcher
                     result = PairingSelfTests.Run();
                     report = PairingSelfTests.Report;
                     if (result == 0) report += LauncherSelfTests.Run();
-                    report += result == 0 ? "PASS: launcher validation, UI state, and TCP pairing tests.\r\n" : "FAIL: " + PairingSelfTests.LastError + "\r\n";
+                    if (result == 0) report += RuntimeBridgeSelfTests.Run();
+                    report += result == 0 ? "PASS: launcher validation, UI state, TCP pairing, and native companion protocol tests.\r\n" : "FAIL: " + PairingSelfTests.LastError + "\r\n";
                 }
                 catch (Exception ex) { result = 1; report = "FAIL: " + ex + "\r\n"; }
                 Console.Write(report);
@@ -162,10 +169,24 @@ namespace MultiDawn.Launcher
             info.WorkingDirectory = Path.GetFullPath(gameRoot);
             info.UseShellExecute = false;
             foreach (string key in info.EnvironmentVariables.Keys.Cast<string>().ToArray())
-                if (key.StartsWith("DAWN_SESSION_", StringComparison.OrdinalIgnoreCase)) info.EnvironmentVariables.Remove(key);
+                if (key.StartsWith("DAWN_SESSION_", StringComparison.OrdinalIgnoreCase) || key.StartsWith("DAWN_COMPANION_", StringComparison.OrdinalIgnoreCase)) info.EnvironmentVariables.Remove(key);
             info.EnvironmentVariables["DAWN_SESSION_MODE"] = "solo";
             info.EnvironmentVariables["DAWN_FOREST_BASELINE"] = "1";
             return info;
+        }
+        internal static string Persona(string root)
+        {
+            try
+            {
+                string settings = Path.Combine(root, "bin/x64/Dawn/settings.json");
+                var document = new JavaScriptSerializer().DeserializeObject(File.ReadAllText(settings)) as Dictionary<string, object>;
+                var steam = document["steam"] as Dictionary<string, object>;
+                var user = steam["user"] as Dictionary<string, object>;
+                string name = user["persona_name"] as string;
+                if (!String.IsNullOrEmpty(name) && name.Length <= 127 && name.All(c => c >= 32 && c <= 126)) return name;
+            }
+            catch (Exception) { }
+            return "Player";
         }
     }
 
@@ -182,6 +203,7 @@ namespace MultiDawn.Launcher
         private NumericUpDown port;
         private Label gameStatus, sessionStatus, peerStatus, modeLabel;
         private PairSession session;
+        private RuntimeBridge runtimeBridge;
         private Process game;
         private bool busy, closing;
         private readonly string configPath;
@@ -202,7 +224,7 @@ namespace MultiDawn.Launcher
             BuildControls();
             LoadPath();
             RefreshState();
-            FormClosing += delegate { closing = true; if (session != null) session.Dispose(); if (game != null) game.Dispose(); };
+            FormClosing += delegate { closing = true; if (runtimeBridge != null) runtimeBridge.Dispose(); if (session != null) session.Dispose(); if (game != null) game.Dispose(); };
         }
 
         protected override void OnShown(EventArgs args)
@@ -362,6 +384,7 @@ namespace MultiDawn.Launcher
             {
                 await value.HostAsync(IPAddress.Parse((string)address.SelectedItem), (int)port.Value);
                 if (session != value) return;
+                runtimeBridge = new RuntimeBridge(value, GameLaunch.Persona(gameRoot.Text.Trim()));
                 pairCode.Text = value.Code;
                 sessionStatus.Text = "Hosting. Share this code with your partner on the same LAN or VPN.";
                 peerStatus.Text = "Waiting for a partner. Firewall access may be required for this TCP port.";
@@ -381,6 +404,7 @@ namespace MultiDawn.Launcher
             {
                 await value.JoinAsync(code);
                 if (session != value) return;
+                runtimeBridge = new RuntimeBridge(value, GameLaunch.Persona(gameRoot.Text.Trim()));
                 sessionStatus.Text = "Paired with host. Gameplay launch is unavailable in this build.";
                 peerStatus.Text = "Partner connected. No local game server has been stopped or redirected.";
             }
@@ -400,6 +424,7 @@ namespace MultiDawn.Launcher
         }
         private void Disconnect(object sender, EventArgs args)
         {
+            if (runtimeBridge != null) { runtimeBridge.Dispose(); runtimeBridge = null; }
             PairSession old = session; session = null;
             if (old != null) old.Dispose();
             pairCode.Clear(); RefreshState();
@@ -496,16 +521,19 @@ namespace MultiDawn.Launcher
             Check(GameLaunch.ValidateLocalSettings("{\"client\":{\"external_server\":{\"enabled\":\"false\"}}}") != null, "invalid boolean rejected");
             Check(GameLaunch.ValidateLocalSettings("[") != null, "invalid JSON rejected");
             string previous = Environment.GetEnvironmentVariable("DAWN_SESSION_TOKEN");
+            string priorCompanion = Environment.GetEnvironmentVariable("DAWN_COMPANION_NONCE");
             try
             {
                 Environment.SetEnvironmentVariable("DAWN_SESSION_TOKEN", "parent-test-value");
+                Environment.SetEnvironmentVariable("DAWN_COMPANION_NONCE", "stale-parent-companion");
                 ProcessStartInfo info = GameLaunch.CreateStartInfo(Path.GetTempPath());
                 Check(!info.UseShellExecute && !info.EnvironmentVariables.ContainsKey("DAWN_SESSION_TOKEN"), "child environment isolated");
+                Check(!info.EnvironmentVariables.ContainsKey("DAWN_COMPANION_NONCE"), "solo launch cannot inherit a stale native companion");
                 Check(info.EnvironmentVariables["DAWN_SESSION_MODE"] == "solo", "solo launch mode is explicit");
                 Check(info.EnvironmentVariables["DAWN_FOREST_BASELINE"] == "1", "solo launch matches the existing forest baseline launcher");
                 Check(Environment.GetEnvironmentVariable("DAWN_SESSION_TOKEN") == "parent-test-value", "parent environment unchanged");
             }
-            finally { Environment.SetEnvironmentVariable("DAWN_SESSION_TOKEN", previous); }
+            finally { Environment.SetEnvironmentVariable("DAWN_SESSION_TOKEN", previous); Environment.SetEnvironmentVariable("DAWN_COMPANION_NONCE", priorCompanion); }
             RunLayoutTests();
             LauncherForm.RunUiSmokeTests(Check);
             return results.ToString();

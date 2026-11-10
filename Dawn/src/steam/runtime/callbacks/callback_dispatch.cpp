@@ -4,9 +4,11 @@
 
 #include "../../../client/content/investment/worker.h"
 #include "../../../core/logging/log.h"
+#include "../../../core/multiplayer/companion.h"
 #include "../../../core/ui/busy/busy.h"
 #include "../../../server/runtime/server_runtime.h"
 #include "../internal.h"
+#include "../social.h"
 #include "callback_registry.h"
 
 namespace dawn::steam::runtime::callbacks {
@@ -97,6 +99,8 @@ namespace dawn::steam {
 
 /** Delivers one batch of queued callbacks on the caller thread. The batch has a size cap. */
 void run_callbacks() noexcept {
+    core::multiplayer::service(GetTickCount64());
+    social::service();
     // Presentation goes in first, so the sweep below has an overlay to draw with. It only hooks
     // Present; the game still decides when a frame is drawn.
     runtime::activate_graphics_once();

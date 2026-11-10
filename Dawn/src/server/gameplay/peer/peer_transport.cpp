@@ -1,9 +1,11 @@
 #include "peer_transport.h"
 #include "traffic_log_repetition.h"
+#include "peer_link_lookup.h"
 
 #include <Windows.h>
 
 #include <array>
+#include <atomic>
 #include <cstdio>
 
 #include "../../../middleware/crypto/random_bytes.h"
@@ -73,8 +75,9 @@ constexpr std::uint8_t kPlayerAddId = 34;
 constexpr std::uint8_t kPlayerRemoveId = 36;
 /** Player-properties publication; Dawn does not yet have its codec. */
 constexpr std::uint8_t kPlayerPropertiesId = 37;
-/** Enough bytes to cover the complete 117-byte player-properties wire body. */
+/** Keep each diagnostic line bounded while retaining the complete assembled publication. */
 constexpr std::size_t kSessionPublicationDumpCapacity = 128;
+std::atomic<std::uint64_t> g_publicationCaptureId{0};
 
 SRWLOCK g_lock{SRWLOCK_INIT};
 std::array<state::gameplay::PeerLink, state::gameplay::kAssociationCapacity> g_peers;
@@ -107,7 +110,8 @@ TrafficLogRepetition g_trafficReports{};
  * copied directly from byte three. This stays observation-only: group dispatch still receives the
  * original reader and preserves the current undecoded behavior.
  */
-void report_session_publication_message(const wire::AssembledMessage& message) noexcept {
+void report_session_publication_message(const state::gameplay::Endpoint& from,
+                                        const wire::AssembledMessage& message) noexcept {
     if ((message.id != kPeerPropertiesId && message.id != kPlayerAddId
          && message.id != kPlayerRemoveId && message.id != kPlayerPropertiesId)
         || message.bitCount < message.bodyBitOffset
@@ -116,25 +120,27 @@ void report_session_publication_message(const wire::AssembledMessage& message) n
     }
     const std::size_t bodyBits = message.bitCount - message.bodyBitOffset;
     const std::size_t bodyBytes = (bodyBits + kByteBits - 1U) / kByteBits;
-    const std::size_t dumpBytes = (std::min)(bodyBytes, kSessionPublicationDumpCapacity);
     const std::size_t bodyByteOffset = message.bodyBitOffset / kByteBits;
-    std::array<char, kSessionPublicationDumpCapacity * 2U + 1U> hex{};
-    constexpr char kDigits[] = "0123456789ABCDEF";
-    for (std::size_t index = 0; index < dumpBytes; ++index) {
-        const unsigned value = std::to_integer<unsigned>(message.bytes[bodyByteOffset + index]);
-        hex[index * 2U] = kDigits[(value >> 4U) & 0xFU];
-        hex[index * 2U + 1U] = kDigits[value & 0xFU];
+    if (bodyByteOffset > message.bytes.size() || bodyBytes > message.bytes.size() - bodyByteOffset) {
+        return;
     }
-    report(core::log::Level::info,
-           "ev=gameplay stage=session_publication result=wire id=%u declared=%u total_bits=%zu "
-           "body_bits=%zu body_bytes=%zu dumped=%zu hex=%s",
-           static_cast<unsigned>(message.id),
-           static_cast<unsigned>(message.declaredSize),
-           message.bitCount,
-           bodyBits,
-           bodyBytes,
-           dumpBytes,
-           hex.data());
+    const auto captureId = g_publicationCaptureId.fetch_add(1) + 1;
+    constexpr char kDigits[] = "0123456789ABCDEF";
+    for (std::size_t offset = 0; offset < bodyBytes; offset += kSessionPublicationDumpCapacity) {
+        const std::size_t chunk = (std::min)(bodyBytes - offset, kSessionPublicationDumpCapacity);
+        std::array<char, kSessionPublicationDumpCapacity * 2U + 1U> hex{};
+        for (std::size_t index = 0; index < chunk; ++index) {
+            const unsigned value = std::to_integer<unsigned>(message.bytes[bodyByteOffset + offset + index]);
+            hex[index * 2U] = kDigits[(value >> 4U) & 0xFU];
+            hex[index * 2U + 1U] = kDigits[value & 0xFU];
+        }
+        report(core::log::Level::info,
+               "ev=gameplay stage=session_publication result=wire capture=%llu endpoint=0x%08X:%u "
+               "id=%u declared=%u total_bits=%zu body_bits=%zu body_bytes=%zu offset=%zu dumped=%zu hex=%s",
+               static_cast<unsigned long long>(captureId), from.address, static_cast<unsigned>(from.port),
+               static_cast<unsigned>(message.id), static_cast<unsigned>(message.declaredSize),
+               message.bitCount, bodyBits, bodyBytes, offset, chunk, hex.data());
+    }
 }
 
 /** @return True when both endpoints name the same address and port. */
@@ -155,28 +161,9 @@ find_locked(const state::gameplay::Endpoint& from) noexcept {
     return nullptr;
 }
 
-/** @return True when the link carries one group session. Callers hold the lock. */
-[[nodiscard]] bool carries_locked(const state::gameplay::PeerLink& peer,
-                                  std::uint64_t sessionId) noexcept {
-    for (const std::uint64_t held : peer.sessions) {
-        if (held == sessionId) {
-            return true;
-        }
-    }
-    return false;
-}
-
 /** @return Link carrying one group session, or null. Callers hold the lock. */
 [[nodiscard]] state::gameplay::PeerLink* find_session_locked(std::uint64_t sessionId) noexcept {
-    if (sessionId == 0) {
-        return nullptr;
-    }
-    for (state::gameplay::PeerLink& peer : g_peers) {
-        if (peer.stage != state::gameplay::PeerStage::absent && carries_locked(peer, sessionId)) {
-            return &peer;
-        }
-    }
-    return nullptr;
+    return lookup::find(g_peers, sessionId);
 }
 
 /**
@@ -436,12 +423,12 @@ void answer_join(const state::gameplay::Endpoint& from, const wire::JoinRequest&
         // The peer acknowledges the packet that finishes establishment before it dispatches
         // application records. Publishing into that window permanently skips their reliable
         // sequences, so the next connected packet is the release gate.
-        const bool ready = bound && application_ready(request.sessionId);
+        const bool ready = bound && application_ready(from, request.sessionId);
         const bool published =
             ready && group::publish_membership(from, request.joinId, request.sessionId);
         // The peer needs both before it finishes: the snapshot names it, and the parameter update
         // releases the latch its own tick waits on.
-        const bool parameters = ready && group::publish_join_parameters(request.sessionId);
+        const bool parameters = ready && group::publish_join_parameters(from, request.sessionId);
         // Nothing else names what the peer thinks it is joining.
         report(core::log::Level::info,
                "ev=gameplay stage=join result=admit build=%u..%u exe=%u session=0x%016llX "
@@ -726,7 +713,7 @@ void consume_established(const state::gameplay::Endpoint& from,
         if (body.id == static_cast<std::uint8_t>(wire::ConnectId::establish)) {
             continue;
         }
-        report_session_publication_message(body);
+        report_session_publication_message(from, body);
         // Group handling runs outside the lock because answering takes it again.
         bits::Reader reader({body.bytes.data(), state::gameplay::kReassemblyCapacity});
         if (reader.skip(body.bodyBitOffset)
@@ -896,6 +883,21 @@ bool enqueue_reliable(std::uint64_t sessionId,
     return queued;
 }
 
+bool enqueue_reliable(const state::gameplay::Endpoint& endpoint,
+                      std::uint64_t sessionId,
+                      std::uint8_t id,
+                      std::uint32_t declaredSize,
+                      std::span<const std::byte> body,
+                      std::size_t bodyBits) noexcept {
+    AcquireSRWLockExclusive(&g_lock);
+    auto* const link = lookup::find(g_peers, sessionId, &endpoint);
+    const bool queued = link != nullptr
+        && wire::enqueue_message(link->outbound, id, declaredSize, body, bodyBits);
+    if (queued) { link->acknowledgementOwed = true; }
+    ReleaseSRWLockExclusive(&g_lock);
+    return queued;
+}
+
 /** Reports the NetAddr one peer sent in its own connect request. */
 bool remote_address(std::uint64_t sessionId,
                     std::array<std::byte, state::gameplay::kNetAddrBlobSize>& output) noexcept {
@@ -909,11 +911,31 @@ bool remote_address(std::uint64_t sessionId,
     return present;
 }
 
+bool remote_address(const state::gameplay::Endpoint& endpoint,
+                    std::uint64_t sessionId,
+                    std::array<std::byte, state::gameplay::kNetAddrBlobSize>& output) noexcept {
+    AcquireSRWLockShared(&g_lock);
+    const auto* const link = lookup::find(g_peers, sessionId, &endpoint);
+    const bool present = link != nullptr && link->remoteAddressPresent;
+    if (present) { output = link->remoteAddress; }
+    ReleaseSRWLockShared(&g_lock);
+    return present;
+}
+
 /** Reports whether one link is ready to dispatch group-session records. */
 bool application_ready(std::uint64_t sessionId) noexcept {
     AcquireSRWLockShared(&g_lock);
     const state::gameplay::PeerLink* const peer = find_session_locked(sessionId);
     const bool ready = peer != nullptr && peer->applicationReady;
+    ReleaseSRWLockShared(&g_lock);
+    return ready;
+}
+
+bool application_ready(const state::gameplay::Endpoint& endpoint,
+                       std::uint64_t sessionId) noexcept {
+    AcquireSRWLockShared(&g_lock);
+    const auto* const link = lookup::find(g_peers, sessionId, &endpoint);
+    const bool ready = link != nullptr && link->applicationReady;
     ReleaseSRWLockShared(&g_lock);
     return ready;
 }
@@ -928,11 +950,28 @@ void bind_view(std::uint64_t sessionId, const state::gameplay::ViewSignature& si
     ReleaseSRWLockExclusive(&g_lock);
 }
 
+void bind_view(const state::gameplay::Endpoint& endpoint,
+               std::uint64_t sessionId,
+               const state::gameplay::ViewSignature& signature) noexcept {
+    AcquireSRWLockExclusive(&g_lock);
+    auto* const link = lookup::find(g_peers, sessionId, &endpoint);
+    if (link != nullptr) { link->view = signature; }
+    ReleaseSRWLockExclusive(&g_lock);
+}
+
 /** Reports whether a view signature is bound. */
 bool view_bound(std::uint64_t sessionId) noexcept {
     AcquireSRWLockShared(&g_lock);
     const state::gameplay::PeerLink* peer = find_session_locked(sessionId);
     const bool bound = peer != nullptr && peer->view.bound;
+    ReleaseSRWLockShared(&g_lock);
+    return bound;
+}
+
+bool view_bound(const state::gameplay::Endpoint& endpoint, std::uint64_t sessionId) noexcept {
+    AcquireSRWLockShared(&g_lock);
+    const auto* const link = lookup::find(g_peers, sessionId, &endpoint);
+    const bool bound = link != nullptr && link->view.bound;
     ReleaseSRWLockShared(&g_lock);
     return bound;
 }
@@ -1001,6 +1040,15 @@ void drop(std::uint64_t sessionId) noexcept {
                 slot = 0;
             }
         }
+    }
+    ReleaseSRWLockExclusive(&g_lock);
+}
+
+void drop(const state::gameplay::Endpoint& endpoint, std::uint64_t sessionId) noexcept {
+    AcquireSRWLockExclusive(&g_lock);
+    auto* const link = lookup::find(g_peers, sessionId, &endpoint);
+    if (link != nullptr) {
+        for (auto& held : link->sessions) { if (held == sessionId) { held = 0; } }
     }
     ReleaseSRWLockExclusive(&g_lock);
 }

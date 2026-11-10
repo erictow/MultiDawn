@@ -4,7 +4,7 @@
 Packages the prebuilt MultiDawn launcher without game files or local settings.
 .EXAMPLE
 .\tools\launcher\Build-Launcher.ps1
-.\tools\install\New-MultiDawnLauncherRelease.ps1 -Release '0.1.0-preview.1'
+.\tools\install\New-MultiDawnLauncherRelease.ps1 -Release '0.2.0-preview.1'
 #>
 [CmdletBinding()]
 param(
