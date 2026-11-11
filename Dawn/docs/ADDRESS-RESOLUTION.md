@@ -6,8 +6,9 @@ parsing and BAP301 response encoding/parsing for build
 The embedded backend conditionally registers service 300/301 when
 `DAWN_NATIVE_ADDRESS_RESOLUTION=1` is present before the runtime starts. This
 development opt-in is cached for the DLL lifetime and is off by default.
-The implementation has passed isolated component tests. Native channel
-establishment and multiplayer gameplay remain unverified.
+The implementation has passed isolated component tests and completed a native
+client-to-embedded-server connection in an isolated Tower run. Shared two-player
+gameplay remains unverified.
 
 Native evidence is the request serializer at RVA `0xE0C2C0`, the response parser
 at `0xE0AF80`, the response installation path at `0xE00ED0` / `0xE08890`, and the
@@ -89,8 +90,7 @@ The corrected isolated run accepted 301, installed one native resolver entry,
 and sent 126-byte wrapped UDP packets that the embedded backend authenticated.
 The native channel advanced to `connecting3`, then timed out and retried after
 roughly 30 seconds. No DTLS exchange or native peer connection was observed.
-Wrapped server-to-client delivery and complete channel establishment remain
-unverified.
+This was the state before the direct engine-payload routing correction below.
 
 A subsequent bounded diagnostic observed 98-byte plaintext packets beginning
 with `C5`. Native senders `0x16D6150`, `0x16E3D80`, and `0x16E3470` independently
@@ -98,8 +98,15 @@ confirm this path carries an engine peer container directly: marker/follows,
 six-bit message ID 5, eighteen-bit decoded size 96, a 94-byte request body, and
 the final follows bit. No DTLS/SRP layer is nested inside the native wrapper.
 The endpoint now hands authenticated payloads to the existing peer handler and
-selects the authenticated native route first for its replies. Live verification
-of this direct routing change remains pending.
+selects the authenticated native route first for its replies. In the subsequent
+isolated Tower run, the parsed request was ID5/decoded96, Dawn sent its connection
+response and queued establishment, and the game returned reliable ID8 with
+`peerstage=5` (connected). The native connection observer reported `accepted=1`
+and the game began sending ID40 view exchanges. This verifies bidirectional
+native packet protection and connection establishment. The next observed gap
+is the view exchange, which the group handler currently refuses with
+`unresolved_group` before a group join. It does not establish a remote human or
+working shared gameplay.
 
 ## Embedded backend policy
 

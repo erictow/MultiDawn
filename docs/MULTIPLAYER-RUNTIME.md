@@ -66,16 +66,23 @@ entry. Its 126-byte wrapped UDP packets reached the embedded backend and passed
 authentication. The channel advanced to `connecting3`, then timed out and retried
 after roughly 30 seconds. No DTLS handshake or native peer connection was
 observed; the bounded snapshot still showed 26 owned facets and zero peers.
-This verifies native-to-server routed packets. Wrapped server-to-client delivery,
-a completed peer handshake, and shared gameplay remain unverified.
+This was the state before direct engine-payload routing was added.
 
 The next isolated trace identified 98-byte native payloads beginning with `C5`.
 Independent native sender inspection matched the existing engine container and
 ID5 connection request. This path carries engine messages directly inside the
 authenticated route, so the endpoint now delivers them to the peer handler
 without a nested DTLS/SRP exchange. The peer reply path selects the native route
-first and never falls back after a native send failure. Live verification of
-this routing change is pending.
+first and never falls back after a native send failure.
+
+The next isolated Tower run completed the native connection: Dawn answered
+ID5/decoded96, queued establishment, and received the game's reliable ID8 with
+`peerstage=5`. The native observer reported `accepted=1`, followed by ID40 view
+messages. This verifies bidirectional native packet protection and the peer
+handshake against the actual archived game. ID40 currently reaches the group
+handler before group membership exists and is refused as `unresolved_group`.
+No view token is treated as authorization or guessed to be a group ID. Remote
+human admission, shared membership and two-Guardian gameplay remain unverified.
 
 The opt-in trace subsequently located the actual fireteam and activity sessions.
 Both sampled sessions were in native mode 6, with one established local member,

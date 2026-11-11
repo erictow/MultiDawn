@@ -24,6 +24,9 @@ presets together. The game itself is not included.
 
 ## MultiDawn launcher preview
 
+`production` is this fork's default branch and published preview baseline.
+Ongoing multiplayer experiments live on `main` and are verified before promotion.
+
 This fork adds a portable Windows launcher with solo Play, a Multiplayer switch,
 and Host/Join pair codes, saved MultiDawn friends, and optional LAN/VPN IPv4
 addresses. A saved friend still needs a current host code. **Pairing currently connects the launchers only.
