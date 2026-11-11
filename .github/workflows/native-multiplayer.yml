@@ -5,18 +5,40 @@ on:
   push:
     paths:
       - 'Dawn/src/core/multiplayer/**'
+      - 'Dawn/src/middleware/bap/address_resolution.*'
+      - 'Dawn/src/middleware/bap/bap_frame.cpp'
+      - 'Dawn/src/middleware/bap/frame.h'
+      - 'Dawn/src/middleware/crypto/**'
+      - 'Dawn/src/middleware/gameplay/**'
+      - 'Dawn/src/server/bap/**'
       - 'Dawn/src/server/gameplay/**'
       - 'Dawn/src/steam/**'
       - 'Dawn/unit/*companion*'
+      - 'Dawn/unit/*address_resolution*'
+      - 'Dawn/unit/*des_cbc*'
+      - 'Dawn/unit/*routed_datagram*'
+      - 'Dawn/unit/*resolution_replay*'
+      - 'Dawn/unit/*endpoint_resolution*'
       - 'Dawn/unit/*shared_membership*'
       - 'Dawn/unit/*steam_social*'
       - '.github/workflows/native-multiplayer.yml'
   pull_request:
     paths:
       - 'Dawn/src/core/multiplayer/**'
+      - 'Dawn/src/middleware/bap/address_resolution.*'
+      - 'Dawn/src/middleware/bap/bap_frame.cpp'
+      - 'Dawn/src/middleware/bap/frame.h'
+      - 'Dawn/src/middleware/crypto/**'
+      - 'Dawn/src/middleware/gameplay/**'
+      - 'Dawn/src/server/bap/**'
       - 'Dawn/src/server/gameplay/**'
       - 'Dawn/src/steam/**'
       - 'Dawn/unit/*companion*'
+      - 'Dawn/unit/*address_resolution*'
+      - 'Dawn/unit/*des_cbc*'
+      - 'Dawn/unit/*routed_datagram*'
+      - 'Dawn/unit/*resolution_replay*'
+      - 'Dawn/unit/*endpoint_resolution*'
       - 'Dawn/unit/*shared_membership*'
       - 'Dawn/unit/*steam_social*'
       - '.github/workflows/native-multiplayer.yml'
@@ -35,12 +57,16 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          foreach ($suite in @('companion_protocol', 'companion_client', 'steam_social', 'shared_membership')) {
+          foreach ($suite in @('companion_protocol', 'companion_client', 'steam_social', 'shared_membership', 'address_resolution', 'des_cbc', 'routed_datagram', 'resolution_replay', 'address_resolution_host', 'endpoint_resolution')) {
             $destination = Join-Path $PWD "build/native-ci/$suite/"
             & msbuild "Dawn/unit/$($suite)_tests.vcxproj" /nologo /v:minimal /m:2 /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0 "/p:OutDir=$destination" "/p:IntDir=$($destination)obj/"
             if ($LASTEXITCODE -ne 0) { throw "$suite compilation failed" }
             & (Join-Path $destination "$($suite)_tests.exe")
             if ($LASTEXITCODE -ne 0) { throw "$suite tests failed" }
+            if ($suite -eq 'address_resolution_host') {
+              & (Join-Path $destination "$($suite)_tests.exe") --disabled
+              if ($LASTEXITCODE -ne 0) { throw 'Disabled address-resolution mode failed' }
+            }
           }
       - name: Build production companion test workers
         shell: powershell

@@ -22,6 +22,14 @@ namespace dawn::server::gameplay::endpoint {
  */
 void service(std::uint64_t now) noexcept;
 
+/** A bound native route must never fall back to an unprotected send on failure. */
+enum class RoutedSendResult : std::uint8_t { notRouted, failed, sent };
+
+/** Sends an engine payload only when an authenticated native route owns the destination. */
+[[nodiscard]] RoutedSendResult send_resolved_to(
+    const state::gameplay::Endpoint& destination,
+    std::span<const std::byte> payload) noexcept;
+
 /**
  * Sends one datagram to a client endpoint.
  * @param destination Host-order address and port.

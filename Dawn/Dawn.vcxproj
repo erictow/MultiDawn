@@ -746,6 +746,7 @@
     <ClCompile Include="src\middleware\protobuf\protobuf_wire.cpp" />
     <ClCompile Include="src\middleware\protobuf\protobuf_writer.cpp" />
     <ClCompile Include="src\middleware\bap\bap_frame.cpp" />
+    <ClCompile Include="src\middleware\bap\address_resolution.cpp" />
     <ClCompile Include="src\middleware\bap\account_translation\account_translation_response.cpp" />
     <ClCompile Include="src\middleware\bap\activity_host\activity_host_response.cpp" />
     <ClCompile Include="src\middleware\bap\activity_host_manager\request\activity_manager_request.cpp" />
@@ -878,6 +879,7 @@
     <ClCompile Include="src\middleware\crypto\ecc_p224_curve.cpp" />
     <ClCompile Include="src\middleware\crypto\tiger192.cpp" />
     <ClCompile Include="src\middleware\crypto\aes_cbc.cpp" />
+    <ClCompile Include="src\middleware\crypto\legacy_des_cbc.cpp" />
     <ClCompile Include="src\middleware\crypto\hmac.cpp" />
     <ClCompile Include="src\middleware\crypto\lookup3.cpp" />
     <ClCompile Include="src\middleware\crypto\murmur3.cpp" />
@@ -893,6 +895,7 @@
     <ClCompile Include="src\server\gameplay\gameplay_log.cpp" />
     <ClCompile Include="src\server\gameplay\gameplay_runtime.cpp" />
     <ClCompile Include="src\server\gameplay\endpoint\gameplay_endpoint.cpp" />
+    <ClCompile Include="src\server\gameplay\resolution\address_resolution_host.cpp" />
     <ClCompile Include="src\server\gameplay\association\association_host.cpp" />
     <ClCompile Include="src\server\gameplay\peer\peer_transport.cpp" />
     <ClCompile Include="src\middleware\gameplay\descriptor\join_descriptor.cpp" />
@@ -912,6 +915,7 @@
     <ClCompile Include="src\middleware\gameplay\dtls\dtls_messages.cpp" />
     <ClCompile Include="src\middleware\gameplay\dtls\association_keys.cpp" />
     <ClCompile Include="src\middleware\gameplay\dtls\record.cpp" />
+    <ClCompile Include="src\middleware\gameplay\routed_datagram.cpp" />
     <ClCompile Include="src\server\gameplay\dtls\dtls_host.cpp" />
   </ItemGroup>
   <ItemGroup Condition="'$(DawnRunClangTidy)'=='true'">
@@ -1282,6 +1286,7 @@
     <ClInclude Include="src\middleware\protobuf\codec.h" />
     <ClInclude Include="src\middleware\protobuf\protobuf_wire.h" />
     <ClInclude Include="src\middleware\bap\frame.h" />
+    <ClInclude Include="src\middleware\bap\address_resolution.h" />
     <ClInclude Include="src\middleware\bap\account_translation\account_translation_response.h" />
     <ClInclude Include="src\middleware\bap\activity_host\activity_host_response.h" />
     <ClInclude Include="src\middleware\bap\activity_host_manager\definition.h" />
@@ -1487,6 +1492,7 @@
     <ClInclude Include="src\middleware\crypto\ecc_p224_curve.h" />
     <ClInclude Include="src\middleware\crypto\tiger192.h" />
     <ClInclude Include="src\middleware\crypto\aes_cbc.h" />
+    <ClInclude Include="src\middleware\crypto\legacy_des_cbc.h" />
     <ClInclude Include="src\middleware\crypto\hmac.h" />
     <ClInclude Include="src\middleware\crypto\lookup3.h" />
     <ClInclude Include="src\middleware\crypto\murmur3.h" />
@@ -1503,6 +1509,8 @@
     <ClInclude Include="src\server\gameplay\gameplay_log.h" />
     <ClInclude Include="src\server\gameplay\gameplay_runtime.h" />
     <ClInclude Include="src\server\gameplay\endpoint\gameplay_endpoint.h" />
+    <ClInclude Include="src\server\gameplay\resolution\address_resolution_host.h" />
+    <ClInclude Include="src\server\gameplay\resolution\replay_window.h" />
     <ClInclude Include="src\server\gameplay\association\association_host.h" />
     <ClInclude Include="src\server\gameplay\peer\peer_transport.h" />
     <ClInclude Include="src\middleware\gameplay\descriptor\join_descriptor.h" />
@@ -1522,6 +1530,7 @@
     <ClInclude Include="src\middleware\gameplay\dtls\dtls_messages.h" />
     <ClInclude Include="src\middleware\gameplay\dtls\association_keys.h" />
     <ClInclude Include="src\middleware\gameplay\dtls\record.h" />
+    <ClInclude Include="src\middleware\gameplay\routed_datagram.h" />
     <ClInclude Include="src\server\gameplay\dtls\dtls_host.h" />
   </ItemGroup>
   <ItemGroup>

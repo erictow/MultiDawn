@@ -25,6 +25,7 @@ $manifestText = [IO.File]::ReadAllText((Join-Path $standalone 'launcher-release.
 $manifest = $manifestText | ConvertFrom-Json
 Check ($manifest.capabilities.launcherPairing -and -not $manifest.capabilities.gameplayMultiplayer -and
     -not $manifest.capabilities.inGameFriends) 'Manifest distinguishes pairing from gameplay and friends'
+Check ($manifest.capabilities.savedLauncherFriends -and $manifest.capabilities.manualPairingAddress) 'Manifest includes saved launcher friends and manual pairing addresses'
 Check ($manifestText -notmatch [regex]::Escape($repo)) 'Manifest contains no local workspace paths'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archive = [IO.Compression.ZipFile]::OpenRead($standalone + '.zip')

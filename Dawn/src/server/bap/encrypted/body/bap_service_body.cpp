@@ -14,6 +14,7 @@
 #include "../../../../middleware/web_service/messages/opcode505/opcode505_codec.h"
 #include "../../../../state/runtime/runtime.h"
 #include "../../../web_service/web_service_runtime.h"
+#include "../../../gameplay/resolution/address_resolution_host.h"
 #include "../activity_host_manager/activity_host_manager_route.h"
 #include "../activity_message/activity_message_route.h"
 #include "../internal.h"
@@ -169,6 +170,11 @@ bool process(const ServiceRoute& route,
     }
     case BodyCodec::steamCertificate:
         return middleware::bap::certificate::encode_response(requestBody, output, written);
+    case BodyCodec::addressResolution:
+        written = 0;
+        return lifecycle::authentication_key_is_current(session)
+               && gameplay::resolution::resolve_address(
+                   session.authenticationKey, requestBody, output, written);
     case BodyCodec::userMessageResponse:
         return middleware::bap::user_message::encode_minimal_response(output, written);
     case BodyCodec::webService: {

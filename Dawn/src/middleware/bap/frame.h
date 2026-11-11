@@ -66,6 +66,8 @@ enum class RequestService : std::uint16_t {
     notification171 = 171,
     /** Keeps an authenticated connection active. */
     echo = 250,
+    /** Resolves a native peer address and supplies its authenticated UDP route. */
+    resolvePeerAddress = 300,
     /** Registers the client with the relay service. */
     registerRelayClient = 302,
     /** Wraps the client-owned Steam certificate for the response. */
@@ -118,6 +120,8 @@ enum class ResponseService : std::uint16_t {
     registerSubscriber = 122,
     /** Acknowledges an authenticated keepalive. */
     echo = 251,
+    /** Returns a native peer address as a status-free notification (service 301). */
+    resolvePeerAddress = 301,
     /** Acknowledges relay registration. */
     registerRelayClient = 303,
     /** Returns the client-owned Steam certificate wrapper. */
@@ -132,6 +136,8 @@ enum class NotificationService : std::uint16_t {
     activityMessage = 9,
     /** Publishes one or more queuez family updates. */
     queuezUpdate = 123,
+    /** Native address-resolution notification, dispatched without a status field. */
+    resolvePeerAddress = 301,
 };
 
 /** Parsed BAP request header and borrowed body. */
@@ -159,7 +165,7 @@ struct OuterFrame {
 /** Parses one complete plaintext BAP request frame. */
 [[nodiscard]] bool parse_request(std::span<const std::byte> input, RequestFrame& request) noexcept;
 
-/** Encodes one plaintext BAP response frame with status 200. */
+/** Encodes a plaintext response; native service 301 uses its status-free notification header. */
 [[nodiscard]] bool encode_response(ResponseService service,
                                    std::uint32_t taskId,
                                    FrameType frameType,
@@ -167,7 +173,7 @@ struct OuterFrame {
                                    std::span<std::byte> output,
                                    std::size_t& written) noexcept;
 
-/** Encodes a BAP response inner header and body. */
+/** Encodes a status-200 response, or the status-free native service-301 notification. */
 [[nodiscard]] bool encode_response_payload(ResponseService service,
                                            std::uint32_t taskId,
                                            std::span<const std::byte> body,

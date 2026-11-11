@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations"><ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration></ItemGroup>
+  <PropertyGroup Label="Globals"><ProjectGuid>{7168EDDA-FC69-462D-9AE6-6814E561AFAE}</ProjectGuid><WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration"><ConfigurationType>Application</ConfigurationType><PlatformToolset>v145</PlatformToolset><UseDebugLibraries>false</UseDebugLibraries></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup><OutDir>$(ProjectDir)..\..\build\unit\address_resolution_host\</OutDir><IntDir>$(OutDir)obj\</IntDir><TargetName>address_resolution_host_tests</TargetName></PropertyGroup>
+  <ItemDefinitionGroup><ClCompile><LanguageStandard>stdcpp20</LanguageStandard><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><ConformanceMode>true</ConformanceMode><RuntimeLibrary>MultiThreaded</RuntimeLibrary><Optimization>MaxSpeed</Optimization><PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile><Link><AdditionalDependencies>bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies></Link></ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="address_resolution_host_tests.cpp" />
+    <ClCompile Include="..\src\server\gameplay\resolution\address_resolution_host.cpp" />
+    <ClCompile Include="..\src\middleware\bap\address_resolution.cpp" />
+    <ClCompile Include="..\src\middleware\gameplay\descriptor\join_descriptor.cpp" />
+    <ClCompile Include="..\src\middleware\gameplay\routed_datagram.cpp" />
+    <ClCompile Include="..\src\middleware\crypto\legacy_des_cbc.cpp" />
+    <ClCompile Include="..\src\middleware\crypto\random_bytes.cpp" />
+    <ClCompile Include="..\src\middleware\crypto\hmac.cpp" />
+    <ClCompile Include="..\src\middleware\crypto\murmur3.cpp" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

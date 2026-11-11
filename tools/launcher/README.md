@@ -4,7 +4,7 @@
 Framework. It launches an already installed Dawn copy; it does not download game
 files, install the DLL, or change saves and settings.
 
-Launcher 0.2 uses the `MD2` pairing protocol and pair codes. Both people need
+Launcher 0.2 and later use the `MD2` pairing protocol and pair codes. Both people need
 the same compatible build. Earlier `MD1` codes and handshakes are rejected
 before pairing because their launchers do not support native social controls.
 
@@ -54,11 +54,48 @@ No remote account-server handoff or local server shutdown is attempted.
 4. Disconnect closes the connection and listener. A host remains available when
    a partner disconnects, until the host chooses Disconnect.
 
+### Saved MultiDawn friends and manual addresses
+
+After pairing, enter a nickname and select **Save paired partner**. This saves
+the authenticated launcher's stable identity, nickname, last reachable IPv4
+address, and advertised hosting port. Select a saved friend before joining to
+prefill the optional destination fields and require that same authenticated
+launcher identity. A mismatch stops the join before admission; there is no
+automatic fallback to an unpinned connection.
+
+Paste the host's **current pair code** every time. Friend records contain no
+pair codes, tokens, or companion credentials. Restarting the hosting lobby
+creates a new token, so an old code will fail even when the saved address and
+identity are correct. If a friend's address or hosting port changes, edit the
+join override fields while keeping that friend selected, then save the paired
+partner again after connecting.
+
+The **Join IPv4 override** and **Join port** fields can also be used without a
+saved friend. Leave either field blank to use that value from the current pair
+code. Overrides change the destination only; both sides still perform the same
+pair-code HMAC authentication. An IP address alone cannot join a lobby. The
+host's address and pairing-port controls remain separate from these join fields.
+
+Friends are stored in `%LOCALAPPDATA%/MultiDawn/friends.json`, with a maximum of
+64 friends and 64 characters per nickname. Saves replace the file atomically.
+Invalid or corrupt files are preserved and saving is disabled until they can
+be read. The launcher's own stable identity lives in `peer-id.txt` beside it;
+keep that file when moving the launcher to preserve existing friend pins. This
+identity is separate from `steam-id.txt`, which is used by the native social
+companion. Removing a saved friend removes only that local record.
+
+This list contains MultiDawn friends added after pairing. It does not import a
+Steam friends list, contact Steam, or require a new Steam login. It does not
+change how the separately installed game uses Steam.
+
 Use the same LAN or a VPN that provides reachable IPv4 addresses. The default
 TCP port is 30979; allow that port through the host firewall if needed. Pairing
 does not configure firewall rules, router forwarding, NAT traversal, a relay, or
 Internet discovery. A pair code encodes the selected endpoint and a random
 128-bit bearer token. It is not a globally registered short ID.
+VPN addresses such as `25.x.x.x` and `100.64.x.x` are accepted when the network
+provides connectivity. Saving an address does not make an otherwise unreachable
+PC reachable.
 
 Pairing uses plain TCP with a versioned handshake, mutual HMAC authentication,
 fresh nonces, timeouts, one authenticated partner, and heartbeat checks. The
@@ -73,6 +110,9 @@ typing mistakes; it is not encryption.
 solo validation, process environment isolation, and the native companion pipe
 protocol through two fake native consumers. These tests do not launch Destiny 2
 or prove gameplay compatibility.
+Saved-friend tests also exercise bounded/corrupt-file handling, atomic-write
+failure, persistent identity, actual TCP destination overrides, rejected host
+identity pins, and rejection of stale tokens and IP-only joins.
 
 ## Native social companion
 

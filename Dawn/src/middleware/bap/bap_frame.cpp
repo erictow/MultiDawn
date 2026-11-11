@@ -71,12 +71,19 @@ bool parse_request(std::span<const std::byte> input, RequestFrame& request) noex
     return parse_request_payload(outer.payload, outer.frameType, request);
 }
 
-/** Encodes one status-200 BAP response header and body. */
+/** Encodes a response using the framing expected by its native consumer. */
 bool encode_response_payload(ResponseService service,
                              std::uint32_t taskId,
                              std::span<const std::byte> body,
                              std::span<std::byte> output,
                              std::size_t& written) noexcept {
+    // Build 86657 dispatches 301 through its push decoder E0AF80. It reads A
+    // immediately after the six-byte service/task header. A status-200 prefix
+    // shifts every field and kills the authenticated BAP connection (Weasel).
+    if (service == ResponseService::resolvePeerAddress) {
+        return encode_notification_payload(
+            NotificationService::resolvePeerAddress, taskId, body, output, written);
+    }
     written = 0;
     if (body.size() > std::numeric_limits<std::uint32_t>::max() - kResponseHeaderSize
         || output.size() < kResponseHeaderSize + body.size()) {
@@ -135,7 +142,7 @@ bool encode_frame(FrameType frameType,
     return true;
 }
 
-/** Encodes one complete plaintext status-200 BAP response. */
+/** Encodes a complete plaintext response with its service-specific header. */
 bool encode_response(ResponseService service,
                      std::uint32_t taskId,
                      FrameType frameType,

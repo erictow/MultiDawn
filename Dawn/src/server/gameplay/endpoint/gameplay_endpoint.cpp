@@ -8,10 +8,15 @@
 #include "../../../core/settings/settings.h"
 #include "../../../state/gameplay/replication_roles.h"
 #include "../../../middleware/crypto/random_bytes.h"
+#include "../../../middleware/encoding/bit_reader.h"
+#include "../../../middleware/gameplay/peer/peer_container.h"
 #include "../../../middleware/gameplay/nat/introduction.h"
+#include "../../../middleware/gameplay/routed_datagram.h"
 #include "../association/association_host.h"
 #include "../dtls/dtls_host.h"
 #include "../gameplay_log.h"
+#include "../peer/peer_transport.h"
+#include "../resolution/address_resolution_host.h"
 
 namespace dawn::server::gameplay::endpoint {
 
@@ -22,7 +27,8 @@ namespace settings = core::settings::server::gameplay;
 /** One receive slice drains at most this many datagrams so the caller's thread returns. */
 constexpr unsigned kReceiveBudget = 32;
 /** Largest datagram accepted. Anything longer is dropped before it is parsed. */
-constexpr std::size_t kDatagramCapacity = 1500;
+constexpr std::size_t kInnerDatagramCapacity = 1500;
+constexpr std::size_t kDatagramCapacity = middleware::gameplay::routed_datagram::kMaximumDatagram;
 /** Arrivals reported per run. Enough to show a handshake without a flood filling the log. */
 constexpr unsigned kMaxReceiveReports = 64;
 /** Traversal replies reported per run. The client repeats a request until the address resolves. */
@@ -31,6 +37,8 @@ constexpr unsigned kMaxTraversalReports = 8;
 /** Arrivals and traversal replies already reported, counted against the budgets above. */
 std::atomic<unsigned> g_reported{0};
 std::atomic<unsigned> g_traversalReported{0};
+/** A few authenticated payload shapes distinguish handshake stages without logging bodies. */
+std::atomic<unsigned> g_resolvedPayloadReported{0};
 
 /** Endpoint state serviced only while the lifecycle lock is held. */
 struct Endpoint {
@@ -62,7 +70,7 @@ struct Endpoint {
     return true;
 }
 
-SRWLOCK g_lock{SRWLOCK_INIT};
+SRWLOCK g_lock = SRWLOCK_INIT;
 Endpoint g_endpoint;
 
 /**
@@ -164,6 +172,24 @@ void close_locked() noexcept {
     return true;
 }
 
+/** Sends already-protected bytes. NAT introductions intentionally remain unwrapped. */
+[[nodiscard]] bool send_raw_to(const state::gameplay::Endpoint& destination,
+                               std::span<const std::byte> datagram) noexcept {
+    if (datagram.empty() || destination.port == 0) { return false; }
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(destination.port);
+    address.sin_addr.s_addr = htonl(destination.address);
+    AcquireSRWLockShared(&g_lock);
+    const SOCKET socket = g_endpoint.socket;
+    const int sent = socket == INVALID_SOCKET ? SOCKET_ERROR
+        : sendto(socket, reinterpret_cast<const char*>(datagram.data()),
+                 static_cast<int>(datagram.size()), 0,
+                 reinterpret_cast<const sockaddr*>(&address), sizeof address);
+    ReleaseSRWLockShared(&g_lock);
+    return sent == static_cast<int>(datagram.size());
+}
+
 } // namespace
 
 /** Binds the gameplay UDP endpoint when the configured topology is embedded. */
@@ -237,7 +263,7 @@ void service(std::uint64_t now) noexcept {
         // A traversal request is answered before routing: the association layer has no reader
         // for it, and until it is answered the client never resolves this address.
         if (middleware::gameplay::nat::make_introduction_reply({buffer.data(), size})) {
-            const bool sent = send_to(from, {buffer.data(), size});
+            const bool sent = send_raw_to(from, {buffer.data(), size});
             if (g_traversalReported.fetch_add(1, std::memory_order_relaxed)
                 < kMaxTraversalReports) {
                 report(core::log::Level::info,
@@ -248,38 +274,66 @@ void service(std::uint64_t now) noexcept {
             }
             continue;
         }
-        // The peer opens every connection with the Demonware association handshake, so this runs
-        // ahead of the engine association the same port also carries.
-        if (dtls::route(from, {buffer.data(), size}, now)) {
+        std::array<std::byte, kInnerDatagramCapacity> opened{};
+        std::size_t openedSize = 0;
+        const auto protectedResult = resolution::unwrap(from, {buffer.data(), size}, opened, openedSize);
+        if (protectedResult == resolution::PacketResult::rejected) { continue; }
+        std::span<const std::byte> payload(buffer.data(), size);
+        if (protectedResult == resolution::PacketResult::complete) {
+            payload = {opened.data(), openedSize};
+            if (g_resolvedPayloadReported.fetch_add(1, std::memory_order_relaxed) < 8) {
+                const unsigned first = payload.empty() ? 0U : std::to_integer<unsigned>(payload[0]);
+                const bool container = (first & 0x80U) != 0;
+                middleware::encoding::bits::Reader reader(payload);
+                middleware::gameplay::peer::MessageHeader header{};
+                bool present = false;
+                const bool decoded = container
+                    && middleware::gameplay::peer::read_marker(reader)
+                    && middleware::gameplay::peer::read_header(reader, header, present)
+                    && present;
+                report(core::log::Level::info,
+                       "ev=gameplay stage=resolved_payload bytes=%zu out_of_band=%u header=%u "
+                       "id=%u declared=%u",
+                       payload.size(), container ? 1U : 0U, decoded ? 1U : 0U,
+                       decoded ? static_cast<unsigned>(header.id) : 255U,
+                       decoded ? header.declaredSize : 0U);
+            }
+            // Native relay security already protects the engine container or
+            // fragment. It is not a Demonware/SRP handshake nested inside it.
+            peer::deliver(from, payload, now);
+            continue;
+        } else if (size > kInnerDatagramCapacity) {
             continue;
         }
-        association::route(from, {buffer.data(), size}, now);
+        // The peer opens every connection with the Demonware association handshake, so this runs
+        // ahead of the engine association the same port also carries.
+        if (dtls::route(from, payload, now)) {
+            continue;
+        }
+        association::route(from, payload, now);
     }
     association::expire(now);
+}
+
+RoutedSendResult send_resolved_to(const state::gameplay::Endpoint& destination,
+                                  std::span<const std::byte> payload) noexcept {
+    std::array<std::byte, kDatagramCapacity> protectedBytes{};
+    std::size_t protectedSize = 0;
+    const auto result = resolution::wrap(destination, payload, protectedBytes, protectedSize);
+    if (result == resolution::PacketResult::rejected) { return RoutedSendResult::failed; }
+    if (result == resolution::PacketResult::complete) {
+        return send_raw_to(destination, {protectedBytes.data(), protectedSize})
+            ? RoutedSendResult::sent : RoutedSendResult::failed;
+    }
+    return RoutedSendResult::notRouted;
 }
 
 /** Sends one datagram to a client endpoint. */
 bool send_to(const state::gameplay::Endpoint& destination,
              std::span<const std::byte> datagram) noexcept {
-    if (datagram.empty() || destination.port == 0) {
-        return false;
-    }
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_port = htons(destination.port);
-    address.sin_addr.s_addr = htonl(destination.address);
-    AcquireSRWLockShared(&g_lock);
-    const SOCKET socket = g_endpoint.socket;
-    const int sent = socket == INVALID_SOCKET
-                         ? SOCKET_ERROR
-                         : sendto(socket,
-                                  reinterpret_cast<const char*>(datagram.data()),
-                                  static_cast<int>(datagram.size()),
-                                  0,
-                                  reinterpret_cast<const sockaddr*>(&address),
-                                  sizeof address);
-    ReleaseSRWLockShared(&g_lock);
-    return sent == static_cast<int>(datagram.size());
+    const auto result = send_resolved_to(destination, datagram);
+    if (result != RoutedSendResult::notRouted) { return result == RoutedSendResult::sent; }
+    return send_raw_to(destination, datagram);
 }
 
 /** Closes the socket and releases the Winsock reference this module took. */

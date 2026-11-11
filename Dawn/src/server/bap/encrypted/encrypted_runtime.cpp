@@ -105,6 +105,14 @@ bool consume(Session& session,
                           responseBodySize,
                           outcome)) {
         diagnostics::report_failure(frame.messageId, "body");
+        if (route.bodyCodec == BodyCodec::addressResolution) {
+            // 301 is a notification with required fields, not an empty status
+            // acknowledgment. A refused experimental request must not emit a
+            // malformed push that disconnects the entire authenticated client.
+            clear_prefix(scratch.plaintext, plaintextSize);
+            clear_prefix(scratch.responseBody, responseBodySize);
+            return true;
+        }
         // A reply-mode service answers with an empty body instead of not at all. The Client
         // matches only the head of its pending ring, so one unanswered request jams that ring for
         // good and every later reply is rejected, which is worse than a thin reply.
@@ -465,7 +473,18 @@ bool consume(Session& session,
     SecureZeroMemory(&publication, sizeof publication);
     SecureZeroMemory(&queuezPublication, sizeof queuezPublication);
     if (handled) {
-        core::log::write(core::log::Channel::server, core::log::Level::info, route.successEvent);
+        if (route.knownService) {
+            core::log::write(core::log::Channel::server, core::log::Level::info, route.successEvent);
+        } else {
+            std::array<char, 160> line{};
+            const int length = std::snprintf(line.data(), line.size(),
+                "ev=bap svc=%u rsp=none result=unhandled task=%u body_bytes=%zu",
+                static_cast<unsigned>(frame.messageId), frame.taskId, frame.body.size());
+            if (length > 0 && static_cast<std::size_t>(length) < line.size()) {
+                core::log::write(core::log::Channel::server, core::log::Level::info,
+                                 {line.data(), static_cast<std::size_t>(length)});
+            }
+        }
     }
     return handled;
 }

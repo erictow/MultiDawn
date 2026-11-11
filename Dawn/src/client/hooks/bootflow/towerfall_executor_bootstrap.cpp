@@ -62,6 +62,7 @@ constexpr std::size_t kPublicationPackageOffset = 0x58U;
 constexpr std::uint32_t kMaxOmegaProducerEvents = 2048U;
 constexpr std::uint32_t kMaxOmegaManagerEvents = 2048U;
 constexpr std::uint32_t kMaxOmegaComponentEvents = 256U;
+constexpr std::uint32_t kMaxNativeSessionTraceEvents = 128U;
 
 constexpr std::string_view kSelectionPumpSignatureText =
     "4C 8B DC 49 89 5B 18 49 89 73 20 55 57 41 54 41 55 41 56 49 8D AB A8 FD FF FF "
@@ -184,6 +185,13 @@ struct RouteSnapshot final {
     std::size_t packageLength{};
 };
 
+struct NativeSessionTraceState final {
+    std::byte* manager{};
+    std::byte* definition{};
+    std::int32_t mode{-1};
+    std::int32_t identity{-1};
+};
+
 [[nodiscard]] RouteSnapshot snapshot_route() noexcept;
 [[nodiscard]] bool is_towerfall_route(const RouteSnapshot& route) noexcept;
 void report_route(const char* stage,
@@ -223,6 +231,10 @@ std::atomic_uint64_t g_lastSuccessfulProducer{};
 std::atomic_uint64_t g_lastSuccessfulRetryProducer{};
 std::atomic_uint64_t g_lastRouteSignature{~std::uint64_t{0}};
 std::array<std::atomic_uint64_t, 8> g_lastManagerSignatures{};
+std::atomic_bool g_nativeSessionTraceEnabled{};
+SRWLOCK g_nativeSessionTraceLock{};
+std::array<NativeSessionTraceState, 32> g_nativeSessionTraceStates{};
+std::uint32_t g_nativeSessionTraceEvents{};
 std::atomic<std::byte*> g_lastRouteManager{nullptr};
 std::atomic_bool g_prelaunchInstallInProgress{};
 std::atomic<const prelaunch::Profile*> g_prelaunchPublicationPending{};
@@ -439,6 +451,63 @@ void write_line(core::log::Level level,
     const std::size_t bounded =
         (std::min)(static_cast<std::size_t>(length), line.size() - 1U);
     core::log::write(core::log::Channel::client, level, {line.data(), bounded});
+}
+
+[[nodiscard]] bool native_session_trace_requested() noexcept {
+    // Read once during installation, never from the per-frame update hook.
+    static const bool requested = []() noexcept {
+        std::array<wchar_t, 2> value{};
+        return GetEnvironmentVariableW(L"DAWN_NATIVE_SESSION_TRACE", value.data(),
+                                       static_cast<DWORD>(value.size())) == 1U
+               && value[0] == L'1';
+    }();
+    return requested;
+}
+
+void trace_native_session(std::byte* manager,
+                          const ManagerSnapshot& snapshot,
+                          const IdentityDefinitionSnapshot& definition) noexcept {
+    if (!g_nativeSessionTraceEnabled.load(std::memory_order_relaxed)
+        || manager == nullptr || !TryAcquireSRWLockExclusive(&g_nativeSessionTraceLock)) {
+        return;
+    }
+
+    bool changed = false;
+    if (g_nativeSessionTraceEvents < kMaxNativeSessionTraceEvents) {
+        NativeSessionTraceState* available = nullptr;
+        for (auto& state : g_nativeSessionTraceStates) {
+            if (state.manager == manager) {
+                available = &state;
+                break;
+            }
+            if (state.manager == nullptr && available == nullptr) {
+                available = &state;
+            }
+        }
+        if (available != nullptr
+            && (available->manager != manager || available->mode != snapshot.mode
+                || available->identity != snapshot.identity
+                || available->definition != definition.definition)) {
+            *available = {manager, definition.definition, snapshot.mode, snapshot.identity};
+            ++g_nativeSessionTraceEvents;
+            changed = true;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_nativeSessionTraceLock);
+    if (!changed) {
+        return;
+    }
+
+    // These existing snapshots contain more data. Keep this opt-in event limited
+    // to addresses and scalar session state, without descriptors or security data.
+    std::array<char, core::log::kLineCapacity> line{};
+    const int length = std::snprintf(
+        line.data(), line.size(),
+        "ev=native_session stage=manager_update pid=%lu manager=%p mode=%d identity=%d definition=%p",
+        static_cast<unsigned long>(GetCurrentProcessId()),
+        static_cast<void*>(manager), snapshot.mode, snapshot.identity,
+        static_cast<void*>(definition.definition));
+    write_line(core::log::Level::info, line, length);
 }
 
 [[nodiscard]] bool forced_package(std::string_view package,
@@ -1788,6 +1857,7 @@ __declspec(noinline) void __fastcall manager_update_loop(std::byte* manager) noe
     const ManagerSnapshot after = snapshot_manager(manager);
     const IdentityDefinitionSnapshot definitionAfter =
         snapshot_identity_definition(after.identity);
+    trace_native_session(manager, after, definitionAfter);
     if (traceOmegaCall) {
         log_omega_manager_call("exit",
                                next_binding_timeline(),
@@ -2184,6 +2254,8 @@ bool install_towerfall_executor_bootstrap() noexcept {
     g_nextPrelaunchInstallTick.store(0U, std::memory_order_release);
     g_prelaunchInstallAttempts.store(0U, std::memory_order_release);
     g_identityTraceSequence.store(0U, std::memory_order_release);
+    g_nativeSessionTraceEnabled.store(native_session_trace_requested(),
+                                      std::memory_order_release);
     g_callGate.accept();
     core::log::write(
         core::log::Channel::client,

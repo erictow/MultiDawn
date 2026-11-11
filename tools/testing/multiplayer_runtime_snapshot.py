@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import struct
 import sys
 
@@ -51,12 +52,17 @@ def bits(data: bytes) -> list[int]:
 def net_address(data: bytes) -> dict:
     if len(data) != 86:
         raise ValueError("NetAddr must contain 86 bytes")
-    # The remaining bytes can contain transport-specific identifiers. Keep them
-    # out of the report; only the documented endpoints and method are emitted.
+    # Methods 6/7 contain a Steam identity, not IPv4 endpoints. Treating that
+    # payload as an IP leaks opaque identity bytes and produces fictitious IPs.
+    method = data[85]
+    result = {"method": method, "method_valid": method <= 7, "present": any(data),
+              "transport": "direct_ip" if method == 0 else "steam" if method in (6, 7) else "other"}
+    if method != 0:
+        return result
     def endpoint(offset: int) -> str:
         return ".".join(str(v) for v in data[offset:offset + 4]) + ":" + str(unpack(data, offset + 4, "H"))
-    return {"local": endpoint(0), "public": endpoint(30), "method": data[85],
-            "method_valid": data[85] <= 7, "present": any(data)}
+    result.update(local=endpoint(0), public=endpoint(30))
+    return result
 
 
 def descriptor(data: bytes) -> dict:
@@ -75,6 +81,31 @@ def stable(read, start: int, size: int) -> bytes:
     if len(first) != size or first != read(start, size):
         raise ValueError("Sample changed during the two reads; retry at a stable game state")
     return first
+
+
+def trace_addresses(text: str, pid: int) -> tuple[list[int], list[int]]:
+    """Select the latest initialized manager observations for this exact process."""
+    pattern = re.compile(r"(?:^|\s)ev=native_session stage=manager_update pid=(\d+) "
+        r"manager=(?:0x)?([0-9A-Fa-f]{1,16}) mode=(-?\d+) identity=(-?\d+) "
+        r"definition=(?:0x)?([0-9A-Fa-f]{1,16})(?:\s|$)")
+    latest = {}
+    for line in text.splitlines():
+        match = pattern.search(line)
+        if match is None or int(match[1]) != pid:
+            continue
+        manager, definition = int(match[2], 16), int(match[5], 16)
+        checked_range(manager, 1)
+        if definition:
+            checked_range(definition, 1)
+        latest[manager] = (int(match[3]), int(match[4]), definition)
+    initialized = [(manager, definition) for manager, (mode, identity, definition) in latest.items()
+                   if mode >= 0 and 0 <= identity < 7]
+    if not initialized:
+        raise ValueError("Trace contains no initialized native session for the requested PID")
+    if len(initialized) > 16:
+        raise ValueError("Trace exceeds the bounded capacity of 16 initialized sessions")
+    return [manager for manager, _ in initialized], list(dict.fromkeys(
+        definition for _, definition in initialized if definition))
 
 
 def session_snapshot(read, session: int) -> dict:
@@ -271,6 +302,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--session", action="append", type=address, default=[], help="Verified native session/manager address; repeatable")
     result.add_argument("--fireteam-manager", type=address, help="Verified world manager; selects its primary session at +0x18 + primary*0x1C8A0")
     result.add_argument("--managed-definition", action="append", type=address, default=[], help="Verified managed-session definition address; repeatable")
+    result.add_argument("--trace-log", type=Path, help="Read PID-matching opt-in native-session events from a log (maximum 32 MiB)")
     return result
 
 
@@ -285,6 +317,18 @@ def main(argv=None) -> int:
         raise ValueError("--game-exe must name destiny2.exe")
     if args.output.exists():
         raise FileExistsError("Output already exists; choose a new file")
+    traced_sessions, traced_definitions = [], []
+    if args.trace_log:
+        if args.trace_log.stat().st_size > 32 * 1024 * 1024:
+            raise ValueError("Trace log exceeds the 32 MiB input limit")
+        with args.trace_log.open("rb") as trace:
+            contents = trace.read(32 * 1024 * 1024 + 1)
+        if len(contents) > 32 * 1024 * 1024:
+            raise ValueError("Trace log exceeded the input limit while reading")
+        traced_sessions, traced_definitions = trace_addresses(contents.decode("utf-8-sig"), args.pid)
+        if any(len(set(explicit + traced)) > 16 for explicit, traced in
+               ((args.session, traced_sessions), (args.managed_definition, traced_definitions))):
+            raise ValueError("Combined trace and explicit addresses exceed the 16-entry limit")
     process = ProcessReader(args.pid, expected)
     try:
         report = {"schema": "multidawn-runtime-snapshot-v1", "captured_utc": datetime.now(timezone.utc).isoformat(),
@@ -302,7 +346,10 @@ def main(argv=None) -> int:
         report["loaded_dawn_modules"] = [{"path": str(path), "base": hex(base), "sha256": sha256(path)}
             for base, path in process.modules if path.name.lower() == "steam_api64.dll"]
         if report["layout_verified"]:
-            sessions = list(args.session)
+            sessions = list(args.session) + traced_sessions
+            definitions = list(args.managed_definition) + traced_definitions
+            if args.trace_log:
+                report["address_source"] = "PID-matching native manager-update trace"
             if args.fireteam_manager:
                 primary = unpack(stable(process.read, args.fireteam_manager + 0x10, 4), 0, "i")
                 if not 0 <= primary <= 3:
@@ -312,7 +359,7 @@ def main(argv=None) -> int:
                     "session": hex(sessions[-1])}
             for values, key, sample in ((args.group, "groups", group_snapshot),
                                         (sessions, "sessions", session_snapshot),
-                                        (args.managed_definition, "managed_definitions", definition_snapshot)):
+                                        (definitions, "managed_definitions", definition_snapshot)):
                 for pointer in dict.fromkeys(values):
                     try:
                         report[key].append(sample(process.read, pointer))

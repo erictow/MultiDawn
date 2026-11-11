@@ -5,11 +5,13 @@
 #include "endpoint/gameplay_endpoint.h"
 #include "group/group_host.h"
 #include "peer/peer_transport.h"
+#include "resolution/address_resolution_host.h"
 
 namespace dawn::server::gameplay {
 
 /** Binds the gameplay endpoint for the configured topology. */
 bool initialize() noexcept {
+    resolution::reset();
     association::reset();
     dtls::reset();
     peer::reset();
@@ -32,6 +34,7 @@ void shutdown() noexcept {
     group::reset();
     dtls::reset();
     association::reset();
+    resolution::reset();
 }
 
 } // namespace dawn::server::gameplay

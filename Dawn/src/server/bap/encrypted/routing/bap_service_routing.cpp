@@ -1,4 +1,5 @@
 #include "../internal.h"
+#include "../../../gameplay/resolution/address_resolution_host.h"
 
 namespace dawn::server::bap::encrypted::routing {
 
@@ -132,6 +133,17 @@ bool resolve(std::uint16_t request, ServiceRoute& route) noexcept {
                  BodyCodec::empty,
                  "ev=bap svc=250 rsp=251 result=ok"};
         return true;
+    case middleware::bap::RequestService::resolvePeerAddress:
+        if (!gameplay::resolution::enabled()) {
+            route = {ResponseMode::none, {}, BodyCodec::empty,
+                     "ev=bap svc=unhandled rsp=none result=ok", false};
+        } else {
+            route = {ResponseMode::reply,
+                     middleware::bap::ResponseService::resolvePeerAddress,
+                     BodyCodec::addressResolution,
+                     "ev=bap svc=300 rsp=301 result=ok"};
+        }
+        return true;
     case middleware::bap::RequestService::registerRelayClient:
         route = {ResponseMode::reply,
                  middleware::bap::ResponseService::registerRelayClient,
@@ -160,7 +172,7 @@ bool resolve(std::uint16_t request, ServiceRoute& route) noexcept {
         // Unknown services stay quiet. Failing the send would drop the whole BAP link.
         // Quiet is only safe when the service has no response id. A request needs a case above.
         route = {
-            ResponseMode::none, {}, BodyCodec::empty, "ev=bap svc=unhandled rsp=none result=ok"};
+            ResponseMode::none, {}, BodyCodec::empty, "ev=bap svc=unhandled rsp=none result=ok", false};
         return true;
     }
 }

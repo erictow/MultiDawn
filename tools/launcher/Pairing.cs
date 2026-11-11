@@ -115,7 +115,8 @@ namespace MultiDawn.Launcher
         }
 
         private readonly object sync = new object();
-        private readonly string localPeerId = NewPeerId();
+        private readonly string localPeerId;
+        private readonly int preferredHostPort;
         private SessionLifetime lifetime;
         private TcpListener listener;
         private TcpClient peer;
@@ -130,9 +131,19 @@ namespace MultiDawn.Launcher
         private string code = "", token = "", peerId = "";
         private IPAddress address;
         private int port;
+        private int peerHostPort;
+
+        public PairSession() : this(NewPeerId(), 30979) { }
+        public PairSession(string persistentPeerId, int preferredListenPort)
+        {
+            if (!ValidIdentity(persistentPeerId)) throw new ArgumentException("Invalid persistent launcher identity.");
+            if (preferredListenPort < 1 || preferredListenPort > 65535) throw new ArgumentException("Invalid preferred hosting port.");
+            localPeerId = persistentPeerId; preferredHostPort = preferredListenPort;
+        }
 
         public event Action<string> StatusChanged;
         public event Action<bool> PeerChanged;
+        public event Action PeerEndpointChanged;
         /** Post-authenticated bounded launcher control messages. They are not gameplay packets. */
         public event Action<string> ControlReceived;
         internal event Action<long, string, string> ConnectionControlReceived;
@@ -148,6 +159,20 @@ namespace MultiDawn.Launcher
         public IPAddress Address { get { lock (sync) return address; } }
         public int Port { get { lock (sync) return port; } }
         public static string NewPeerId() { return PairCode.RandomToken(); }
+        public bool TryPeerEndpoint(out string identity, out IPEndPoint endpoint)
+        {
+            lock (sync)
+            {
+                identity = ""; endpoint = null;
+                if (peer == null || peerHostPort == 0) return false;
+                IPEndPoint remote;
+                try { Socket socket = peer.Client; if (socket == null) return false; remote = socket.RemoteEndPoint as IPEndPoint; }
+                catch (SocketException) { return false; }
+                catch (ObjectDisposedException) { return false; }
+                if (remote == null) return false;
+                identity = peerId; endpoint = new IPEndPoint(remote.Address, peerHostPort); return true;
+            }
+        }
 
         public Task SendControlAsync(string message) { return SendControlAsync(message, ConnectionGeneration); }
 
@@ -196,9 +221,16 @@ namespace MultiDawn.Launcher
             return Task.FromResult(0);
         }
 
-        public async Task JoinAsync(string pairCode)
+        public Task JoinAsync(string pairCode) { return JoinAsync(pairCode, null, null, null); }
+
+        public async Task JoinAsync(string pairCode, IPAddress destinationAddress, int? destinationPort, string expectedHostPeerId)
         {
             PairCode parsed = PairCode.Parse(pairCode);
+            IPAddress targetAddress = destinationAddress ?? parsed.Address;
+            int targetPort = destinationPort ?? parsed.Port;
+            PairCode.ValidateAddress(targetAddress);
+            if (targetPort < 1 || targetPort > 65535) throw new ArgumentException("Join port must be between 1 and 65535.");
+            if (expectedHostPeerId != null && !ValidIdentity(expectedHostPeerId)) throw new ArgumentException("Invalid saved friend identity.");
             Disconnect();
             SessionLifetime current = new SessionLifetime();
             current.AddWorker();
@@ -206,8 +238,8 @@ namespace MultiDawn.Launcher
             lock (sync)
             {
                 lifetime = current;
-                address = parsed.Address;
-                port = parsed.Port;
+                address = targetAddress;
+                port = targetPort;
                 token = parsed.Token;
                 code = pairCode.Trim();
                 pending.Add(client);
@@ -217,7 +249,7 @@ namespace MultiDawn.Launcher
             {
                 using (current.Token.Register(delegate { client.Close(); }))
                 {
-                    Task connect = client.ConnectAsync(parsed.Address, parsed.Port);
+                    Task connect = client.ConnectAsync(targetAddress, targetPort);
                     if (await Task.WhenAny(connect, Task.Delay(5000, current.Token)).ConfigureAwait(false) != connect)
                     {
                         current.Token.ThrowIfCancellationRequested();
@@ -237,6 +269,8 @@ namespace MultiDawn.Launcher
                         || !SameProof(words[4], Proof(parsed.Token, "host", clientNonce, words[2], localPeerId, words[3])))
                         throw new IOException("The host rejected the pair code or uses a different launcher protocol.");
                     string hostIdentity = words[3];
+                    if (expectedHostPeerId != null && !String.Equals(hostIdentity, expectedHostPeerId, StringComparison.Ordinal))
+                        throw new IOException("The authenticated host does not match the selected saved friend. Check their current code and address.");
                     await WriteLineAsync(stream, "MD2 PROOF " + Proof(parsed.Token, "join", clientNonce, words[2], localPeerId, hostIdentity), current.Token).ConfigureAwait(false);
                     response = await ReadLineAsync(stream, 5000, current.Token).ConfigureAwait(false);
                     if (response == "MD2 BUSY") throw new IOException("The host already has a paired player.");
@@ -246,6 +280,7 @@ namespace MultiDawn.Launcher
                         if (lifetime != current) throw new OperationCanceledException();
                         pending.Remove(client);
                         peer = client;
+                        peerHostPort = targetPort;
                         connectionGeneration++;
                         peerId = hostIdentity;
                     }
@@ -264,6 +299,7 @@ namespace MultiDawn.Launcher
                         lifetime = null;
                         if (peer != null) connectionGeneration++;
                         peer = null;
+                        peerHostPort = 0;
                         peerWrites = null;
                         code = token = peerId = "";
                         address = null;
@@ -345,6 +381,7 @@ namespace MultiDawn.Launcher
                     {
                         if (lifetime != current) return;
                         peer = client;
+                        peerHostPort = 0;
                         connectionGeneration++;
                         peerId = words[3];
                         accepted = true;
@@ -372,7 +409,9 @@ namespace MultiDawn.Launcher
             {
                 SemaphoreSlim writes = controlWrites;
                 lock (sync) { if (lifetime == current && peer == client) { peerWrites = writes; peerCancellation = monitor.Token; } }
-                Task heartbeat = HeartbeatAsync(client, writes, monitor.Token);
+                int advertisedPort;
+                lock (sync) advertisedPort = isHost ? port : preferredHostPort;
+                Task heartbeat = HeartbeatAsync(client, writes, monitor.Token, advertisedPort);
                 Task reader = ReadPeerAsync(client, writes, current, monitor.Token);
                 try { await Task.WhenAny(heartbeat, reader).ConfigureAwait(false); }
                 catch (Exception) { }
@@ -386,6 +425,7 @@ namespace MultiDawn.Launcher
                 if (lifetime == current && peer == client)
                 {
                     peer = null;
+                    peerHostPort = 0;
                     connectionGeneration++;
                     peerWrites = null;
                     peerId = "";
@@ -408,8 +448,9 @@ namespace MultiDawn.Launcher
             finally { current.WorkerDone(); }
         }
 
-        private static async Task HeartbeatAsync(TcpClient client, SemaphoreSlim writes, CancellationToken cancellation)
+        private static async Task HeartbeatAsync(TcpClient client, SemaphoreSlim writes, CancellationToken cancellation, int advertisedPort)
         {
+            await SerializedWriteAsync(client.GetStream(), writes, "MD2 CONTROL " + Convert.ToBase64String(Encoding.ASCII.GetBytes("FRIEND1 PORT " + advertisedPort.ToString(System.Globalization.CultureInfo.InvariantCulture))), cancellation).ConfigureAwait(false);
             while (true)
             {
                 await Task.Delay(2000, cancellation).ConfigureAwait(false);
@@ -435,6 +476,18 @@ namespace MultiDawn.Launcher
                     {
                         if (lifetime != current || peer != client) return;
                         string message = Encoding.ASCII.GetString(payload);
+                        if (message.StartsWith("FRIEND1 PORT ", StringComparison.Ordinal))
+                        {
+                            int advertised;
+                            string value = message.Substring(13);
+                            if (!Int32.TryParse(value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out advertised)
+                                || advertised < 1 || advertised > 65535 || value != advertised.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                                throw new IOException("Invalid authenticated friend endpoint.");
+                            peerHostPort = advertised;
+                            Action endpointChanged = PeerEndpointChanged;
+                            if (endpointChanged != null) endpointChanged();
+                            continue;
+                        }
                         Action<long, string, string> boundReceiver = ConnectionControlReceived;
                         if (boundReceiver != null) boundReceiver(connectionGeneration, peerId, message);
                         Action<string> receiver = ControlReceived;
@@ -497,9 +550,9 @@ namespace MultiDawn.Launcher
             for (int i = 0; i < actual.Length; i++) different |= actual[i] ^ expected[i];
             return different == 0;
         }
-        private static bool ValidIdentity(string value)
+        internal static bool ValidIdentity(string value)
         {
-            try { return value.Length == 22 && PairCode.Decode(value).Length == 16; }
+            try { return value != null && value.Length == 22 && PairCode.Decode(value).Length == 16 && PairCode.Encode(PairCode.Decode(value)) == value; }
             catch (FormatException) { return false; }
         }
         private static async void Observe(Task task) { try { await task.ConfigureAwait(false); } catch (Exception) { } }
@@ -539,6 +592,7 @@ namespace MultiDawn.Launcher
                 active = peer;
                 if (active != null) connectionGeneration++;
                 peer = null;
+                peerHostPort = 0;
                 peerWrites = null;
                 waiting = new TcpClient[pending.Count];
                 pending.CopyTo(waiting);

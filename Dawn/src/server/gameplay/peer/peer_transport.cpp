@@ -32,13 +32,18 @@ namespace bits = middleware::encoding::bits;
 
 /**
  * Sends one payload over whichever transport the peer arrived on.
- * Records go first. The engine association answers only when no record association exists.
+ * Native authenticated routes carry engine payloads directly. Other endpoints
+ * retain the existing record/engine-association transports.
  * @param to Peer endpoint.
  * @param payload Payload bytes.
- * @return True when one of the two carried it.
+ * @return True when the selected transport carried it.
  */
 [[nodiscard]] bool send_transport(const state::gameplay::Endpoint& to,
                                   std::span<const std::byte> payload) noexcept {
+    const auto routed = endpoint::send_resolved_to(to, payload);
+    if (routed != endpoint::RoutedSendResult::notRouted) {
+        return routed == endpoint::RoutedSendResult::sent;
+    }
     return dtls::send_payload(to, payload) || association::send_payload(to, payload);
 }
 

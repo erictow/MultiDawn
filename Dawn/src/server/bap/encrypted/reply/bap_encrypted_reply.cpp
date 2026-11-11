@@ -8,7 +8,8 @@
 namespace dawn::server::bap::encrypted::reply {
 
 /**
- * Encodes, seals and frames one correlated status-200 reply.
+ * Encodes, seals and frames a response using its service-specific header.
+ * Native service 301 is a status-free notification; other replies include status 200.
  * The middle payload and sealed buffers are wiped here on both paths, so only the framed result
  * outlives the call.
  * @param scratch Transform buffers owned by the lock.

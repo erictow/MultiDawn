@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <string_view>
 #include <type_traits>
 
 #include "../../../middleware/crypto/ecc_p224.h"
@@ -83,26 +82,6 @@ std::atomic<unsigned> g_recordReported{0};
 
 std::array<Association, kAssociationCapacity> g_associations{};
 std::array<Preference, kAssociationCapacity> g_preferences{};
-
-/**
- * Formats bytes as lowercase hex for one log line.
- * @param input Bytes to render.
- * @param output Receives the text and its terminator; it must hold two characters per byte.
- */
-void to_hex(std::span<const std::byte> input, std::span<char> output) noexcept {
-    /** Digits one nibble maps to. */
-    constexpr std::string_view kDigits{"0123456789abcdef"};
-    /** Bits in one nibble. */
-    constexpr unsigned kNibbleBits = 4;
-    /** Mask of one nibble. */
-    constexpr unsigned kNibbleMask = 0xF;
-    for (std::size_t index = 0; index < input.size(); ++index) {
-        const auto value = std::to_integer<unsigned>(input[index]);
-        output[index * 2] = kDigits[(value >> kNibbleBits) & kNibbleMask];
-        output[(index * 2) + 1] = kDigits[value & kNibbleMask];
-    }
-    output[input.size() * 2] = '\0';
-}
 
 /** @return True when both endpoints name the same address and port. */
 [[nodiscard]] bool same_endpoint(const state::gameplay::Endpoint& left,
@@ -365,20 +344,12 @@ void on_cookie_echo(const state::gameplay::Endpoint& from,
         ++g_openClock;
         association->opened = g_openClock;
     }
-    // TODO: stop logging key material once the digest choice is settled. Secrets must not be
-    // written to a log.
-    std::array<char, (2 * middleware::crypto::ecc::kFieldSize) + 1> secretText{};
-    to_hex(agreement.sharedSecret, secretText);
-    std::array<char, (2 * middleware::gameplay::dtls::kCypherKeySize) + 1> cypherText{};
-    to_hex(association->record.keys.cypher, cypherText);
+    // Report the handshake outcome and key source without exposing session secrets.
     report(core::log::Level::info,
-           "ev=gameplay stage=dtls result=%s step=cookie_ack peer_tag=0x%04X key=%s "
-           "secret=%s cypher=%s",
+           "ev=gameplay stage=dtls result=%s step=cookie_ack peer_tag=0x%04X key_source=%s",
            sent ? "ok" : "send_failed",
            static_cast<unsigned>(association->requesterTag),
-           registeredKey ? "registered" : "join",
-           secretText.data(),
-           cypherText.data());
+           registeredKey ? "registered" : "join");
 }
 
 /**

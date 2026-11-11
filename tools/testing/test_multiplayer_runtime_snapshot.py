@@ -29,6 +29,42 @@ class Memory:
 
 
 class SnapshotTests(unittest.TestCase):
+    def trace_event(self, pid=42, manager="0000000100010000", mode=6, identity=0,
+                    definition="0000000100020000"):
+        return (f"client level=info t=1 ev=native_session stage=manager_update pid={pid} "
+                f"manager={manager} mode={mode} identity={identity} definition={definition}\n")
+
+    def test_trace_filters_pid_and_uses_latest_definition(self):
+        text = self.trace_event(pid=99, manager="0000000100030000")
+        text += self.trace_event()
+        text += self.trace_event(mode=7, definition="0x0000000100040000")
+        sessions, definitions = snapshot.trace_addresses(text, 42)
+        self.assertEqual(sessions, [0x100010000])
+        self.assertEqual(definitions, [0x100040000])
+        with self.assertRaisesRegex(ValueError, "requested PID"):
+            snapshot.trace_addresses(text, 100)
+
+    def test_trace_drops_retired_and_null_definitions(self):
+        text = self.trace_event() + self.trace_event(identity=-1, mode=-1)
+        with self.assertRaisesRegex(ValueError, "initialized"):
+            snapshot.trace_addresses(text, 42)
+        sessions, definitions = snapshot.trace_addresses(self.trace_event(definition="0000000000000000"), 42)
+        self.assertEqual(sessions, [0x100010000])
+        self.assertEqual(definitions, [])
+
+    def test_trace_rejects_invalid_pointers_and_excess_sessions(self):
+        for fields in ({"manager": "0000000000000000"}, {"definition": "FFFFFFFFFFFFFFFF"}):
+            with self.assertRaises(ValueError):
+                snapshot.trace_addresses(self.trace_event(**fields), 42)
+        text = "".join(self.trace_event(manager=f"{0x100010000 + i * 0x20000:016X}") for i in range(17))
+        with self.assertRaisesRegex(ValueError, "16 initialized"):
+            snapshot.trace_addresses(text, 42)
+
+    def test_trace_does_not_treat_similar_log_events_as_addresses(self):
+        text = self.trace_event().replace("stage=manager_update", "stage=manager_update_call")
+        with self.assertRaisesRegex(ValueError, "initialized"):
+            snapshot.trace_addresses(text, 42)
+
     def test_addresses_and_bounds(self):
         self.assertEqual(snapshot.address("0x100000000"), 0x100000000)
         self.assertEqual(snapshot.address("65536"), 65536)
@@ -44,9 +80,9 @@ class SnapshotTests(unittest.TestCase):
         struct.pack_into("<Q", data, 0, 0x123456789)
         data[8:14] = bytes([192, 168, 1, 124, 0xB8, 0x75])
         data[38:44] = bytes([10, 0, 0, 2, 0x39, 0x30])
-        data[93] = 6
-        data[94:110] = b"PRIVATE-KEY-12345"
-        data[110:128] = b"OPAQUE-IDENTITY-123"
+        data[93] = 0
+        data[94:110] = b"PRIVATE-KEY-1234"
+        data[110:128] = b"OPAQUE-IDENTITY-12"
         result = snapshot.descriptor(bytes(data))
         self.assertEqual(result["address"]["local"], "192.168.1.124:30136")
         self.assertEqual(result["address"]["public"], "10.0.0.2:12345")
@@ -59,6 +95,20 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(set(result), {"machine_id", "address", "security_identity_present", "online_identity_present", "present"})
         with self.assertRaises(ValueError):
             snapshot.descriptor(bytes(127))
+
+    def test_steam_address_never_becomes_a_fictitious_ip(self):
+        for method in (1, 6, 7, 255):
+            data = bytearray(86)
+            opaque = b"steam:OPAQUE-PEER-IDENTITY"
+            data[:len(opaque)] = opaque
+            data[85] = method
+            result = snapshot.net_address(bytes(data))
+            self.assertNotIn("local", result)
+            self.assertNotIn("public", result)
+            self.assertNotIn("OPAQUE", json.dumps(result))
+            self.assertNotIn("115.116.101.97", json.dumps(result))
+            self.assertEqual(result["method_valid"], method <= 7)
+            self.assertEqual(result["transport"], "steam" if method in (6, 7) else "other")
 
     def make_session(self):
         memory = Memory()

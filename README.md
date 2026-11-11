@@ -25,7 +25,8 @@ presets together. The game itself is not included.
 ## MultiDawn launcher preview
 
 This fork adds a portable Windows launcher with solo Play, a Multiplayer switch,
-and Host/Join pair codes. **Pairing currently connects the launchers only.
+and Host/Join pair codes, saved MultiDawn friends, and optional LAN/VPN IPv4
+addresses. A saved friend still needs a current host code. **Pairing currently connects the launchers only.
 Two-player gameplay, remote server handoff, in-game friends, and invites still
 require native runtime work. Multiplayer Play is disabled in this preview.**
 
@@ -39,7 +40,7 @@ To build, test, and package a portable launcher ZIP for GitHub:
 ```powershell
 .\tools\launcher\Build-Launcher.ps1 -RunTests
 .\tools\install\tests\launcher_release.tests.ps1
-.\tools\install\New-MultiDawnLauncherRelease.ps1 -Release '0.2.0-preview.1'
+.\tools\install\New-MultiDawnLauncherRelease.ps1 -Release '0.3.0-preview.1'
 ```
 
 The ZIP is written under `build/releases/`. The **Build and test MultiDawn

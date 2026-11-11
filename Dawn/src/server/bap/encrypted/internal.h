@@ -31,6 +31,7 @@ enum class BodyCodec : std::uint8_t {
     familyUnsubscription,
     matchmakingResponse,
     steamCertificate,
+    addressResolution,
     userMessageResponse,
     webService,
 };
@@ -145,6 +146,8 @@ struct ServiceRoute {
     middleware::bap::ResponseService response{};
     BodyCodec bodyCodec{};
     std::string_view successEvent{};
+    /** False for a quiet fallback whose request has no implemented response. */
+    bool knownService{true};
 };
 
 /** Owns encrypted service-to-response routing. */
@@ -165,7 +168,7 @@ void report_failure(std::uint16_t service, std::string_view stage) noexcept;
 namespace reply {
 
 /**
- * Encodes, seals, and frames one correlated status-200 reply.
+ * Encodes, seals, and frames a reply with its service-specific status policy.
  * @param scratch Lock-owned transform buffers.
  * @param route Service route data naming the response service.
  * @param taskId Request correlation id to echo.

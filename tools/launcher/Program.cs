@@ -13,8 +13,8 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("MultiDawn Launcher")]
 [assembly: System.Reflection.AssemblyProduct("MultiDawn Launcher")]
-[assembly: System.Reflection.AssemblyVersion("0.2.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.2.0.0")]
+[assembly: System.Reflection.AssemblyVersion("0.3.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.3.0.0")]
 
 namespace MultiDawn.Launcher
 {
@@ -51,6 +51,7 @@ namespace MultiDawn.Launcher
                     report = PairingSelfTests.Report;
                     if (result == 0) report += LauncherSelfTests.Run();
                     if (result == 0) report += RuntimeBridgeSelfTests.Run();
+                    if (result == 0) report += FriendsSelfTests.Run();
                     report += result == 0 ? "PASS: launcher validation, UI state, TCP pairing, and native companion protocol tests.\r\n" : "FAIL: " + PairingSelfTests.LastError + "\r\n";
                 }
                 catch (Exception ex) { result = 1; report = "FAIL: " + ex + "\r\n"; }
@@ -196,22 +197,24 @@ namespace MultiDawn.Launcher
         private readonly Color panelColor = Color.FromArgb(29, 35, 46);
         private readonly Color muted = Color.FromArgb(174, 186, 205);
         private readonly Color accent = Color.FromArgb(89, 199, 200);
-        private TextBox gameRoot, pairCode;
+        private TextBox gameRoot, pairCode, joinAddress, joinPort, friendNickname;
         private CheckBox multiplayer;
-        private Button browse, play, host, join, disconnect, copy;
-        private ComboBox address;
+        private Button browse, play, host, join, disconnect, copy, saveFriend, removeFriend;
+        private ComboBox address, savedFriends;
         private NumericUpDown port;
-        private Label gameStatus, sessionStatus, peerStatus, modeLabel;
+        private Label gameStatus, sessionStatus, peerStatus, modeLabel, friendStatus;
         private PairSession session;
         private RuntimeBridge runtimeBridge;
         private Process game;
         private bool busy, closing;
         private readonly string configPath;
+        private readonly FriendStore friendStore;
+        private bool friendsAvailable;
 
         internal LauncherForm()
         {
             Text = "MultiDawn Launcher";
-            ClientSize = new Size(760, 710);
+            ClientSize = new Size(760, 958);
             MinimumSize = new Size(600, 480);
             StartPosition = FormStartPosition.CenterScreen;
             BackColor = background;
@@ -221,8 +224,10 @@ namespace MultiDawn.Launcher
             AutoScaleMode = AutoScaleMode.Dpi;
             AutoScroll = true;
             configPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MultiDawn", "launcher-path.txt");
+            friendStore = new FriendStore(Path.Combine(Path.GetDirectoryName(configPath), "friends.json"));
             BuildControls();
             LoadPath();
+            LoadFriends(null);
             RefreshState();
             FormClosing += delegate { closing = true; if (runtimeBridge != null) runtimeBridge.Dispose(); if (session != null) session.Dispose(); if (game != null) game.Dispose(); };
         }
@@ -230,7 +235,9 @@ namespace MultiDawn.Launcher
         protected override void OnShown(EventArgs args)
         {
             base.OnShown(args);
-            AutoScrollMinSize = new Size(Controls.Cast<Control>().Max(c => c.Right) + 24, Controls.Cast<Control>().Max(c => c.Bottom) + 24);
+            // Leave room for a vertical scrollbar without introducing horizontal
+            // scrolling at the default width. Narrow windows may still scroll.
+            AutoScrollMinSize = new Size(Controls.Cast<Control>().Max(c => c.Right) + 12, Controls.Cast<Control>().Max(c => c.Bottom) + 12);
             Rectangle screen = Screen.FromControl(this).WorkingArea;
             Size = new Size(Math.Min(Width, screen.Width), Math.Min(Height, screen.Height));
             if (ShowInTaskbar) CenterToScreen();
@@ -272,7 +279,7 @@ namespace MultiDawn.Launcher
             Controls.Add(multiplayer);
             modeLabel = LabelAt("Solo mode", 505, 249, 223, 26, accent, 10);
             modeLabel.TextAlign = ContentAlignment.TopRight;
-            LabelAt("Host and join pairing is available for LAN or VPN testing. Gameplay sync,\r\nin-game friends, party invites, and remote server handoff are not implemented.",
+            LabelAt("Pair with a friend over LAN or VPN. Saved friends remember their address;\r\na current host code is still required. Multiplayer gameplay is unavailable.",
                 32, 285, 696, 49, muted, 10);
 
             LabelAt("HOST ADDRESS", 32, 348, 360, 22, accent, 9);
@@ -285,18 +292,32 @@ namespace MultiDawn.Launcher
             port = new NumericUpDown { Location = new Point(512, 376), Size = new Size(216, 30), Minimum = 1024, Maximum = 65535,
                 Value = 30979, BackColor = panelColor, ForeColor = Color.WhiteSmoke };
             Controls.Add(port);
-            LabelAt("PAIR CODE", 32, 421, 600, 22, accent, 9);
-            pairCode = TextAt(32, 449, 576); pairCode.MaxLength = 128;
+            LabelAt("JOIN IPv4 OVERRIDE (OPTIONAL)", 32, 421, 464, 22, accent, 9);
+            LabelAt("JOIN PORT (OPTIONAL)", 512, 421, 216, 22, accent, 9);
+            joinAddress = TextAt(32, 449, 464); joinAddress.MaxLength = 15; joinAddress.AccessibleName = "Optional join IPv4 override";
+            joinPort = TextAt(512, 449, 216); joinPort.MaxLength = 5; joinPort.AccessibleName = "Optional join port override";
+            LabelAt("CURRENT HOST PAIR CODE", 32, 488, 600, 22, accent, 9);
+            pairCode = TextAt(32, 516, 576); pairCode.MaxLength = 128;
             pairCode.Font = new Font("Consolas", 11); pairCode.AccessibleName = "Pair code";
-            copy = ButtonAt("Copy code", 620, 444, 108, CopyCode);
-            host = ButtonAt("Host", 32, 494, 150, Host);
-            join = ButtonAt("Join", 194, 494, 150, Join);
-            disconnect = ButtonAt("Disconnect", 356, 494, 150, Disconnect);
-            sessionStatus = LabelAt("", 32, 544, 696, 43, muted, 10);
-            peerStatus = LabelAt("", 32, 586, 696, 25, accent, 9);
-            play = ButtonAt("Play solo", 512, 636, 216, Play);
+            copy = ButtonAt("Copy code", 620, 511, 108, CopyCode);
+            host = ButtonAt("Host", 32, 561, 150, Host);
+            join = ButtonAt("Join", 194, 561, 150, Join);
+            disconnect = ButtonAt("Disconnect", 356, 561, 150, Disconnect);
+            sessionStatus = LabelAt("", 32, 607, 696, 43, muted, 10);
+            peerStatus = LabelAt("", 32, 650, 696, 25, accent, 9);
+            LabelAt("SAVED MULTIDAWN FRIENDS", 32, 691, 600, 22, accent, 9);
+            savedFriends = new ComboBox { Location = new Point(32, 719), Size = new Size(464, 30), DropDownStyle = ComboBoxStyle.DropDownList,
+                BackColor = panelColor, ForeColor = Color.WhiteSmoke, FlatStyle = FlatStyle.Flat, AccessibleName = "Saved MultiDawn friend" };
+            savedFriends.SelectedIndexChanged += SelectFriend; Controls.Add(savedFriends);
+            removeFriend = ButtonAt("Remove friend", 512, 714, 216, RemoveFriend);
+            LabelAt("PARTNER NICKNAME", 32, 760, 464, 22, accent, 9);
+            friendNickname = TextAt(32, 786, 464); friendNickname.MaxLength = 64; friendNickname.Text = "My friend";
+            friendNickname.AccessibleName = "Nickname for authenticated partner";
+            saveFriend = ButtonAt("Save paired partner", 512, 781, 216, SaveFriend);
+            friendStatus = LabelAt("", 32, 827, 696, 48, muted, 9);
+            play = ButtonAt("Play solo", 512, 889, 216, Play);
             play.BackColor = Color.FromArgb(36, 91, 99);
-            LabelAt("Build 86657 required. Pair codes are private: share only with your partner.\r\nPairing uses plain TCP. Use a trusted LAN or an encrypted VPN.", 32, 636, 459, 50, muted, 8.5F);
+            LabelAt("Build 86657 required. Pair codes are private: share only with your partner.\r\nPairing uses plain TCP. Use a trusted LAN or an encrypted VPN.", 32, 889, 459, 50, muted, 8.5F);
             AcceptButton = play;
         }
 
@@ -352,6 +373,13 @@ namespace MultiDawn.Launcher
             copy.Enabled = mp && active && session.IsHost && !String.IsNullOrEmpty(pairCode.Text);
             disconnect.Enabled = mp && (active || busy) && !running;
             address.Enabled = port.Enabled = mp && !active && !busy && !running;
+            joinAddress.Enabled = joinPort.Enabled = mp && !active && !busy && !running;
+            savedFriends.Enabled = mp && !active && !busy && !running && friendsAvailable;
+            removeFriend.Enabled = savedFriends.Enabled && savedFriends.SelectedItem is SavedFriend;
+            string pairedIdentity; IPEndPoint pairedEndpoint;
+            bool paired = active && session.TryPeerEndpoint(out pairedIdentity, out pairedEndpoint);
+            friendNickname.Enabled = mp && paired && !running && !busy && friendsAvailable;
+            saveFriend.Enabled = friendNickname.Enabled;
             modeLabel.Text = mp ? "Pairing preview" : "Solo mode";
             string validation = GameLaunch.Validate(gameRoot.Text.Trim());
             gameStatus.Text = running ? "Destiny 2 is running. Close the game to change launch settings." : validation ?? "Dawn installation found. Ready for solo play.";
@@ -366,19 +394,22 @@ namespace MultiDawn.Launcher
         }
         private PairSession CreateSession()
         {
-            PairSession value = new PairSession();
+            PairSession value = new PairSession(FriendStore.LoadOrCreateIdentity(Path.GetDirectoryName(configPath)), (int)port.Value);
             value.StatusChanged += delegate(string status) { Dispatch(delegate { if (session == value) sessionStatus.Text = status; }); };
             value.PeerChanged += delegate(bool paired) { Dispatch(delegate {
                 if (session != value) return;
                 peerStatus.Text = paired ? "Partner connected. This lobby does not carry gameplay packets." : "Waiting for a partner.";
                 RefreshState();
             }); };
+            value.PeerEndpointChanged += delegate { Dispatch(delegate { if (session == value) RefreshStateKeepingStatus(); }); };
             return value;
         }
         private async void Host(object sender, EventArgs args)
         {
             if (busy || session != null) return;
-            busy = true; PairSession value = session = CreateSession(); RefreshState();
+            PairSession value;
+            try { value = CreateSession(); } catch (Exception ex) { sessionStatus.Text = FriendlyError(ex); return; }
+            busy = true; session = value; RefreshState();
             sessionStatus.Text = "Opening a pairing lobby...";
             try
             {
@@ -396,13 +427,28 @@ namespace MultiDawn.Launcher
         {
             if (busy || session != null) return;
             string code = pairCode.Text.Trim();
-            try { PairCode.Parse(code); }
+            IPAddress target = null; int? targetPort = null;
+            SavedFriend selectedFriend = savedFriends.SelectedItem as SavedFriend;
+            try
+            {
+                PairCode.Parse(code);
+                if (!String.IsNullOrWhiteSpace(joinAddress.Text)) target = FriendStore.ParseAddress(joinAddress.Text);
+                if (!String.IsNullOrWhiteSpace(joinPort.Text))
+                {
+                    int parsedPort;
+                    if (!Int32.TryParse(joinPort.Text.Trim(), out parsedPort) || parsedPort < 1 || parsedPort > 65535)
+                        throw new ArgumentException("Join port must be between 1 and 65535, or left empty to use the current code.");
+                    targetPort = parsedPort;
+                }
+            }
             catch (Exception ex) { sessionStatus.Text = FriendlyError(ex); return; }
-            busy = true; PairSession value = session = CreateSession(); RefreshState();
+            PairSession value;
+            try { value = CreateSession(); } catch (Exception ex) { sessionStatus.Text = FriendlyError(ex); return; }
+            busy = true; session = value; RefreshState();
             sessionStatus.Text = "Connecting to your partner...";
             try
             {
-                await value.JoinAsync(code);
+                await value.JoinAsync(code, target, targetPort, selectedFriend == null ? null : selectedFriend.PeerId);
                 if (session != value) return;
                 runtimeBridge = new RuntimeBridge(value, GameLaunch.Persona(gameRoot.Text.Trim()));
                 sessionStatus.Text = "Paired with host. Gameplay launch is unavailable in this build.";
@@ -415,6 +461,62 @@ namespace MultiDawn.Launcher
         {
             string status = sessionStatus.Text, peer = peerStatus.Text;
             RefreshState(); sessionStatus.Text = status; peerStatus.Text = peer;
+        }
+
+        private void LoadFriends(string selectedIdentity)
+        {
+            savedFriends.Items.Clear(); savedFriends.Items.Add("Use current code without a saved friend");
+            try
+            {
+                foreach (SavedFriend value in friendStore.Load()) savedFriends.Items.Add(value);
+                friendsAvailable = true;
+                friendStatus.Text = "Save a partner after pairing. Addresses can change; ask for a current host code each time.";
+            }
+            catch (Exception error)
+            {
+                friendsAvailable = false;
+                friendStatus.Text = "Saved friends could not be read and were preserved: " + error.Message;
+            }
+            savedFriends.SelectedIndex = 0;
+            if (selectedIdentity != null)
+                for (int index = 1; index < savedFriends.Items.Count; ++index)
+                    if (((SavedFriend)savedFriends.Items[index]).PeerId == selectedIdentity) { savedFriends.SelectedIndex = index; break; }
+        }
+
+        private void SelectFriend(object sender, EventArgs args)
+        {
+            SavedFriend selected = savedFriends.SelectedItem as SavedFriend;
+            if (joinAddress == null || friendStatus == null) return;
+            joinAddress.Text = selected == null ? "" : selected.Address;
+            joinPort.Text = selected == null ? "" : selected.Port.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (selected != null)
+            {
+                friendNickname.Text = selected.Nickname;
+                friendStatus.Text = "Joining is pinned to " + selected.Nickname + ". Paste their current host code; update the address if it changed.";
+            }
+            else if (friendsAvailable) friendStatus.Text = "No saved identity selected. A current host code is required, including when overriding the IP or port.";
+            RefreshStateKeepingStatus();
+        }
+
+        private void SaveFriend(object sender, EventArgs args)
+        {
+            string identity; IPEndPoint endpoint;
+            if (session == null || !session.TryPeerEndpoint(out identity, out endpoint)) return;
+            try
+            {
+                friendStore.Upsert(new SavedFriend { PeerId = identity, Nickname = friendNickname.Text.Trim(), Address = endpoint.Address.ToString(), Port = endpoint.Port });
+                LoadFriends(identity); RefreshStateKeepingStatus();
+                friendStatus.Text = "Partner saved. Their advertised hosting port is remembered; a fresh host code is still required.";
+            }
+            catch (Exception error) { friendStatus.Text = "Could not save friend: " + error.Message; }
+        }
+
+        private void RemoveFriend(object sender, EventArgs args)
+        {
+            SavedFriend selected = savedFriends.SelectedItem as SavedFriend;
+            if (selected == null || session != null) return;
+            try { friendStore.Remove(selected.PeerId); LoadFriends(null); RefreshStateKeepingStatus(); }
+            catch (Exception error) { friendStatus.Text = "Could not remove friend: " + error.Message; }
         }
         private static string FriendlyError(Exception error)
         {
@@ -484,10 +586,20 @@ namespace MultiDawn.Launcher
                 check(form.host.Enabled && form.join.Enabled && form.pairCode.Enabled, "Multiplayer enables Host, Join, and code entry");
                 check(!form.play.Enabled && form.play.Text == "Gameplay unavailable", "Unimplemented MP gameplay cannot be launched");
                 check(!form.disconnect.Enabled && !form.copy.Enabled, "Idle lobby cannot disconnect or copy an empty code");
+                check(form.joinAddress.Enabled && form.joinPort.Enabled && !form.saveFriend.Enabled && !form.friendNickname.Enabled,
+                    "Manual endpoint override is available only in MP and saving requires authentication");
+                SavedFriend fixture = new SavedFriend { PeerId = PairSession.NewPeerId(), Nickname = "UI fixture", Address = "25.12.34.56", Port = 30979 };
+                form.savedFriends.Items.Add(fixture); form.savedFriends.SelectedItem = fixture;
+                check(form.joinAddress.Text == fixture.Address && form.joinPort.Text == "30979" && form.savedFriends.SelectedItem == fixture,
+                    "Saved friend selection prefills its endpoint and retains its identity pin");
+                form.savedFriends.SelectedIndex = 0;
+                check(form.joinAddress.Text == "" && form.joinPort.Text == "", "Clearing saved friend selection restores current-code destination defaults");
                 form.multiplayer.Checked = false;
                 check(form.gameRoot.Enabled && form.browse.Enabled && !form.pairCode.Enabled && !form.host.Enabled && !form.join.Enabled,
                     "Switching back to solo restores folder selection and locks pairing");
                 check(!form.play.Enabled, "Invalid game installation cannot be launched");
+                check(!form.joinAddress.Enabled && !form.joinPort.Enabled && !form.savedFriends.Enabled && !form.saveFriend.Enabled,
+                    "Solo locks saved-friend and endpoint controls");
             }
         }
     }

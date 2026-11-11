@@ -9,6 +9,7 @@
 #include "../../state/activity/runtime.h"
 #include "../../state/matchmaking/matchmaking_state.h"
 #include "../gameplay/group/group_host_sessions.h"
+#include "../gameplay/resolution/address_resolution_host.h"
 #include "internal.h"
 #include "runtime.h"
 
@@ -146,6 +147,7 @@ void publish_account_mutation(Session& origin) noexcept {
 
 /** @param session Its secrets and identity are wiped. */
 void clear_session(Session& session) noexcept {
+    gameplay::resolution::release_owner(session.authenticationKey);
     SecureZeroMemory(&session, sizeof session);
     // Secure zeroing alone would lose semantic sentinels such as activityAdvertisedRegion == -1.
     session = Session{};
@@ -174,6 +176,7 @@ void clear_session(Session& session) noexcept {
 void quarantine_deferred_matchmaking_retirement(Session& session) noexcept {
     const lifecycle::DeferredMatchmakingRetirement pending =
         lifecycle::deferred_matchmaking_retirement(session);
+    gameplay::resolution::release_owner(session.authenticationKey);
     SecureZeroMemory(&session, sizeof session);
     lifecycle::restore_deferred_matchmaking_retirement(session, pending);
 }
@@ -587,6 +590,7 @@ bool snapshot_hud_region(HudRegionSnapshot& output) noexcept {
 void reset_auth_owned_state(Session& session) noexcept {
     retire_session_activity_locked(session);
     const lifecycle::ConnectionOwnedState connection = lifecycle::connection_owned_state(session);
+    gameplay::resolution::release_owner(session.authenticationKey);
     SecureZeroMemory(&session, sizeof session);
     lifecycle::restore_connection_owned_state(session, connection);
 }

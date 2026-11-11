@@ -17,6 +17,17 @@ code privately with the guest. The guest enters that code and selects Join.
 Disconnect ends the connection. Allow the launcher through your firewall if
 Windows asks and you intend to accept that connection.
 
+SAVED FRIENDS AND VPN ADDRESSES
+
+After pairing, enter a nickname and choose Save paired partner. Selecting that
+friend later fills the optional IPv4/port destination and checks the same launcher
+identity. You still need the host's current pair code. Old codes are not saved.
+You may also enter a reachable LAN or VPN IPv4 address manually. The host should
+select the address of the LAN/VPN adapter its partner can reach.
+
+These are saved MultiDawn contacts, separate from Steam's friends list. Friends
+are stored locally with names and addresses, without pair-code secrets.
+
 The pair code contains the host's address and a temporary connection secret.
 Treat it as private. A code does not create an internet relay or open a router.
 Use a trusted LAN or encrypted VPN when testing across machines.
