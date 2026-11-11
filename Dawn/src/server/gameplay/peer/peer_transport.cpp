@@ -1,6 +1,7 @@
 #include "peer_transport.h"
 #include "traffic_log_repetition.h"
 #include "peer_link_lookup.h"
+#include "peer_view_echo.h"
 
 #include <Windows.h>
 
@@ -639,7 +640,8 @@ std::size_t apply_acknowledgement(state::gameplay::PeerLink& peer,
  */
 void consume_established(const state::gameplay::Endpoint& from,
                          std::span<const std::byte> payload,
-                         std::uint64_t now) noexcept {
+                         std::uint64_t now,
+                         bool resolvedNative) noexcept {
     wire::EstablishedPacket packet{};
     if (!wire::decode_established(payload, false, packet)) {
         report(core::log::Level::warn, "ev=gameplay stage=packet result=drop reason=grammar");
@@ -652,6 +654,7 @@ void consume_established(const state::gameplay::Endpoint& from,
     std::size_t queueRemaining = 0;
     std::uint16_t clearedPacket = 0;
     std::uint64_t sessionId = 0;
+    std::size_t viewsQueued = 0, viewsRejected = 0;
     TrafficLogKey logKey{};
     // The reliable window never resynchronises, so a stalled queue is only visible as a refused
     // record against the sequence it is still waiting for.
@@ -665,6 +668,9 @@ void consume_established(const state::gameplay::Endpoint& from,
     std::array<wire::AssembledMessage, kMessageReportCapacity> bodies{};
     if (peer != nullptr) {
         const bool wasConnected = peer->stage == state::gameplay::PeerStage::connected;
+        // Preserve the establishment gate: only a subsequent connected packet
+        // may publish application replies, including the native view echo.
+        if (wasConnected) { peer->applicationReady = true; }
         sessionId = sole_session_locked(*peer);
         if (packet.ack.outboundHeadPresent) {
             record_sequence(*peer, packet.ack.outboundHead);
@@ -678,27 +684,29 @@ void consume_established(const state::gameplay::Endpoint& from,
         largeNext = peer->large.nextSequence;
         largeFirst = packet.large.count == 0 ? 0 : packet.large.records[0].sequence;
         wire::accept_records(packet.small, peer->small);
-        wire::AssembledMessage message{};
-        while (wire::drain_message(peer->large, message)) {
+        wire::AssembledMessage assembled{};
+        const auto acceptMessage = [&](const wire::AssembledMessage& message) noexcept {
             apply_message(*peer, message);
+            if (resolvedNative && message.id == middleware::gameplay::group::kViewMessageId
+                && view_echo::unaffiliated(*peer)) {
+                const auto result = view_echo::queue(*peer, view_echo::key_for(*peer), message);
+                if (result == view_echo::Result::queued) { ++viewsQueued; }
+                else { ++viewsRejected; }
+                // This authenticated link-level exchange never grants a group
+                // membership, even when a malformed view carries a valid token.
+                return;
+            }
             if (deliveredCount < delivered.size()) {
                 delivered[deliveredCount] = message.id;
                 bodies[deliveredCount] = message;
                 ++deliveredCount;
             }
+        };
+        while (wire::drain_message(peer->large, assembled)) {
+            acceptMessage(assembled);
         }
-        while (wire::drain_message(peer->small, message)) {
-            apply_message(*peer, message);
-            if (deliveredCount < delivered.size()) {
-                delivered[deliveredCount] = message.id;
-                bodies[deliveredCount] = message;
-                ++deliveredCount;
-            }
-        }
-        // Do not release application traffic on the packet that changes the stage. Its
-        // acknowledgement completes the remote side's establishment only after this exchange.
-        if (wasConnected) {
-            peer->applicationReady = true;
+        while (wire::drain_message(peer->small, assembled)) {
+            acceptMessage(assembled);
         }
         stage = static_cast<unsigned>(peer->stage);
         logKey = traffic_log_key(*peer, false);
@@ -706,6 +714,14 @@ void consume_established(const state::gameplay::Endpoint& from,
     ReleaseSRWLockExclusive(&g_lock);
     if (peer == nullptr) {
         return;
+    }
+    if (viewsQueued != 0) {
+        report(core::log::Level::info,
+               "ev=gameplay stage=view_echo result=queued native=1 count=%zu", viewsQueued);
+    }
+    if (viewsRejected != 0) {
+        report(core::log::Level::warn,
+               "ev=gameplay stage=view_echo result=rejected native=1 count=%zu", viewsRejected);
     }
     for (std::size_t index = 0; index < deliveredCount; ++index) {
         report(core::log::Level::info,
@@ -838,7 +854,19 @@ void deliver(const state::gameplay::Endpoint& from,
         consume_container(from, payload, now);
         return;
     }
-    consume_established(from, payload, now);
+    consume_established(from, payload, now, false);
+}
+
+/** Authenticated native routes may establish a link view before a group join. */
+void deliver_resolved(const state::gameplay::Endpoint& from,
+                      std::span<const std::byte> payload,
+                      std::uint64_t now) noexcept {
+    if (payload.empty()) { return; }
+    if ((std::to_integer<unsigned>(payload[0]) >> kMarkerShift) != 0) {
+        consume_container(from, payload, now);
+        return;
+    }
+    consume_established(from, payload, now, true);
 }
 
 /** Sends one already-encoded out-of-band body in its own container. */

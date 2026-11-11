@@ -84,6 +84,13 @@ handler before group membership exists and is refused as `unresolved_group`.
 No view token is treated as authorization or guessed to be a group ID. Remote
 human admission, shared membership and two-Guardian gameplay remain unverified.
 
+Experimental `main` now handles that pre-join view as a link-level exchange on
+the exact authenticated native channel. It requires connected/application-ready
+state and empty group slots, checks both channel incarnation values, and queues
+the reply and binds its signature atomically. It grants no group membership and
+does not reinterpret the view token. Existing admitted-group and legacy paths
+are unchanged. Unit checks pass; a native-game test of this view fix is pending.
+
 The opt-in trace subsequently located the actual fireteam and activity sessions.
 Both sampled sessions were in native mode 6, with one established local member,
 and both current managed descriptions used Steam-format NetAddr method 6.
@@ -242,6 +249,9 @@ The native test projects are:
   loopback run, using real UDP and production endpoint/crypto code with stubbed
   peer/legacy handlers. Covers authenticated dispatch, wrapped replies, rejected
   tampering/replay/rebinding, preserved legacy traffic and send failures.
+- `Dawn/unit/peer_view_echo_tests.vcxproj`: 2,006 checks with compiler warnings
+  treated as errors, covering
+  exact link ownership, malformed views, queue rollback and unchanged group slots.
 
 `companion_bridge_harness.vcxproj` builds a small native test worker that links
 the production companion client with test social/log sinks. The launcher's
@@ -253,8 +263,13 @@ It does not verify the game's friend roster or a shared activity.
 
 Native build instructions are in
 [`tools/build/PORTABLE-WINDOWS.md`](../tools/build/PORTABLE-WINDOWS.md).
-The native GitHub workflow builds and runs the ten component test projects;
+The native GitHub workflow builds and runs the eleven component test projects;
 preparing the workflow does not mean a remote run has passed.
+
+For production commit `21c2a980`, the remote
+[native component workflow](https://github.com/erictow/MultiDawn/actions/runs/42975247251)
+and [launcher workflow](https://github.com/erictow/MultiDawn/actions/runs/42975247367)
+both completed successfully. Later experimental changes need their own checks.
 
 The [runtime snapshot tool](../tools/testing/MULTIPLAYER-RUNTIME-SNAPSHOT.md)
 verifies the actual loaded build and reads bounded native session/facet state.

@@ -108,6 +108,15 @@ is the view exchange, which the group handler currently refuses with
 `unresolved_group` before a group join. It does not establish a remote human or
 working shared gameplay.
 
+The experimental `main` branch now answers a reliable ID40 on its exact
+authenticated native link before any group join. The link must already be
+connected and application-ready, with every group slot empty. Endpoint and both
+channel incarnation values must match. Encoding, queue publication and signature
+binding happen under the peer lock, and a rejected/full queue leaves the old
+state intact. A view token never selects or creates group membership. Existing
+legacy and admitted-group view handling is retained. This change has passed
+isolated tests; its native-game verification is pending.
+
 ## Embedded backend policy
 
 `src/server/gameplay/resolution/address_resolution_host.{h,cpp}` accepts only a
@@ -188,6 +197,7 @@ includes these isolated suites. Current local results are:
 | `resolution_replay_tests.vcxproj` | 16,554 |
 | `address_resolution_host_tests.vcxproj` | 1,084 enabled; 11 with `--disabled` |
 | `endpoint_resolution_tests.vcxproj` | 136 in the recorded loopback run |
+| `peer_view_echo_tests.vcxproj` | 2,006 |
 
 The backend tests link the production store, random generator, packet codec,
 DES and HMAC with test settings/log sinks. They exercise endpoint pinning,
@@ -206,3 +216,9 @@ server material, tampering/replay/rebinding cannot publish plaintext, and
 legacy traffic retains its prior routing. It also checks explicit unbound sends
 emit nothing and bound send failures do not select another transport. It does
 not load Destiny or exercise the real peer handshake.
+
+The view-echo suite checks exact channel incarnation and endpoint ownership,
+independent links, pre-join views, malformed headers/bodies/padding, complete
+queue rollback, and preservation of all group slots even for arbitrary tokens.
+The endpoint suite passed again after its authenticated delivery entry was made
+explicit (141 checks in that run; socket polling affects the check count).

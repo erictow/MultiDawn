@@ -64,7 +64,7 @@ void report(core::log::Level, const char* format, ...) noexcept {
 }
 }
 namespace dawn::server::gameplay::peer {
-void deliver(const state::gameplay::Endpoint& from, std::span<const std::byte> payload,
+void deliver_resolved(const state::gameplay::Endpoint& from, std::span<const std::byte> payload,
              std::uint64_t) noexcept {
     ++peerCalls;
     lastPeer = from;

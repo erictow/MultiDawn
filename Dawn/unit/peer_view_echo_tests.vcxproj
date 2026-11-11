@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations"><ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration></ItemGroup>
+  <PropertyGroup Label="Globals"><ProjectGuid>{3645F091-3719-472D-9ED0-95CC077DF025}</ProjectGuid><WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration"><ConfigurationType>Application</ConfigurationType><PlatformToolset>v145</PlatformToolset><UseDebugLibraries>false</UseDebugLibraries></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup><OutDir>$(ProjectDir)..\..\build\unit\peer_view_echo\</OutDir><IntDir>$(OutDir)obj\</IntDir><TargetName>peer_view_echo_tests</TargetName></PropertyGroup>
+  <ItemDefinitionGroup><ClCompile><LanguageStandard>stdcpp20</LanguageStandard><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><ConformanceMode>true</ConformanceMode><RuntimeLibrary>MultiThreaded</RuntimeLibrary><Optimization>MaxSpeed</Optimization><PreprocessorDefinitions>NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile><Link><SubSystem>Console</SubSystem></Link></ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="peer_view_echo_tests.cpp" />
+    <ClCompile Include="..\src\middleware\gameplay\group\view_message.cpp" />
+    <ClCompile Include="..\src\middleware\gameplay\peer\peer_container.cpp" />
+    <ClCompile Include="..\src\middleware\gameplay\peer\established_packet.cpp" />
+    <ClCompile Include="..\src\middleware\gameplay\peer\reliable_assembly.cpp" />
+    <ClCompile Include="..\src\middleware\encoding\bit_reader.cpp" />
+    <ClCompile Include="..\src\middleware\encoding\bit_writer.cpp" />
+    <ClCompile Include="..\src\middleware\encoding\bit_raw.cpp" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

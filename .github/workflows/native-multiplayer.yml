@@ -19,6 +19,7 @@ on:
       - 'Dawn/unit/*routed_datagram*'
       - 'Dawn/unit/*resolution_replay*'
       - 'Dawn/unit/*endpoint_resolution*'
+      - 'Dawn/unit/*peer_view_echo*'
       - 'Dawn/unit/*shared_membership*'
       - 'Dawn/unit/*steam_social*'
       - '.github/workflows/native-multiplayer.yml'
@@ -39,6 +40,7 @@ on:
       - 'Dawn/unit/*routed_datagram*'
       - 'Dawn/unit/*resolution_replay*'
       - 'Dawn/unit/*endpoint_resolution*'
+      - 'Dawn/unit/*peer_view_echo*'
       - 'Dawn/unit/*shared_membership*'
       - 'Dawn/unit/*steam_social*'
       - '.github/workflows/native-multiplayer.yml'
@@ -57,7 +59,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          foreach ($suite in @('companion_protocol', 'companion_client', 'steam_social', 'shared_membership', 'address_resolution', 'des_cbc', 'routed_datagram', 'resolution_replay', 'address_resolution_host', 'endpoint_resolution')) {
+          foreach ($suite in @('companion_protocol', 'companion_client', 'steam_social', 'shared_membership', 'address_resolution', 'des_cbc', 'routed_datagram', 'resolution_replay', 'address_resolution_host', 'endpoint_resolution', 'peer_view_echo')) {
             $destination = Join-Path $PWD "build/native-ci/$suite/"
             & msbuild "Dawn/unit/$($suite)_tests.vcxproj" /nologo /v:minimal /m:2 /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0 "/p:OutDir=$destination" "/p:IntDir=$($destination)obj/"
             if ($LASTEXITCODE -ne 0) { throw "$suite compilation failed" }

@@ -21,6 +21,11 @@ void deliver(const state::gameplay::Endpoint& from,
              std::span<const std::byte> payload,
              std::uint64_t now) noexcept;
 
+/** Only the native endpoint's successful authenticated/replay-checked unwrap calls this. */
+void deliver_resolved(const state::gameplay::Endpoint& from,
+                      std::span<const std::byte> payload,
+                      std::uint64_t now) noexcept;
+
 /**
  * Queues one reliable message for a peer.
  * Nothing is sent here; the next outgoing packet carries it. Links are keyed by session.
