@@ -279,7 +279,7 @@ The native test projects are:
 - `Dawn/unit/peer_view_echo_tests.vcxproj`: 2,006 checks with compiler warnings
   treated as errors, covering
   exact link ownership, malformed views, queue rollback and unchanged group slots.
-- `Dawn/unit/native_identity_observation_tests.vcxproj`: 149 checks plus three
+- `Dawn/unit/native_identity_observation_tests.vcxproj`: 301 checks plus three
   unsupported-layout checks, with the real adapter and production membership
   encoder. Covers scalar-read restrictions, native ownership, unstable samples,
   ambiguous roles, expiry, capacity reclamation and lifecycle fencing.
@@ -310,7 +310,7 @@ versions. The preceding invitation checkpoint also passed the
 
 The [runtime snapshot tool](../tools/testing/MULTIPLAYER-RUNTIME-SNAPSHOT.md)
 verifies the actual loaded build and reads bounded native session/facet state.
-Its seventeen offline tests cover layout checks, consistency, key redaction,
+Its eighteen offline tests cover layout checks, consistency, key redaction,
 Steam-address redaction, and PID-scoped trace parsing. An optional bounded native session trace reuses the
 existing session-update hook to locate structures without enabling legacy probes.
 

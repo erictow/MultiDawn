@@ -156,6 +156,7 @@ class SnapshotTests(unittest.TestCase):
 
     def make_players(self):
         memory, session = self.make_session()
+        memory.put(session + 0x1C7C0, "i", 1)
         replica = session + 0x868
         memory.put(replica + 15184, "II", 2, 3)
         for slot in range(2):
@@ -173,6 +174,7 @@ class SnapshotTests(unittest.TestCase):
             {"slot": 0, "player_id": "0x0110000100001234", "member_index": 0, "owned_index": 0, "sequence": 10},
             {"slot": 1, "player_id": "0x0110000100001235", "member_index": 1, "owned_index": 0, "sequence": 11}])
         self.assertTrue(result["player_header_stable"])
+        self.assertEqual(result["identity_fingerprint"], "0x249F395BE192EE32")
         self.assertNotIn("PRIVATE-PLAYER", json.dumps(result))
         # No player's private configuration bytes are even read.
         def bounded_read(start, size):
@@ -209,7 +211,20 @@ class SnapshotTests(unittest.TestCase):
                 if calls == 3:
                     return struct.pack("<II", 1, 1)
             return data
-        self.assertFalse(snapshot.session_snapshot(changing_read, session, True)["player_header_stable"])
+        result = snapshot.session_snapshot(changing_read, session, True)
+        self.assertFalse(result["player_header_stable"])
+        self.assertNotIn("identity_fingerprint", result)
+
+    def test_identity_fingerprint_ignores_revision_and_private_configuration(self):
+        memory, session = self.make_players()
+        before = snapshot.session_snapshot(memory.read, session, True)["identity_fingerprint"]
+        memory.put(session + 0x868 + 4, "I", 12345)
+        memory.blob(session + 0x868 + 15192 + 32, b"CHANGED-PRIVATE-DATA")
+        self.assertEqual(snapshot.session_snapshot(memory.read, session, True)["identity_fingerprint"], before)
+        memory.put(session + 0x868 + 15192 + 4, "Q", 0x123456789ABCDEF)
+        self.assertNotEqual(snapshot.session_snapshot(memory.read, session, True)["identity_fingerprint"], before)
+        memory.put(session + 0x1C7C0, "i", 9)
+        self.assertNotIn("identity_fingerprint", snapshot.session_snapshot(memory.read, session, True))
 
     def test_native_player_empty_table(self):
         memory, session = self.make_session()

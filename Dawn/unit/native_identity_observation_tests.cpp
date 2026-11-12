@@ -1,6 +1,7 @@
 #include "../src/core/multiplayer/native_identity_observation_state.h"
 #include "../src/middleware/gameplay/group/session_state.h"
 #include "../src/client/hooks/bootflow/native_identity_observation.h"
+#include "../src/core/logging/log.h"
 
 #include <Windows.h>
 
@@ -13,6 +14,9 @@
 
 namespace observation = dawn::core::multiplayer::identity_observation;
 namespace wire = dawn::middleware::gameplay::group;
+namespace dawn::core::log {
+void write(Channel, Level, std::string_view) noexcept {}
+}
 namespace {
 unsigned checks{};
 void check(bool value, int line) {
@@ -234,6 +238,77 @@ void mailbox_tests() {
     CHECK(!collector.publish(newToken, 0x10000, &sample, 102));
     CHECK(!collector.snapshot(2, 102, current));
 }
+
+void fingerprint_tests() {
+    Fixture fixture;
+    observation::Sample encoded{};
+    CHECK(observation::capture(&Fixture::read, &fixture, encoded));
+    CHECK(observation::fingerprint(encoded) == 0xBC5E013E290FE6A2ULL);
+    observation::Sample sample{};
+    sample.role = 1;
+    sample.mode = 6;
+    sample.memberMask = sample.playerMask = 1;
+    sample.members[0].machineId = 0x1122334455667788ULL;
+    sample.members[0].state = 10;
+    sample.members[0].ownsPlayer = true;
+    sample.members[0].playerId = 0x8877665544332211ULL;
+    // Independently packed 57-byte Python struct fixture, FNV-1a64 canonical LE contract.
+    constexpr auto expected = 0xC24B5351E11130ABULL;
+    CHECK(observation::fingerprint(sample) == expected);
+    ++sample.revision;
+    CHECK(observation::fingerprint(sample) == expected);
+    sample.members[31].machineId = 0x9999;
+    CHECK(observation::fingerprint(sample) == expected);
+    auto changed = sample;
+    ++changed.role;
+    CHECK(observation::fingerprint(changed) != expected);
+    changed = sample; ++changed.mode;
+    CHECK(observation::fingerprint(changed) != expected);
+    changed = sample; ++changed.members[0].machineId;
+    CHECK(observation::fingerprint(changed) != expected);
+    changed = sample; ++changed.members[0].joinId;
+    CHECK(observation::fingerprint(changed) != expected);
+    changed = sample; ++changed.members[0].state;
+    CHECK(observation::fingerprint(changed) != expected);
+    changed = sample; ++changed.members[0].playerSlot;
+    CHECK(observation::fingerprint(changed) != expected);
+    changed = sample; ++changed.members[0].playerId;
+    CHECK(observation::fingerprint(changed) != expected);
+    changed = sample; ++changed.members[0].playerSequence;
+    CHECK(observation::fingerprint(changed) != expected);
+    changed = sample; changed.members[0].ownsPlayer = false;
+    const auto withoutPlayer = observation::fingerprint(changed);
+    CHECK(withoutPlayer != expected);
+    ++changed.members[0].playerId;
+    ++changed.members[0].playerSlot;
+    ++changed.members[0].playerSequence;
+    CHECK(observation::fingerprint(changed) == withoutPlayer);
+
+    observation::DiagnosticEvents events;
+    observation::Observation current{sample, 0x10000, 1, 1, 100};
+    CHECK(events.changed(current));
+    CHECK(!events.changed(current));
+    ++current.sample.revision;
+    CHECK(!events.changed(current));
+    ++current.incarnation;
+    CHECK(events.changed(current));
+    ++current.sample.members[0].playerSequence;
+    CHECK(events.changed(current));
+    current.manager = 0x20000;
+    CHECK(events.changed(current));
+    current.incarnation = 0;
+    CHECK(!events.changed(current));
+    current.incarnation = 3;
+    events.reset();
+    for (unsigned index = 0; index < 128; ++index) {
+        ++current.sample.members[0].playerSequence;
+        CHECK(events.changed(current));
+    }
+    ++current.sample.members[0].playerSequence;
+    CHECK(!events.changed(current));
+    events.reset();
+    CHECK(events.changed(current));
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -252,6 +327,7 @@ int main(int argc, char** argv) {
     if (argc != 1) return 2;
     parser_tests();
     mailbox_tests();
+    fingerprint_tests();
     CHECK(SetEnvironmentVariableW(L"DAWN_NATIVE_IDENTITY_OBSERVATION", nullptr) != FALSE);
     CHECK(!adapter::enabled());
     adapter::start();

@@ -102,6 +102,17 @@ observation of the native table, not a Steam-ID or character-SOID substitute and
 not permission to admit a player to a host. Inspect `player_header_stable` along
 with `membership_header_stable`; neither makes the sample atomic.
 
+When both headers are stable and the managed role is supported, the player
+capture also emits `identity_fingerprint`. For an isolated process started with
+`DAWN_NATIVE_IDENTITY_OBSERVATION=1`, compare it with the same role/masks in a
+PID-matching `ev=native_identity_observation` log event. Both independently
+encode only public member/player routing scalars in a documented order. Native
+events omit raw identifiers and addresses and are bounded to 128 per hook
+lifetime. Revision and private player configuration are excluded. This FNV-1a
+fingerprint checks diagnostic consistency; it is not a security hash, identity
+credential, or proof of shared gameplay. See
+[the in-process observer](../../docs/NATIVE-IDENTITY-OBSERVATION.md).
+
 Output files must be new and their parent directory must exist. Exit code 0
 means requested reads passed the tool's checks; exit code 2 indicates refusal or
 a section error. Inspect the per-section stability fields even when the exit

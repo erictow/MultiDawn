@@ -37,6 +37,21 @@ publish into the new collector lifetime. Generation counters remain monotonic
 across reset and reinstall. Snapshot callers receive values only; they never read
 native memory through this API.
 
+With the same opt-in flag, changed public routing observations produce at most
+128 diagnostic events per hook lifetime. Events contain PID, raw role/mode,
+member/player masks and a diagnostic fingerprint. Raw native IDs, process
+addresses and opaque identity data are omitted. Revision changes alone do not
+emit repeated events.
+
+The fingerprint is FNV-1a64, offset `14695981039346656037`, prime
+`1099511628211`, with multiplication modulo 2^64. Its canonical byte stream is
+little-endian role `int32`, mode `int32`, member mask `uint32`, player mask
+`uint32`; then each occupied member in ascending index order contributes index
+`uint32`, machine ID `uint64`, join ID `uint64`, state `uint32`, owns-player
+`uint8`. An owning member additionally contributes player slot `uint32`, native
+player ID `uint64`, player sequence `uint32`. Revision is excluded. This is a
+consistency diagnostic, not a security hash, authentication proof or access grant.
+
 No companion message publishes these observations. No admission controller consumes
 them, and they do not authorize `authorize_shared_peer`, supply a gameplay grant,
 or stop a guest's local services. Future authorization still needs an exact current

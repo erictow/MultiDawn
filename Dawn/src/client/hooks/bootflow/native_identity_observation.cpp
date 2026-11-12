@@ -2,13 +2,17 @@
 
 #include <Windows.h>
 #include <array>
+#include <cstdio>
 #include <cstring>
+
+#include "../../../core/logging/log.h"
 
 namespace dawn::client::hooks::bootflow::native_identity_observation {
 namespace {
 namespace observation = core::multiplayer::identity_observation;
 SRWLOCK g_lock{};
 observation::Collector g_collector{};
+observation::DiagnosticEvents g_diagnostics{};
 
 /** Match the same three build-86657 layout anchors as the read-only snapshot tool. */
 [[nodiscard]] bool layout_matches() noexcept {
@@ -58,9 +62,26 @@ void observe(std::byte* manager) noexcept {
     if (token == 0) return;
     observation::Sample sample{};
     const bool valid = observation::capture(&read_scalar, manager, sample);
+    observation::Observation current{};
+    bool report{};
     AcquireSRWLockExclusive(&g_lock);
-    (void)g_collector.publish(token, reinterpret_cast<std::uintptr_t>(manager), valid ? &sample : nullptr, GetTickCount64());
+    const auto now = GetTickCount64();
+    const auto address = reinterpret_cast<std::uintptr_t>(manager);
+    if (g_collector.publish(token, address, valid ? &sample : nullptr, now)
+        && g_collector.snapshot(sample.role, now, current) && current.manager == address)
+        report = g_diagnostics.changed(current);
     ReleaseSRWLockExclusive(&g_lock);
+    if (report) {
+        std::array<char, 256> line{};
+        const int count = std::snprintf(line.data(), line.size(),
+            "ev=native_identity_observation pid=%lu role=%d mode=%d member_mask=0x%08X player_mask=0x%08X fingerprint=0x%016llX",
+            static_cast<unsigned long>(GetCurrentProcessId()), current.sample.role, current.sample.mode,
+            current.sample.memberMask, current.sample.playerMask,
+            static_cast<unsigned long long>(observation::fingerprint(current.sample)));
+        if (count > 0 && static_cast<std::size_t>(count) < line.size())
+            core::log::write(core::log::Channel::client, core::log::Level::info,
+                {line.data(), static_cast<std::size_t>(count)});
+    }
 }
 
 bool snapshot(std::int32_t managedRole, std::uint64_t now, observation::Observation& output) noexcept {
@@ -77,12 +98,14 @@ void start() noexcept {
     AcquireSRWLockExclusive(&g_lock);
     if (active) g_collector.start();
     else g_collector.stop();
+    g_diagnostics.reset();
     ReleaseSRWLockExclusive(&g_lock);
 }
 
 void reset() noexcept {
     AcquireSRWLockExclusive(&g_lock);
     g_collector.stop();
+    g_diagnostics.reset();
     ReleaseSRWLockExclusive(&g_lock);
 }
 

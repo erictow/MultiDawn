@@ -137,6 +137,27 @@ def native_players_snapshot(read, session: int, members: list[dict]) -> dict:
             "player_header_stable": read(base + 15184, 8) == header}
 
 
+def identity_fingerprint(sample: dict) -> str | None:
+    """Public scalar diagnostic comparison, never an authentication credential."""
+    role, mode = sample["control"]["managed_identity"], sample["control"]["mode"]
+    if (not 0 <= role < 7 or mode < 0 or not sample["members"]
+            or not sample.get("player_header_stable") or not sample.get("membership_header_stable")):
+        return None
+    values = bytearray(struct.pack("<iiII", role, mode, int(sample["member_mask"], 16), int(sample["player_mask"], 16)))
+    players = {player["member_index"]: player for player in sample["players"]}
+    for member in sorted(sample["members"], key=lambda row: row["index"]):
+        owns = member["player_slot"] is not None
+        values += struct.pack("<IQQIB", member["index"], int(member["machine_id"], 16),
+                              int(member["join_id"], 16), member["state"] & 0xFFFFFFFF, owns)
+        if owns:
+            player = players[member["index"]]
+            values += struct.pack("<IQI", player["slot"], int(player["player_id"], 16), player["sequence"])
+    fingerprint = 14695981039346656037
+    for value in values:
+        fingerprint = ((fingerprint ^ value) * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+    return f"0x{fingerprint:016X}"
+
+
 def session_snapshot(read, session: int, include_players: bool = False) -> dict:
     # SessionState replica starts at session+0x868. Its offsets are documented in
     # middleware/gameplay/group/session_state.cpp and the native handoff probe.
@@ -175,6 +196,10 @@ def session_snapshot(read, session: int, include_players: bool = False) -> dict:
     # Detect movement/reallocation while traversing, without suspending a thread.
     result["membership_header_stable"] = read(session + 0x868, 56) == prefix
     result["authority_state_range"] = 6 <= controls["mode"] <= 9
+    if include_players:
+        fingerprint = identity_fingerprint(result)
+        if fingerprint is not None:
+            result["identity_fingerprint"] = fingerprint
     return result
 
 

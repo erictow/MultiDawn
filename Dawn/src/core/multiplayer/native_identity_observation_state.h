@@ -32,6 +32,36 @@ struct Sample final {
     friend constexpr bool operator==(const Sample&, const Sample&) noexcept = default;
 };
 
+/** Diagnostic FNV-1a over canonical little-endian public scalars; never an authentication hash. */
+[[nodiscard]] inline std::uint64_t fingerprint(const Sample& sample) noexcept {
+    std::uint64_t hash = 14695981039346656037ULL;
+    const auto append = [&hash](std::uint64_t value, unsigned width) noexcept {
+        for (unsigned index = 0; index < width; ++index) {
+            hash ^= (value >> (index * 8U)) & 0xFFU;
+            hash *= 1099511628211ULL;
+        }
+    };
+    append(static_cast<std::uint32_t>(sample.role), 4);
+    append(static_cast<std::uint32_t>(sample.mode), 4);
+    append(sample.memberMask, 4);
+    append(sample.playerMask, 4);
+    for (std::size_t index = 0; index < kMemberCapacity; ++index) {
+        if ((sample.memberMask & (std::uint32_t{1} << index)) == 0) continue;
+        const auto& member = sample.members[index];
+        append(index, 4);
+        append(member.machineId, 8);
+        append(member.joinId, 8);
+        append(member.state, 4);
+        append(member.ownsPlayer ? 1U : 0U, 1);
+        if (member.ownsPlayer) {
+            append(member.playerSlot, 4);
+            append(member.playerId, 8);
+            append(member.playerSequence, 4);
+        }
+    }
+    return hash;
+}
+
 /** Reads only the requested scalar bytes relative to a verified current native manager. */
 using Reader = bool (*)(void*, std::size_t, std::span<std::byte>) noexcept;
 
@@ -117,6 +147,32 @@ struct Observation final {
     std::uintptr_t manager{};
     /** Monotonic observed lifetime, not a recovered native session incarnation. */
     std::uint64_t incarnation{}, generation{}, sampledAt{};
+};
+
+/** Per-hook diagnostic budget. Exact duplicate public data emits no repeated event. */
+class DiagnosticEvents final {
+public:
+    [[nodiscard]] bool changed(const Observation& observation) noexcept {
+        if (observation.manager == 0 || observation.incarnation == 0 || count_ >= 128) return false;
+        const auto value = fingerprint(observation.sample);
+        Row* selected{};
+        Row* oldest = &rows_[0];
+        for (auto& row : rows_) {
+            if (row.manager == observation.manager) { selected = &row; break; }
+            if (row.order < oldest->order) oldest = &row;
+        }
+        if (selected == nullptr) selected = oldest;
+        if (selected->manager == observation.manager && selected->incarnation == observation.incarnation
+            && selected->fingerprint == value) return false;
+        ++count_;
+        *selected = {observation.manager, observation.incarnation, value, count_};
+        return true;
+    }
+    void reset() noexcept { rows_ = {}; count_ = 0; }
+private:
+    struct Row { std::uintptr_t manager{}; std::uint64_t incarnation{}, fingerprint{}; unsigned order{}; };
+    std::array<Row, kManagerCapacity> rows_{};
+    unsigned count_{};
 };
 
 /** Caller serializes access. Expiry and ambiguity fail closed; storage never allocates. */
