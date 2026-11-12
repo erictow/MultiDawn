@@ -31,8 +31,9 @@ The source now includes these native components:
 These changes have not been installed over the existing game. The approved
 Windows SDK is installed locally. The full DLL and native component tests now
 build with Clang 23.1.5. An earlier development DLL ran in the isolated test game
-and passed the read-only executable/signature checks. The latest invitation and
-identity-observer changes still need in-game testing. This is a development build, not a
+and passed the read-only executable/signature checks. The latest identity reader
+also passed a live Tower comparison. Invitation behavior still needs in-game
+friend-roster testing. This is a development build, not a
 verified multiplayer release. The installed Dawn 1.7.2 DLL does not gain these
 features from a launcher update alone.
 
@@ -107,7 +108,9 @@ The new [in-process observation reader](NATIVE-IDENTITY-OBSERVATION.md) captures
 those public routing scalars on the native manager thread. It requires
 `DAWN_NATIVE_IDENTITY_OBSERVATION=1` and pinned build signatures, rejects ambiguous
 roles and inconsistent ownership, and expires samples after one second. Its
-component tests pass; comparison against a live game is still pending. It neither
+component tests pass. In the isolated Tower run, the fingerprints for both sampled
+roles matched the independent read-only capture exactly, with stable headers.
+The actual loaded DLL and three layout signatures were verified. It neither
 identifies a unique local human nor publishes identities to another PC.
 
 The opt-in trace also located the actual fireteam and activity sessions.
@@ -307,6 +310,8 @@ For experimental commit `066a9bf6`, the
 passed all twelve component suites, the Python snapshot tests and both companion
 versions. The preceding invitation checkpoint also passed the
 [launcher and package workflow](https://github.com/erictow/MultiDawn/actions/runs/43136233523).
+The later identity-fingerprint implementation at `5e8c56ba` also passed the
+[native, snapshot and interoperability workflow](https://github.com/erictow/MultiDawn/actions/runs/43138193997).
 
 The [runtime snapshot tool](../tools/testing/MULTIPLAYER-RUNTIME-SNAPSHOT.md)
 verifies the actual loaded build and reads bounded native session/facet state.

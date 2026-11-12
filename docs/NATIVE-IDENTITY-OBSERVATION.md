@@ -61,5 +61,11 @@ The `native_identity_observation_tests` project exercises the production members
 encoder, malformed ownership/identity data, changing samples, scalar-read privacy,
 bit-31 slots, expiry, capacity reclamation, ambiguity and lifecycle fencing. Its
 `--layout-refused` mode checks that explicit opt-in still refuses an unsupported
-executable. An in-game comparison against the independent runtime snapshot remains
-required before treating this observer as live-validated.
+executable.
+
+In the isolated Tower run using commit `5e8c56ba`, the in-process fingerprints
+matched the independent read-only capture for both sampled roles, zero and one.
+Each had one member and one owned player, with stable membership and player
+headers. The loaded DLL hash and all three layout signatures were verified.
+This validates the public routing scalar reader against that single live game.
+Lifecycle transitions and two-PC native identity binding remain unverified.
