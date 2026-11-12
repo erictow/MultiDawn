@@ -30,8 +30,9 @@ The source now includes these native components:
 
 These changes have not been installed over the existing game. The approved
 Windows SDK is installed locally. The full DLL and native component tests now
-build with Clang 23.1.5. An isolated test game has loaded that DLL and passed the
-read-only executable/signature checks. This is a development build, not a
+build with Clang 23.1.5. An earlier development DLL ran in the isolated test game
+and passed the read-only executable/signature checks. The latest invitation and
+identity-observer changes still need in-game testing. This is a development build, not a
 verified multiplayer release. The installed Dawn 1.7.2 DLL does not gain these
 features from a launcher update alone.
 
@@ -300,6 +301,12 @@ For production commit `21c2a980`, the remote
 [native component workflow](https://github.com/erictow/MultiDawn/actions/runs/42975247251)
 and [launcher workflow](https://github.com/erictow/MultiDawn/actions/runs/42975247367)
 both completed successfully. Later experimental changes need their own checks.
+
+For experimental commit `066a9bf6`, the
+[native component and interoperability workflow](https://github.com/erictow/MultiDawn/actions/runs/43137042609)
+passed all twelve component suites, the Python snapshot tests and both companion
+versions. The preceding invitation checkpoint also passed the
+[launcher and package workflow](https://github.com/erictow/MultiDawn/actions/runs/43136233523).
 
 The [runtime snapshot tool](../tools/testing/MULTIPLAYER-RUNTIME-SNAPSHOT.md)
 verifies the actual loaded build and reads bounded native session/facet state.

@@ -42,7 +42,10 @@ namespace MultiDawn.Launcher
                             + "Native side B:" + Environment.NewLine + await secondOut.ConfigureAwait(false) + await secondError.ConfigureAwait(false);
                         if (first.ExitCode != 0 || second.ExitCode != 0)
                             throw new IOException("Native companion test worker failed (" + first.ExitCode + ", " + second.ExitCode + ")." + Environment.NewLine + output);
-                        await Task.Delay(250).ConfigureAwait(false);
+                        Stopwatch cleanup = Stopwatch.StartNew();
+                        while (!Clean(firstBridge, secondBridge) && cleanup.ElapsedMilliseconds < 5000)
+                            await Task.Delay(25).ConfigureAwait(false);
+                        if (!Clean(firstBridge, secondBridge)) throw new IOException("Native exit did not retire both runtime epochs and invitation contexts.");
                         if (!host.IsPaired || !guest.IsPaired) throw new IOException("Native worker exit incorrectly terminated launcher pairing.");
                         return output + "PASS: actual C++ companion framing, nonce authentication, identity publication, bidirectional invitations, and native exit cleanup."
                             + (protocol == 2 ? " Invitation acceptance reached the host as intent only; no gameplay grant." : " Legacy protocol 1 remains compatible.") + Environment.NewLine
@@ -51,6 +54,14 @@ namespace MultiDawn.Launcher
                     finally { Stop(first); Stop(second); }
                 }
             }
+        }
+        private static bool Clean(RuntimeBridge first, RuntimeBridge second)
+        {
+            return !first.NativeConnected && !second.NativeConnected
+                && first.PeerProtocolForTest == 0 && second.PeerProtocolForTest == 0
+                && first.PeerEpochForTest == "-" && second.PeerEpochForTest == "-"
+                && !first.AcceptedIntentForTest && !second.AcceptedIntentForTest
+                && first.IncomingTicketForTest.Length == 0 && second.IncomingTicketForTest.Length == 0;
         }
         private static Process Start(string harness, string side, RuntimeBridge bridge, int protocol)
         {

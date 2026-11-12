@@ -132,3 +132,6 @@ The native protocol, pipe-client, and social test projects cover the C++ side.
 `--native-companion-test` runs the production C++ companion in disposable workers
 through two real C# bridges. These checks do not load the game, open saves, prove
 the game's own roster UI, or demonstrate two Guardians sharing an activity.
+The cross-language test also waits for both native connections and published
+runtime epochs to retire, checks that invitation contexts are cleared, and
+confirms that the launcher pair remains connected after both workers exit.

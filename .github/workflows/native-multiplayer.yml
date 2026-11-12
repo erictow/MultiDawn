@@ -27,6 +27,7 @@ on:
       - 'Dawn/unit/*steam_social*'
       - 'Dawn/unit/*native_identity_observation*'
       - 'tools/testing/*multiplayer_runtime_snapshot.py'
+      - 'tools/launcher/**'
       - '.github/workflows/native-multiplayer.yml'
   pull_request:
     paths:
@@ -53,6 +54,7 @@ on:
       - 'Dawn/unit/*steam_social*'
       - 'Dawn/unit/*native_identity_observation*'
       - 'tools/testing/*multiplayer_runtime_snapshot.py'
+      - 'tools/launcher/**'
       - '.github/workflows/native-multiplayer.yml'
 
 permissions:
