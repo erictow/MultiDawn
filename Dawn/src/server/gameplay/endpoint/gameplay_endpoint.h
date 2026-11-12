@@ -5,6 +5,7 @@
 #include <span>
 
 #include "../../../state/gameplay/definition.h"
+#include "../resolution/address_resolution_host.h"
 
 namespace dawn::server::gameplay::endpoint {
 
@@ -25,9 +26,33 @@ void service(std::uint64_t now) noexcept;
 /** A bound native route must never fall back to an unprotected send on failure. */
 enum class RoutedSendResult : std::uint8_t { notRouted, failed, sent };
 
+/** An internal route consumer chooses whether an authenticated packet belongs to it. */
+enum class RoutedIngressResult : std::uint8_t { unhandled, handled, rejected };
+using RoutedConsumer = RoutedIngressResult (*)(const resolution::AuthenticatedRoute&,
+    std::span<const std::byte>, std::uint64_t) noexcept;
+
+/**
+ * Installs one process-lifetime server callback on a bound embedded endpoint. This grants
+ * nothing: the callback must validate its own current peer/route authorization. It runs
+ * outside endpoint/resolver locks; payload storage is borrowed until it returns. Callers
+ * own module quiescence, and must not unload callback code while service is in flight.
+ */
+[[nodiscard]] bool register_routed_consumer(RoutedConsumer consumer) noexcept;
+/**
+ * Removes only that callback. Shutdown also clears registration. A callback already copied
+ * by service may finish afterward; neither operation waits for it. Revoke individual peers
+ * through their route/grant lifetimes, not by removing a module-wide callback.
+ */
+void unregister_routed_consumer(RoutedConsumer consumer) noexcept;
+
 /** Sends an engine payload only when an authenticated native route owns the destination. */
 [[nodiscard]] RoutedSendResult send_resolved_to(
     const state::gameplay::Endpoint& destination,
+    std::span<const std::byte> payload) noexcept;
+
+/** Exact-context send. Always sent or failed; it never selects another route or raw fallback. */
+[[nodiscard]] RoutedSendResult send_resolved_on_route(
+    const resolution::AuthenticatedRoute& route,
     std::span<const std::byte> payload) noexcept;
 
 /**

@@ -51,11 +51,33 @@ struct AuthenticatedRoute {
                                   std::span<std::byte> plaintext,
                                   std::size_t& written) noexcept;
 
+/**
+ * Also returns the exact context that authenticated this packet. Failure clears matched;
+ * success contains only its owner, context generation and pinned UDP source. A different
+ * context using the same source endpoint cannot replace this packet's routing identity.
+ */
+[[nodiscard]] PacketResult unwrap(const state::gameplay::Endpoint& source,
+                                  std::span<const std::byte> packet,
+                                  std::span<std::byte> plaintext,
+                                  std::size_t& written,
+                                  AuthenticatedRoute& matched) noexcept;
+
 /** Uses the destination's most recently authenticated route; consumes each IV once. */
 [[nodiscard]] PacketResult wrap(const state::gameplay::Endpoint& destination,
                                 std::span<const std::byte> plaintext,
                                 std::span<std::byte> packet,
                                 std::size_t& written) noexcept;
+
+/**
+ * Seals with this exact still-live bound context, even when another context is the
+ * endpoint's most recently heard route. Invalid/stale ownership, generation or source
+ * is rejected without falling back. IV state is shared with the endpoint-based wrapper.
+ * This selects an authenticated transport context; it grants no human/gameplay admission.
+ */
+[[nodiscard]] PacketResult wrap_authenticated_route(const AuthenticatedRoute& route,
+                                                    std::span<const std::byte> plaintext,
+                                                    std::span<std::byte> packet,
+                                                    std::size_t& written) noexcept;
 
 /**
  * Observes this owner's currently selected authenticated route. Unbound contexts
@@ -71,6 +93,13 @@ struct AuthenticatedRoute {
  * The result is an observation under the resolver lock, not a retained lease.
  */
 [[nodiscard]] bool validate_authenticated_route(const AuthenticatedRoute& observed) noexcept;
+
+/**
+ * Erases one bound or unbound context by exact owner and generation. Stale, forged or
+ * repeated releases return false and do not affect any sibling route for that owner.
+ * This internal lifetime operation accepts no endpoint-based or newest-route fallback.
+ */
+[[nodiscard]] bool release_route(RouteHandle route) noexcept;
 
 void release_owner(state::activity::AuthenticationKey owner) noexcept;
 void reset() noexcept;

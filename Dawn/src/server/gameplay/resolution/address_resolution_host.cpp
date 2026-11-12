@@ -131,6 +131,37 @@ private:
     }
     return selected != nullptr && selected_for_endpoint(selected->peer) == selected ? selected : nullptr;
 }
+
+/** Exact live context lookup. Selection recency belongs only to the legacy endpoint API. */
+[[nodiscard]] Context* by_authenticated_route(const AuthenticatedRoute& route) noexcept {
+    if (!static_cast<bool>(route.handle) || route.source.address == 0 || route.source.port == 0) {
+        return nullptr;
+    }
+    for (auto& context : g_contexts) {
+        if (context.occupied && context.bound && context.owner == route.handle.owner
+            && context.generation == route.handle.generation && same_endpoint(context.peer, route.source)) {
+            return &context;
+        }
+    }
+    return nullptr;
+}
+
+/** Caller holds g_lock. Every valid seal attempt consumes this context's IV exactly once. */
+[[nodiscard]] PacketResult seal_locked(Context& context,
+                                        std::span<const std::byte> plaintext,
+                                        std::span<std::byte> datagram,
+                                        std::size_t& written) noexcept {
+    if (context.sendExhausted) { return PacketResult::rejected; }
+    const auto iv = counter_bytes(context.nextSend);
+    if (context.nextSend == (std::numeric_limits<std::uint64_t>::max)()) { context.sendExhausted = true; }
+    else { ++context.nextSend; }
+    // Consume the IV even if encryption or the later OS send fails.
+    if (!packet::seal(context.outbound, context.tag, iv, plaintext, datagram, written)) {
+        return PacketResult::rejected;
+    }
+    ++g_statistics.wrapped;
+    return PacketResult::complete;
+}
 } // namespace
 
 bool enabled() noexcept {
@@ -222,14 +253,25 @@ bool resolve_address(state::activity::AuthenticationKey owner,
 PacketResult unwrap(const state::gameplay::Endpoint& source,
                      std::span<const std::byte> datagram,
                      std::span<std::byte> plaintext, std::size_t& written) noexcept {
+    AuthenticatedRoute ignored{};
+    return unwrap(source, datagram, plaintext, written, ignored);
+}
+
+PacketResult unwrap(const state::gameplay::Endpoint& source,
+                     std::span<const std::byte> datagram,
+                     std::span<std::byte> plaintext, std::size_t& written,
+                     AuthenticatedRoute& matched) noexcept {
+    // A caller may reuse its prior route.source as the input endpoint and matched as output.
+    const auto from = source;
+    matched = {};
     written = 0;
     if (!enabled()) { return PacketResult::notRouted; }
     const Lock lock;
     Context* context = datagram.size() >= 4 ? by_tag(encoding::read_u32_be(datagram.first<4>())) : nullptr;
     if (context == nullptr) {
-        return bound_source(source) ? PacketResult::rejected : PacketResult::notRouted;
+        return bound_source(from) ? PacketResult::rejected : PacketResult::notRouted;
     }
-    if ((context->bound && !same_endpoint(context->peer, source)) || source.address == 0 || source.port == 0) {
+    if ((context->bound && !same_endpoint(context->peer, from)) || from.address == 0 || from.port == 0) {
         ++g_statistics.rejected;
         return PacketResult::rejected;
     }
@@ -254,16 +296,17 @@ PacketResult unwrap(const state::gameplay::Endpoint& source,
     }
     const bool first = !context->bound;
     context->replay = replay;
-    context->peer = source;
+    context->peer = from;
     context->bound = true;
     context->heard = ++g_heardClock;
     std::copy_n(staged.begin(), size, plaintext.begin());
     written = size;
+    matched = {{context->owner, context->generation}, context->peer};
     ++g_statistics.opened;
     if (first) {
         report(core::log::Level::info,
                "ev=gameplay stage=resolved_route result=authenticated route=%u peer=0x%08X:%u",
-               context->tag, source.address, static_cast<unsigned>(source.port));
+               context->tag, from.address, static_cast<unsigned>(from.port));
     }
     return PacketResult::complete;
 }
@@ -276,16 +319,17 @@ PacketResult wrap(const state::gameplay::Endpoint& destination,
     const Lock lock;
     Context* selected = selected_for_endpoint(destination);
     if (selected == nullptr) { return PacketResult::notRouted; }
-    if (selected->sendExhausted) { return PacketResult::rejected; }
-    const auto iv = counter_bytes(selected->nextSend);
-    if (selected->nextSend == (std::numeric_limits<std::uint64_t>::max)()) { selected->sendExhausted = true; }
-    else { ++selected->nextSend; }
-    // Consume the IV even if encryption or the later OS send fails.
-    if (!packet::seal(selected->outbound, selected->tag, iv, plaintext, datagram, written)) {
-        return PacketResult::rejected;
-    }
-    ++g_statistics.wrapped;
-    return PacketResult::complete;
+    return seal_locked(*selected, plaintext, datagram, written);
+}
+
+PacketResult wrap_authenticated_route(const AuthenticatedRoute& route,
+                                       std::span<const std::byte> plaintext,
+                                       std::span<std::byte> datagram, std::size_t& written) noexcept {
+    written = 0;
+    if (!enabled()) { return PacketResult::notRouted; }
+    const Lock lock;
+    Context* context = by_authenticated_route(route);
+    return context == nullptr ? PacketResult::rejected : seal_locked(*context, plaintext, datagram, written);
 }
 
 bool lookup_authenticated_route(state::activity::AuthenticationKey owner,
@@ -307,6 +351,18 @@ bool validate_authenticated_route(const AuthenticatedRoute& observed) noexcept {
     const Context* selected = selected_for_owner(observed.handle.owner);
     return selected != nullptr && selected->generation == observed.handle.generation
         && same_endpoint(selected->peer, observed.source);
+}
+
+bool release_route(RouteHandle route) noexcept {
+    if (!static_cast<bool>(route)) { return false; }
+    const Lock lock;
+    for (auto& context : g_contexts) {
+        if (context.occupied && context.owner == route.owner && context.generation == route.generation) {
+            SecureZeroMemory(&context, sizeof context);
+            return true;
+        }
+    }
+    return false;
 }
 
 void release_owner(state::activity::AuthenticationKey owner) noexcept {

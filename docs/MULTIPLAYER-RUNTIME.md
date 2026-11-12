@@ -247,6 +247,10 @@ handshake state are not proof of a remote native player identity.
 The [activity-binding probe](ACTIVITY-BINDING.md) now observes these boundaries
 without granting admission. The native managed session and the BAP world/facet
 group remain distinct structures whose relationship still needs recovery.
+The [explicit route APIs](EXPLICIT-NATIVE-ROUTES.md) now retain exact authenticated
+context identity and support protected replies when multiple contexts share one
+socket. The internal consumer extension is unregistered by default; no human
+relay or gameplay grant is activated by this transport work.
 
 ## Component verification
 
@@ -280,13 +284,14 @@ The native test projects are:
 - `Dawn/unit/des_cbc_tests.vcxproj`: 53 compatibility-primitive checks.
 - `Dawn/unit/routed_datagram_tests.vcxproj`: 535 envelope and failure checks.
 - `Dawn/unit/resolution_replay_tests.vcxproj`: 16,554 replay-window checks.
-- `Dawn/unit/address_resolution_host_tests.vcxproj`: 1,276 enabled-backend checks
-  and 14 checks in a separate `--disabled` process. These link production crypto
+- `Dawn/unit/address_resolution_host_tests.vcxproj`: 1,721 enabled-backend checks
+  and 22 checks in a separate `--disabled` process. These link production crypto
   and the context store without sockets, game processes, or saves.
-- `Dawn/unit/endpoint_resolution_tests.vcxproj`: 136 checks in the recorded
+- `Dawn/unit/endpoint_resolution_tests.vcxproj`: 260+ checks in recorded
   loopback run, using real UDP and production endpoint/crypto code with stubbed
   peer/legacy handlers. Covers authenticated dispatch, wrapped replies, rejected
-  tampering/replay/rebinding, preserved legacy traffic and send failures.
+  tampering/replay/rebinding, preserved legacy traffic, exact-context replies,
+  routed consumer dispatch, lifecycle cleanup and send failures.
 - `Dawn/unit/peer_view_echo_tests.vcxproj`: 2,006 checks with compiler warnings
   treated as errors, covering
   exact link ownership, malformed views, queue rollback and unchanged group slots.

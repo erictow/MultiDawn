@@ -156,6 +156,14 @@ reuse invalidate old handles. Snapshots contain no resolver material and are
 observations, not retained leases or gameplay authorization. A later admission
 controller must revalidate them with its exact activity and native identities.
 
+The new `unwrap` overload also returns the exact authenticated route for its
+packet. `wrap_authenticated_route` replies through that context even when
+another context is newer for the same UDP endpoint, and `release_route` retires
+one exact context without removing its siblings. Legacy endpoint-based
+selection is unchanged. The endpoint retains metadata for an optional internal
+routed consumer and provides an explicit protected send, with no raw fallback.
+See [the explicit route contract](../../docs/EXPLICIT-NATIVE-ROUTES.md).
+
 ## Routed UDP envelope
 
 `src/middleware/gameplay/routed_datagram.{h,cpp}` implements:
@@ -212,8 +220,8 @@ includes these isolated suites. Current local results are:
 | `des_cbc_tests.vcxproj` | 53 |
 | `routed_datagram_tests.vcxproj` | 535 |
 | `resolution_replay_tests.vcxproj` | 16,554 |
-| `address_resolution_host_tests.vcxproj` | 1,276 enabled; 14 with `--disabled` |
-| `endpoint_resolution_tests.vcxproj` | 136 in the recorded loopback run |
+| `address_resolution_host_tests.vcxproj` | 1,721 enabled; 22 with `--disabled` |
+| `endpoint_resolution_tests.vcxproj` | 260+ in the recorded loopback runs |
 | `peer_view_echo_tests.vcxproj` | 2,006 |
 
 The backend tests link the production store, random generator, packet codec,

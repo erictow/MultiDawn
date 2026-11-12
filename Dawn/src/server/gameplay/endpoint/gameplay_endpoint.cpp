@@ -47,6 +47,7 @@ struct Endpoint {
     bool ready{};
     state::gameplay::Endpoint advertised{};
     Identity identity{};
+    RoutedConsumer consumer{};
 };
 
 /**
@@ -97,6 +98,7 @@ host_address(const std::array<unsigned char, settings::kAddressOctets>& octets) 
 
 /** Closes the socket and drops the Winsock reference. Callers already hold the lock. */
 void close_locked() noexcept {
+    g_endpoint.consumer = nullptr;
     state::gameplay::replication::begin_control_host_epoch(0);
     if (g_endpoint.socket != INVALID_SOCKET) {
         closesocket(g_endpoint.socket);
@@ -276,11 +278,20 @@ void service(std::uint64_t now) noexcept {
         }
         std::array<std::byte, kInnerDatagramCapacity> opened{};
         std::size_t openedSize = 0;
-        const auto protectedResult = resolution::unwrap(from, {buffer.data(), size}, opened, openedSize);
+        resolution::AuthenticatedRoute route{};
+        const auto protectedResult = resolution::unwrap(from, {buffer.data(), size}, opened, openedSize, route);
         if (protectedResult == resolution::PacketResult::rejected) { continue; }
         std::span<const std::byte> payload(buffer.data(), size);
         if (protectedResult == resolution::PacketResult::complete) {
             payload = {opened.data(), openedSize};
+            AcquireSRWLockShared(&g_lock);
+            const auto consumer = g_endpoint.consumer;
+            ReleaseSRWLockShared(&g_lock);
+            if (consumer != nullptr) {
+                const auto decision = consumer(route, payload, now);
+                // Rejected, handled and unknown decisions never leak into the control peer.
+                if (decision != RoutedIngressResult::unhandled) { continue; }
+            }
             if (g_resolvedPayloadReported.fetch_add(1, std::memory_order_relaxed) < 8) {
                 const unsigned first = payload.empty() ? 0U : std::to_integer<unsigned>(payload[0]);
                 const bool container = (first & 0x80U) != 0;
@@ -313,6 +324,32 @@ void service(std::uint64_t now) noexcept {
         association::route(from, payload, now);
     }
     association::expire(now);
+}
+
+bool register_routed_consumer(RoutedConsumer consumer) noexcept {
+    if (consumer == nullptr) return false;
+    AcquireSRWLockExclusive(&g_lock);
+    const bool allowed = g_endpoint.ready && g_endpoint.socket != INVALID_SOCKET
+        && (g_endpoint.consumer == nullptr || g_endpoint.consumer == consumer);
+    if (allowed) g_endpoint.consumer = consumer;
+    ReleaseSRWLockExclusive(&g_lock);
+    return allowed;
+}
+
+void unregister_routed_consumer(RoutedConsumer consumer) noexcept {
+    AcquireSRWLockExclusive(&g_lock);
+    if (g_endpoint.consumer == consumer) g_endpoint.consumer = nullptr;
+    ReleaseSRWLockExclusive(&g_lock);
+}
+
+RoutedSendResult send_resolved_on_route(const resolution::AuthenticatedRoute& route,
+                                       std::span<const std::byte> payload) noexcept {
+    std::array<std::byte, kDatagramCapacity> protectedBytes{};
+    std::size_t protectedSize{};
+    if (resolution::wrap_authenticated_route(route, payload, protectedBytes, protectedSize)
+        != resolution::PacketResult::complete) return RoutedSendResult::failed;
+    return send_raw_to(route.source, {protectedBytes.data(), protectedSize})
+        ? RoutedSendResult::sent : RoutedSendResult::failed;
 }
 
 RoutedSendResult send_resolved_to(const state::gameplay::Endpoint& destination,

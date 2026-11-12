@@ -383,6 +383,270 @@ static host::AuthenticatedRoute observed_route(Owner who, Endpoint source) {
     return output;
 }
 
+static void absent_metadata(const host::AuthenticatedRoute& matched) {
+    CHECK(matched.handle.owner == Owner{} && matched.handle.generation == 0);
+    CHECK(matched.source.address == 0 && matched.source.port == 0);
+}
+
+static host::AuthenticatedRoute accepted_with_metadata(
+    Endpoint source, const std::vector<std::byte>& encoded,
+    std::span<const std::byte> expected, Owner who) {
+    std::vector<std::byte> output(packet::kMaximumPayload, std::byte{0xA5});
+    std::size_t written = 999;
+    host::AuthenticatedRoute matched{{owner(999), 999}, {1, 2}};
+    CHECK(host::unwrap(source, encoded, output, written, matched) == host::PacketResult::complete);
+    CHECK(written == expected.size() && std::equal(expected.begin(), expected.end(), output.begin()));
+    CHECK(std::all_of(output.begin() + written, output.end(), [](auto b) { return b == std::byte{0xA5}; }));
+    CHECK(matched.handle.owner == who && matched.handle.generation != 0);
+    CHECK(matched.source.address == source.address && matched.source.port == source.port);
+    return matched;
+}
+
+static void rejected_with_metadata(
+    Endpoint source, std::span<const std::byte> encoded,
+    host::PacketResult expected = host::PacketResult::rejected,
+    std::size_t capacity = packet::kMaximumPayload) {
+    std::vector<std::byte> output(capacity, std::byte{0xA5});
+    const auto before = output;
+    std::size_t written = 999;
+    host::AuthenticatedRoute matched{{owner(999), 999}, {1, 2}};
+    CHECK(host::unwrap(source, encoded, output, written, matched) == expected);
+    CHECK(written == 0 && output == before);
+    absent_metadata(matched);
+}
+
+static void rejected_explicit(const host::AuthenticatedRoute& route,
+                              host::PacketResult expected = host::PacketResult::rejected,
+                              std::size_t capacity = packet::kMaximumDatagram) {
+    std::vector<std::byte> output(capacity, std::byte{0xA5});
+    const auto before = output;
+    const auto wrappedBefore = host::snapshot().wrapped;
+    std::size_t written = 999;
+    CHECK(host::wrap_authenticated_route(route, payload(), output, written) == expected);
+    CHECK(written == 0 && output == before);
+    CHECK(host::snapshot().wrapped == wrappedBefore);
+}
+
+static std::vector<std::byte> wrapped_explicit(
+    const host::AuthenticatedRoute& route, const wire::Response& response,
+    std::uint64_t expectedCounter, std::span<const std::byte> plain) {
+    std::vector<std::byte> output(packet::kMaximumDatagram, std::byte{0xA5});
+    std::size_t written = 999;
+    CHECK(host::wrap_authenticated_route(route, plain, output, written) == host::PacketResult::complete);
+    output.resize(written);
+    std::array<std::byte, packet::kMaximumPayload> decoded{};
+    packet::Iv received{};
+    std::size_t decodedSize = 999;
+    CHECK(packet::open(keys(response, false), response.routeTag, output, decoded, received, decodedSize));
+    CHECK(counter(received) == expectedCounter && decodedSize == plain.size());
+    CHECK(std::equal(plain.begin(), plain.end(), decoded.begin()));
+    return output;
+}
+
+static void rejects_other_context(const wire::Response& other,
+                                  std::span<const std::byte> encoded) {
+    std::array<std::byte, packet::kMaximumPayload> decoded{};
+    packet::Iv ignored{};
+    std::size_t written = 999;
+    CHECK(!packet::open(keys(other, false), other.routeTag, encoded, decoded, ignored, written));
+    CHECK(written == 0);
+}
+
+static void exact_ingress_and_reply_routes() {
+    configure();
+    const auto a = owner(80, 2, 3), b = owner(81, 2, 3);
+    const auto responseA = resolve(a), responseB = resolve(b);
+    const Endpoint source{0x7F000001, 45500}, otherSource{0x7F000001, 45501};
+    const auto plain = payload();
+    const auto floorA = counter(responseA.material.b) + 1;
+    const auto floorB = counter(responseB.material.b) + 1;
+    const auto sendA = counter(responseA.material.e), sendB = counter(responseB.material.e);
+    rejected_explicit({});
+
+    // A handle is disclosed only by a fully authenticated, accepted packet.
+    const std::array<std::byte, 4> unknown{}; // Route tag zero is never allocated.
+    rejected_with_metadata(otherSource, unknown, host::PacketResult::notRouted);
+    rejected_with_metadata(otherSource, {}, host::PacketResult::notRouted);
+    const auto firstA = client_packet(responseA, floorA, plain);
+    auto forged = firstA;
+    forged.back() ^= std::byte{1};
+    rejected_with_metadata(source, forged);
+    rejected_with_metadata({0, source.port}, firstA);
+    rejected_with_metadata({source.address, 0}, firstA);
+    rejected_with_metadata(source, client_packet(responseA, floorA - 1, plain));
+    rejected_with_metadata(source, firstA, host::PacketResult::rejected, plain.size() - 1);
+    const auto routeA = accepted_with_metadata(source, firstA, plain, a);
+    CHECK(host::validate_authenticated_route(routeA));
+    rejected_with_metadata(source, firstA); // Replay cannot expose the old route as a success.
+    rejected_with_metadata(otherSource, client_packet(responseA, floorA + 1, plain));
+    rejected_with_metadata(source, unknown);
+
+    // A valid MAC with malformed padding still cannot publish a route or consume replay state.
+    auto malformed = client_packet(responseB, floorB, payload(7));
+    std::array<std::byte, 8> invalid{};
+    const auto inboundB = keys(responseB, true);
+    CHECK(dawn::middleware::crypto::legacy_des::encrypt(inboundB.cipher, iv(floorB),
+        invalid, std::span(malformed).subspan(packet::kHeaderSize, 8)));
+    dawn::middleware::crypto::hmac::Digest digest{};
+    CHECK(dawn::middleware::crypto::hmac::authenticate(
+        dawn::middleware::crypto::hmac::Algorithm::sha1, inboundB.mac,
+        std::span(malformed).first(malformed.size() - packet::kTagSize), {}, digest));
+    std::copy_n(digest.bytes.begin(), packet::kTagSize, malformed.end() - packet::kTagSize);
+    rejected_with_metadata(source, malformed);
+    const auto routeB = accepted_with_metadata(source, client_packet(responseB, floorB, plain), plain, b);
+    CHECK(routeA.handle != routeB.handle && routeA.source.address == routeB.source.address
+          && routeA.source.port == routeB.source.port);
+    CHECK(!host::validate_authenticated_route(routeA)); // Legacy selected-route semantics remain.
+    unavailable_route(a);
+    CHECK(host::validate_authenticated_route(routeB));
+
+    const auto encodedA = wrapped_explicit(routeA, responseA, sendA, plain);
+    rejects_other_context(responseB, encodedA);
+    static_cast<void>(wrapped(source, responseB, sendB, plain));
+    const auto encodedB = wrapped_explicit(routeB, responseB, sendB + 1, plain);
+    rejects_other_context(responseA, encodedB);
+    static_cast<void>(wrapped_explicit(routeA, responseA, sendA + 1, plain));
+    // Explicit replies never steal the legacy endpoint selection or reset its IV.
+    static_cast<void>(wrapped(source, responseB, sendB + 2, plain));
+
+    // Reusing a prior metadata object as both the source and output is well-defined.
+    auto alias = routeA;
+    std::array<std::byte, packet::kMaximumPayload> decoded{};
+    std::size_t written = 999;
+    CHECK(host::unwrap(alias.source, client_packet(responseA, floorA + 1, plain), decoded, written, alias)
+          == host::PacketResult::complete);
+    CHECK(alias.handle == routeA.handle && alias.source.address == source.address && alias.source.port == source.port);
+    CHECK(written == plain.size() && std::equal(plain.begin(), plain.end(), decoded.begin()));
+    static_cast<void>(wrapped(source, responseA, sendA + 2, plain));
+    static_cast<void>(wrapped_explicit(routeA, responseA, sendA + 3, plain));
+    static_cast<void>(wrapped_explicit(routeB, responseB, sendB + 3, plain));
+
+    // Multiple contexts owned by one authentication also remain individually addressable.
+    const auto responseA2 = resolve(a);
+    unavailable_route(b);
+    const auto routeA2 = accepted_with_metadata(source,
+        client_packet(responseA2, counter(responseA2.material.b) + 1, plain), plain, a);
+    CHECK(routeA2.handle.owner == routeA.handle.owner && routeA2.handle.generation > routeA.handle.generation);
+    CHECK(!host::validate_authenticated_route(routeA) && host::validate_authenticated_route(routeA2));
+    const auto sendA2 = counter(responseA2.material.e);
+    static_cast<void>(wrapped(source, responseA2, sendA2, plain));
+    static_cast<void>(wrapped_explicit(routeA, responseA, sendA + 4, plain));
+    static_cast<void>(wrapped_explicit(routeB, responseB, sendB + 4, plain));
+
+    // Both APIs share the same context IV, including valid attempts that cannot seal.
+    rejected_explicit(routeA, host::PacketResult::rejected, 8);
+    static_cast<void>(wrapped_explicit(routeA, responseA, sendA + 6, plain));
+    static_cast<void>(wrapped(source, responseA2, sendA2 + 1, plain));
+    std::array<std::byte, 8> shortOutput{};
+    shortOutput.fill(std::byte{0xA5});
+    const auto untouched = shortOutput;
+    written = 999;
+    CHECK(host::wrap(source, plain, shortOutput, written) == host::PacketResult::rejected);
+    CHECK(written == 0 && shortOutput == untouched);
+    static_cast<void>(wrapped_explicit(routeA2, responseA2, sendA2 + 3, plain));
+
+    for (unsigned change = 0; change < 8; ++change) {
+        auto altered = routeA;
+        switch (change) {
+        case 0: altered.handle.owner = b; break;
+        case 1: ++altered.handle.owner.connection.generation.value; break;
+        case 2: ++altered.handle.owner.generation.value; break;
+        case 3: altered.handle.generation = routeB.handle.generation; break;
+        case 4: altered.handle.generation = 0; break;
+        case 5: ++altered.source.address; break;
+        case 6: ++altered.source.port; break;
+        case 7: altered.source = {}; break;
+        }
+        rejected_explicit(altered);
+    }
+    static_cast<void>(wrapped_explicit(routeA, responseA, sendA + 7, plain)); // Bad handles consume no IV.
+
+    // Exact owner teardown invalidates all of its contexts without falling back to B.
+    host::release_owner(a);
+    rejected_explicit(routeA);
+    rejected_explicit(routeA2);
+    static_cast<void>(wrapped(source, responseB, sendB + 5, plain));
+    static_cast<void>(wrapped_explicit(routeB, responseB, sendB + 6, plain));
+    host::release_owner(b);
+    rejected_explicit(routeB);
+
+    // Slot reuse and reset cannot turn a stale generation into a new matching context.
+    const auto reused = resolve(a);
+    const auto afterRelease = accepted_with_metadata(source,
+        client_packet(reused, counter(reused.material.b) + 1, plain), plain, a);
+    CHECK(afterRelease.handle.generation > routeA2.handle.generation);
+    rejected_explicit(routeA);
+    rejected_explicit(routeA2);
+    static_cast<void>(wrapped_explicit(afterRelease, reused, counter(reused.material.e), plain));
+    host::reset();
+    rejected_explicit(afterRelease);
+    const auto recreated = resolve(a);
+    const auto afterReset = accepted_with_metadata(source,
+        client_packet(recreated, counter(recreated.material.b) + 1, plain), plain, a);
+    CHECK(afterReset.handle.generation > afterRelease.handle.generation);
+    rejected_explicit(afterRelease);
+    static_cast<void>(wrapped_explicit(afterReset, recreated, counter(recreated.material.e), plain));
+}
+
+static void exact_route_retirement() {
+    configure();
+    const auto a = owner(90, 5, 6), b = owner(91, 5, 6);
+    const Endpoint source{0x7F000001, 45600};
+    const auto plain = payload();
+    const auto responseA1 = resolve(a), responseA2 = resolve(a), responseB = resolve(b);
+    const auto routeA1 = accepted_with_metadata(source,
+        client_packet(responseA1, counter(responseA1.material.b) + 1, plain), plain, a);
+    const auto routeB = accepted_with_metadata(source,
+        client_packet(responseB, counter(responseB.material.b) + 1, plain), plain, b);
+    const auto routeA2 = accepted_with_metadata(source,
+        client_packet(responseA2, counter(responseA2.material.b) + 1, plain), plain, a);
+    CHECK(host::snapshot().live == 3);
+    CHECK(host::validate_authenticated_route(routeA2));
+
+    CHECK(!host::release_route({}));
+    auto wrong = routeA1.handle;
+    wrong.owner = b;
+    CHECK(!host::release_route(wrong));
+    wrong = routeA1.handle; ++wrong.owner.connection.generation.value;
+    CHECK(!host::release_route(wrong));
+    wrong = routeA1.handle; ++wrong.owner.generation.value;
+    CHECK(!host::release_route(wrong));
+    wrong = routeA1.handle; wrong.generation = routeB.handle.generation;
+    CHECK(!host::release_route(wrong));
+    CHECK(host::snapshot().live == 3 && host::validate_authenticated_route(routeA2));
+
+    CHECK(host::release_route(routeA1.handle));
+    CHECK(!host::release_route(routeA1.handle) && host::snapshot().live == 2);
+    rejected_explicit(routeA1);
+    rejected_with_metadata(source, client_packet(responseA1, counter(responseA1.material.b) + 2, plain));
+    // Releasing an older sibling must not change current owner or endpoint selection.
+    CHECK(host::validate_authenticated_route(routeA2));
+    static_cast<void>(wrapped(source, responseA2, counter(responseA2.material.e), plain));
+    static_cast<void>(wrapped_explicit(routeA2, responseA2, counter(responseA2.material.e) + 1, plain));
+    static_cast<void>(wrapped_explicit(routeB, responseB, counter(responseB.material.e), plain));
+
+    const auto responseReused = resolve(a);
+    const auto reused = accepted_with_metadata(source,
+        client_packet(responseReused, counter(responseReused.material.b) + 1, plain), plain, a);
+    CHECK(reused.handle.generation > routeA2.handle.generation);
+    CHECK(!host::release_route(routeA1.handle));
+    CHECK(host::snapshot().live == 3 && host::validate_authenticated_route(reused));
+    rejected_explicit(routeA1);
+
+    // Removing the selected route falls back only for the endpoint API, never for its handle.
+    CHECK(host::release_route(reused.handle));
+    CHECK(!host::release_route(reused.handle));
+    rejected_explicit(reused);
+    CHECK(host::validate_authenticated_route(routeA2));
+    static_cast<void>(wrapped(source, responseA2, counter(responseA2.material.e) + 2, plain));
+    CHECK(host::release_route(routeA2.handle));
+    CHECK(host::validate_authenticated_route(routeB));
+    static_cast<void>(wrapped(source, responseB, counter(responseB.material.e) + 1, plain));
+    CHECK(host::release_route(routeB.handle) && host::snapshot().live == 0);
+    CHECK(!host::release_route(routeB.handle));
+    rejected_explicit(routeB);
+}
+
 static void authenticated_route_observation() {
     configure();
     const auto a = owner(60, 2, 3), b = owner(61, 2, 3);
@@ -484,6 +748,9 @@ static void disabled_mode() {
     CHECK(written == 0 && output == before && host::snapshot().live == 0);
     unavailable_route(owner(1));
     CHECK(!host::validate_authenticated_route({{owner(1), 1}, {0x7F000001, 45000}}));
+    rejected_with_metadata({0x7F000001, 45000}, payload(), host::PacketResult::notRouted);
+    rejected_explicit({{owner(1), 1}, {0x7F000001, 45000}}, host::PacketResult::notRouted);
+    CHECK(!host::release_route({owner(1), 1}));
     CHECK(SetEnvironmentVariableW(L"DAWN_NATIVE_ADDRESS_RESOLUTION", L"1") != 0);
     CHECK(!host::enabled()); // This DLL/process lifetime keeps its initial policy.
 }
@@ -500,6 +767,8 @@ int main(int argc, char** argv) {
         outbound_and_rekey();
         owner_lifecycle_and_capacity();
         authenticated_route_observation();
+        exact_ingress_and_reply_routes();
+        exact_route_retirement();
     }
     host::reset();
     std::printf("address_resolution_host_tests: PASS %u checks\n", checks);

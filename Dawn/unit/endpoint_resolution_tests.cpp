@@ -49,6 +49,24 @@ static Bytes lastPeerPayload, lastLegacyPayload, automaticReply;
 static bool consumeLegacyDtls{};
 static endpoint::RoutedSendResult replyResult = endpoint::RoutedSendResult::notRouted;
 static std::uint64_t epoch{};
+static unsigned routedCalls{};
+static host::AuthenticatedRoute lastRouted{};
+static Bytes lastRoutedPayload, routedReply;
+static endpoint::RoutedIngressResult routedDecision = endpoint::RoutedIngressResult::handled;
+static endpoint::RoutedSendResult routedReplyResult = endpoint::RoutedSendResult::failed;
+
+static endpoint::RoutedIngressResult routed_consumer(const host::AuthenticatedRoute& route,
+    std::span<const std::byte> payload, std::uint64_t) noexcept {
+    ++routedCalls; lastRouted = route;
+    lastRoutedPayload.assign(payload.begin(), payload.end());
+    if (routedDecision == endpoint::RoutedIngressResult::handled && !routedReply.empty())
+        routedReplyResult = endpoint::send_resolved_on_route(route, routedReply);
+    return routedDecision;
+}
+static endpoint::RoutedIngressResult other_consumer(const host::AuthenticatedRoute&,
+    std::span<const std::byte>, std::uint64_t) noexcept {
+    return endpoint::RoutedIngressResult::rejected;
+}
 
 namespace dawn::core::settings {
 const Settings& get() noexcept { return testSettings; }
@@ -400,11 +418,108 @@ static void exercise_endpoint() {
     CHECK(host::snapshot().live == 0);
 }
 
+static void exercise_explicit_routes() {
+    CHECK(!endpoint::register_routed_consumer(nullptr));
+    CHECK(!endpoint::register_routed_consumer(&routed_consumer)); // Previous exercise shut it down.
+    initialize_endpoint();
+    CHECK(endpoint::register_routed_consumer(&routed_consumer));
+    CHECK(endpoint::register_routed_consumer(&routed_consumer));
+    CHECK(!endpoint::register_routed_consumer(&other_consumer));
+    endpoint::unregister_routed_consumer(&other_consumer); // Cannot remove another registration.
+
+    const Socket client;
+    const Owner ownerA{{2, {1}}, {1}}, ownerB{{3, {1}}, {1}};
+    const auto responseA = resolve(ownerA), responseB = resolve(ownerB);
+    const auto request = connect_container(client.local, false);
+    const Bytes reply{std::byte{0xA5}, std::byte{0x5A}, std::byte{0x23}};
+    const auto peerBefore = peerCalls, dtlsBefore = dtlsCalls, associationBefore = associationCalls;
+    automaticReply.clear(); routedReply = reply; routedCalls = 0;
+    routedDecision = endpoint::RoutedIngressResult::handled;
+
+    auto first = client_packet(responseA, counter(responseA.material.b) + 1, request);
+    auto forged = first; forged.back() ^= std::byte{1};
+    auto rejected = host::snapshot().rejected;
+    send(client, forged);
+    pump_until([&] { return host::snapshot().rejected > rejected; });
+    CHECK(routedCalls == 0 && peerCalls == peerBefore);
+    quiet(client);
+
+    send(client, first);
+    pump_until([] { return routedCalls == 1; });
+    const auto routeA = lastRouted;
+    CHECK(routeA.handle.owner == ownerA && routeA.handle.generation != 0);
+    CHECK(routeA.source.address == client.local.address && routeA.source.port == client.local.port);
+    CHECK(lastRoutedPayload == request && routedReplyResult == endpoint::RoutedSendResult::sent);
+    verify_reply(client, responseA, counter(responseA.material.e), reply);
+
+    send(client, client_packet(responseB, counter(responseB.material.b) + 1, request));
+    pump_until([] { return routedCalls == 2; });
+    const auto routeB = lastRouted;
+    CHECK(routeB.handle.owner == ownerB && routeB.handle.generation != routeA.handle.generation);
+    CHECK(routeB.source.address == routeA.source.address && routeB.source.port == routeA.source.port);
+    verify_reply(client, responseB, counter(responseB.material.e), reply);
+    CHECK(peerCalls == peerBefore && dtlsCalls == dtlsBefore && associationCalls == associationBefore);
+
+    // One physical socket, distinct crypto contexts. The latest endpoint route is B,
+    // while an explicit A reply must remain encrypted under A's keys and counter.
+    CHECK(endpoint::send_resolved_on_route(routeA, reply) == endpoint::RoutedSendResult::sent);
+    verify_reply(client, responseA, counter(responseA.material.e) + 1, reply);
+    CHECK(endpoint::send_resolved_to(client.local, reply) == endpoint::RoutedSendResult::sent);
+    verify_reply(client, responseB, counter(responseB.material.e) + 1, reply);
+
+    routedReply.clear(); routedDecision = endpoint::RoutedIngressResult::rejected;
+    const auto denied = client_packet(responseA, counter(responseA.material.b) + 2, request);
+    send(client, denied);
+    pump_until([] { return routedCalls == 3; });
+    CHECK(peerCalls == peerBefore && dtlsCalls == dtlsBefore && associationCalls == associationBefore);
+    quiet(client);
+    auto replayed = host::snapshot().replayed;
+    send(client, denied);
+    pump_until([&] { return host::snapshot().replayed > replayed; });
+    CHECK(routedCalls == 3 && peerCalls == peerBefore);
+
+    routedDecision = endpoint::RoutedIngressResult::unhandled;
+    send(client, client_packet(responseA, counter(responseA.material.b) + 3, request));
+    pump_until([&] { return peerCalls == peerBefore + 1; });
+    CHECK(routedCalls == 4 && lastPeerPayload == request);
+    CHECK(dtlsCalls == dtlsBefore && associationCalls == associationBefore);
+
+    // Removing the extension restores the ordinary control consumer.
+    endpoint::unregister_routed_consumer(&routed_consumer);
+    send(client, client_packet(responseB, counter(responseB.material.b) + 2, request));
+    pump_until([&] { return peerCalls == peerBefore + 2; });
+    CHECK(routedCalls == 4);
+
+    CHECK(endpoint::register_routed_consumer(&routed_consumer));
+    CHECK(host::release_route(routeA.handle));
+    CHECK(endpoint::send_resolved_on_route(routeA, reply) == endpoint::RoutedSendResult::failed);
+    quiet(client);
+    const auto receivedAfterRelease = receiveReports;
+    send(client, client_packet(responseA, counter(responseA.material.b) + 4, request));
+    pump_until([&] { return receiveReports > receivedAfterRelease; });
+    CHECK(routedCalls == 4 && peerCalls == peerBefore + 2);
+
+    auto wrong = routeB; ++wrong.handle.generation;
+    CHECK(endpoint::send_resolved_on_route(wrong, reply) == endpoint::RoutedSendResult::failed);
+    wrong = routeB; ++wrong.source.port;
+    CHECK(endpoint::send_resolved_on_route(wrong, reply) == endpoint::RoutedSendResult::failed);
+    quiet(client);
+    endpoint::shutdown();
+    CHECK(endpoint::send_resolved_on_route(routeB, reply) == endpoint::RoutedSendResult::failed);
+    quiet(client);
+    initialize_endpoint();
+    CHECK(endpoint::register_routed_consumer(&other_consumer)); // Shutdown cleared the old callback.
+    endpoint::unregister_routed_consumer(&other_consumer);
+    endpoint::shutdown();
+    host::reset();
+}
+
 int main() {
     CHECK(SetEnvironmentVariableW(L"DAWN_NATIVE_ADDRESS_RESOLUTION", L"1") != 0);
     WSADATA data{};
     CHECK(WSAStartup(MAKEWORD(2, 2), &data) == 0);
     exercise_endpoint();
+    exercise_explicit_routes();
     host::reset();
     CHECK(WSACleanup() == 0);
     std::printf("endpoint_resolution_tests: PASS %u checks (real loopback UDP, production routing/crypto)\n", checks);
