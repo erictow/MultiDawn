@@ -50,6 +50,15 @@ do not contain the increments, so they cannot establish packet-loss values.
 
 ## Remaining milestone 1 work
 
+For the next schema capture, `DAWN_ACTIVITY_BINDING_TRACE=1` also permits at most
+eight `native_world_stack` events from the already installed connection hook.
+Each records at most sixteen native-image return RVAs from a bounded stack walk.
+It records no stack contents, original argument buffers or opaque peer identity,
+adds no detour and does not enable `unsafeDiagnostics`. The caller functions can
+then be read as code in the exact current process to locate the member-to-view
+synchronizer. A guessed authority-vtable offset is not a substitute for that
+consumer proof.
+
 The world connection and its compatible view are foundations. The guest-local
 profile/activity projection, protected control transport, authorized remote
 human routes, native player publication and world-state transfer still need
