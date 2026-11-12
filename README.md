@@ -27,6 +27,10 @@ presets together. The game itself is not included.
 `production` is this fork's default branch and published preview baseline.
 Ongoing multiplayer experiments live on `main` and are verified before promotion.
 
+The [multiplayer milestones](docs/MULTIPLAYER-MILESTONES.md) are two players in
+one shared activity first, then a three-player fireteam, then six-player raid
+support and project completion. Milestone 1 is the current target.
+
 This fork adds a portable Windows launcher with solo Play, a Multiplayer switch,
 and Host/Join pair codes, saved MultiDawn friends, and optional LAN/VPN IPv4
 addresses. A saved friend still needs a current host code. **Pairing currently connects the launchers only.

@@ -20,7 +20,7 @@
 namespace dawn::server::bap {
 namespace {
 
-SRWLOCK g_lock{SRWLOCK_INIT};
+SRWLOCK g_lock = SRWLOCK_INIT;
 std::array<Session, kSessionCount> g_sessions{};
 Scratch g_scratch{};
 /** Process-wide connection generations never reset or live inside reusable session slots. */
@@ -584,6 +584,77 @@ bool snapshot_hud_region(HudRegionSnapshot& output) noexcept {
     output.destination = view.destination;
     output.reportedRegion = view.reportedRegion;
     return true;
+}
+
+namespace {
+
+/** BAP shared lock is held through the State observation and the public value projection. */
+[[nodiscard]] bool snapshot_creator_activity_locked(
+    state::activity::BindingKey requested, CreatorActivitySnapshot& output) noexcept {
+    const HudRegionAnchor anchor = g_hudRegionAnchor;
+    if (!static_cast<bool>(requested) || requested != anchor.ownerBinding
+        || !static_cast<bool>(anchor.activity) || !static_cast<bool>(anchor.hostRegion)
+        || anchor.hostRegion.activity != anchor.activity) {
+        return false;
+    }
+    const Session* owner = nullptr;
+    for (const Session& candidate : g_sessions) {
+        if (candidate.activity.key == requested) {
+            owner = &candidate;
+            break;
+        }
+    }
+    state::activity::membership::RegionView view{};
+    if (owner == nullptr || owner->id == 0 || !owner->authenticated
+        || owner->matchmakingRetirementPending
+        || owner->connectionKey.connectionId != owner->id
+        || !lifecycle::activity_binding_is_current(*owner)
+        || !lifecycle::owns_published_activity(owner->activity)
+        || owner->activity.instance != anchor.activity
+        || !owner->activity.lineage.owns(anchor.activity)
+        || !state::activity::membership::snapshot_region_view(
+            anchor.activity, anchor.hostRegion, view)
+        || view.memberKey == 0 || view.memberKey != owner->activity.memberKey
+        || (view.hasIdentity && !view.identityMatchesMemberKey)) {
+        return false;
+    }
+
+    CreatorActivitySnapshot selected{};
+    selected.binding = requested;
+    selected.lineage = owner->activity.lineage;
+    selected.hostRegion = view.hostRegion;
+    selected.destination.packageNameLength = view.destination.packageNameLength;
+    for (std::size_t index = 0; index < view.destination.packageNameLength; ++index) {
+        selected.destination.packageName[index] = view.destination.packageName[index];
+    }
+    selected.destination.activityIndex = view.destination.activityIndex;
+    selected.destination.reason = view.destination.reason;
+    selected.reportedRegion = view.reportedRegion;
+    selected.memberKey = view.memberKey;
+    selected.joinIdentity = view.joinIdentity;
+    selected.hasIdentity = view.hasIdentity;
+    selected.identityMatchesMemberKey = view.identityMatchesMemberKey;
+    output = selected;
+    return true;
+}
+
+} // namespace
+
+bool snapshot_creator_activity(state::activity::BindingKey requested,
+                               CreatorActivitySnapshot& output) noexcept {
+    output = {};
+    AcquireSRWLockShared(&g_lock);
+    const bool copied = snapshot_creator_activity_locked(requested, output);
+    ReleaseSRWLockShared(&g_lock);
+    return copied;
+}
+
+bool snapshot_current_creator_activity(CreatorActivitySnapshot& output) noexcept {
+    output = {};
+    AcquireSRWLockShared(&g_lock);
+    const bool copied = snapshot_creator_activity_locked(g_hudRegionAnchor.ownerBinding, output);
+    ReleaseSRWLockShared(&g_lock);
+    return copied;
 }
 
 /** Securely retires the current authentication while retaining its connection-owned allocator. */

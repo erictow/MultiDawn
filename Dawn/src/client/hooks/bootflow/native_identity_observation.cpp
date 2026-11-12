@@ -93,6 +93,16 @@ bool snapshot(std::int32_t managedRole, std::uint64_t now, observation::Observat
     return found;
 }
 
+bool collect(std::span<observation::Observation> output, std::uint64_t now, std::size_t& count) noexcept {
+    count = 0;
+    for (auto& value : output) value = {};
+    if (!enabled()) return false;
+    AcquireSRWLockShared(&g_lock);
+    const bool found = g_collector.collect(output, now, count);
+    ReleaseSRWLockShared(&g_lock);
+    return found;
+}
+
 void start() noexcept {
     const bool active = enabled();
     AcquireSRWLockExclusive(&g_lock);

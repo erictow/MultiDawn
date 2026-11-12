@@ -16,6 +16,9 @@ void observe(std::byte* manager) noexcept;
 /** Copies public routing observations only; no local-human identity or access is asserted. */
 [[nodiscard]] bool snapshot(std::int32_t managedRole, std::uint64_t now,
     core::multiplayer::identity_observation::Observation& output) noexcept;
+/** Copies all fresh observations, retaining same-role ambiguity for the caller to evaluate. */
+[[nodiscard]] bool collect(std::span<core::multiplayer::identity_observation::Observation> output,
+    std::uint64_t now, std::size_t& count) noexcept;
 /** Invalidates every prior observation without resetting its monotonic generation allocator. */
 void reset() noexcept;
 

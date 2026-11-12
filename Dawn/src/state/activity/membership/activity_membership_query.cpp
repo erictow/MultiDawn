@@ -100,6 +100,13 @@ bool snapshot_region_view(ActivityInstanceKey activity,
             selected.hostRegion = current;
             selected.destination = record.destination;
             selected.reportedRegion = record.membership.region.index;
+            selected.memberKey = record.memberKey;
+            selected.hasIdentity = record.membership.hasIdentity;
+            if (selected.hasIdentity) {
+                selected.joinIdentity = record.membership.identity.joinIdentity;
+                selected.identityMatchesMemberKey =
+                    record.memberKey != 0 && record.membership.identity.memberKey == record.memberKey;
+            }
             found = true;
         }
     }

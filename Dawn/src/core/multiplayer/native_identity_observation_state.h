@@ -27,6 +27,7 @@ struct Member final {
 /** A validated observation of one native manager, never an admission or identity credential. */
 struct Sample final {
     std::int32_t role{-1}, mode{-1};
+    std::int32_t hostMemberIndex{-1};
     std::uint32_t revision{}, memberMask{}, playerMask{};
     std::array<Member, kMemberCapacity> members{};
     friend constexpr bool operator==(const Sample&, const Sample&) noexcept = default;
@@ -84,11 +85,14 @@ template <typename Value>
     if (!scalar(read, context, kRoleOffset, candidate.role) || candidate.role < 0 || candidate.role >= 7
         || !scalar(read, context, kModeOffset, candidate.mode) || candidate.mode < 0
         || !scalar(read, context, kReplicaOffset + 4, candidate.revision)
+        || !scalar(read, context, kReplicaOffset + 12, candidate.hostMemberIndex)
         || !scalar(read, context, kReplicaOffset + 28, count)
         || !scalar(read, context, kReplicaOffset + 40, mask)
         || !scalar(read, context, kReplicaOffset + 48, arrayCount)
         || count == 0 || count > kMemberCapacity || (mask >> 32U) != 0
         || count != static_cast<std::uint32_t>(std::popcount(mask)) || arrayCount != count
+        || candidate.hostMemberIndex < 0 || candidate.hostMemberIndex >= 32
+        || (mask & (std::uint64_t{1} << static_cast<unsigned>(candidate.hostMemberIndex))) == 0
         || !scalar(read, context, kReplicaOffset + 15184, players)
         || !scalar(read, context, kReplicaOffset + 15188, candidate.playerMask)
         || players > kMemberCapacity || players != static_cast<std::uint32_t>(std::popcount(candidate.playerMask))) return false;
@@ -214,13 +218,31 @@ public:
         if (role < 0 || role >= 7 || exhausted_) return false;
         const Row* selected{};
         for (const auto& row : rows_) {
-            if (!row.valid || row.value.sample.role != role || now < row.value.sampledAt
-                || now - row.value.sampledAt > kMaximumAgeMs) continue;
+            if (!row.valid || row.value.sample.role != role) continue;
+            if (now < row.value.sampledAt) return false;
+            if (now - row.value.sampledAt > kMaximumAgeMs) continue;
             if (selected != nullptr) return false;
             selected = &row;
         }
         if (selected == nullptr) return false;
         output = selected->value;
+        return true;
+    }
+
+    /** Copies every fresh row, including same-role ambiguity. Insufficient space clears all output. */
+    [[nodiscard]] bool collect(std::span<Observation> output, std::uint64_t now, std::size_t& count) const noexcept {
+        count = 0;
+        for (auto& value : output) value = {};
+        if (exhausted_) return false;
+        std::size_t needed{};
+        for (const auto& row : rows_) {
+            if (row.valid && now < row.value.sampledAt) return false;
+            if (row.valid && now - row.value.sampledAt <= kMaximumAgeMs) ++needed;
+        }
+        if (needed > output.size()) return false;
+        for (const auto& row : rows_)
+            if (row.valid && now >= row.value.sampledAt && now - row.value.sampledAt <= kMaximumAgeMs)
+                output[count++] = row.value;
         return true;
     }
 
@@ -251,6 +273,11 @@ public:
     [[nodiscard]] bool snapshot(std::int32_t role, std::uint64_t now, Observation& output) const noexcept {
         output = {};
         return active_ && mailbox_.snapshot(role, now, output);
+    }
+    [[nodiscard]] bool collect(std::span<Observation> output, std::uint64_t now, std::size_t& count) const noexcept {
+        count = 0;
+        for (auto& value : output) value = {};
+        return active_ && mailbox_.collect(output, now, count);
     }
 private:
     Mailbox mailbox_{};

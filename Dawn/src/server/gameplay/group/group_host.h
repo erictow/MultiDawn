@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <span>
 
+#include "../../../core/multiplayer/fireteam_limits.h"
 #include "../../../middleware/encoding/bit_reader.h"
 #include "../../../state/activity/lifecycle_generation.h"
 #include "../../../state/gameplay/definition.h"
@@ -45,7 +46,8 @@ namespace dawn::server::gameplay::group {
  * Authorizes one actual human in an existing group, before its native join request.
  * This is an internal authenticated-runtime boundary, never a packet-level admission hook.
  * Both local and remote humans must be registered with distinct stable machine/player IDs.
- * At most two humans may share a group. No session id or identity is synthesized here.
+ * At most six human identities may be reserved in a group. Transport and BAP readiness remain
+ * separate: this limit does not enable a six-player session. No identity is synthesized here.
  * Identity slots survive endpoint disconnects until group runtime reset. A missing
  * lower member slot pauses publication; the recovered codec cannot encode holes.
  */
@@ -110,8 +112,8 @@ struct AdmittedRow {
     std::uint64_t machineId{};
     std::uint64_t playerId{};
     bool sharedAuthorized{};
-    /** Stable global player slot; 2 means this row is not a shared human. */
-    std::uint32_t sharedPlayerSlot{2};
+    /** Stable global player slot; the capacity value means this is not a shared human. */
+    std::uint32_t sharedPlayerSlot{core::multiplayer::fireteam::kMaximumHumans};
 };
 
 /** Copies every admitted group-session record. @param count Receives the copied row count. */

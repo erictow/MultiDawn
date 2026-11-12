@@ -23,6 +23,10 @@ by raw managed role `0..6`. The result includes every validated member and its
 owned player ID, where present. It does not establish which member is the local
 human, decode a network endpoint, or equate a Steam identity with a native player.
 If several fresh managers have the same role, the lookup fails as ambiguous.
+The bounded `collect` API instead returns every fresh row, including repeated raw
+roles, so a caller cannot silently omit ambiguity. Insufficient output capacity
+or a sample newer than the supplied monotonic time clears the output and returns
+failure. Callers can retry with a fresh timestamp after a concurrent update.
 
 The fixed mailbox has sixteen manager slots. Results expire after one second;
 expired slots can be reclaimed. Malformed samples invalidate their manager's

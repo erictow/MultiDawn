@@ -33,6 +33,13 @@ struct RegionView final {
     HostRegionKey hostRegion{};
     destination::DestinationSelection destination{};
     std::int32_t reportedRegion{kAbsentRegionIndex};
+    /** Committed activity-join key, captured with this region under the same State lock. */
+    std::uint64_t memberKey{};
+    /** Stored BAP join identity only; this can be a seeded fallback, never a native player ID. */
+    std::uint64_t joinIdentity{};
+    bool hasIdentity{};
+    /** A stored identity agrees with the record's independently committed join key. */
+    bool identityMatchesMemberKey{};
 };
 
 /**

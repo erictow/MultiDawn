@@ -3,20 +3,23 @@
 #include <array>
 #include <span>
 
+#include "../../../core/multiplayer/fireteam_limits.h"
 #include "../../../middleware/gameplay/group/session_messages.h"
 #include "../../../state/gameplay/definition.h"
 
 namespace dawn::server::gameplay::group {
 
-inline constexpr std::uint32_t kSharedHumanCapacity = 2;
+inline constexpr std::uint32_t kSharedHumanCapacity = core::multiplayer::fireteam::kMaximumHumans;
 inline constexpr std::uint32_t kInvalidSharedHumanSlot = kSharedHumanCapacity;
+static_assert(kSharedHumanCapacity + 1 <= middleware::gameplay::group::kMemberCapacity);
+static_assert(kSharedHumanCapacity <= middleware::gameplay::group::kPlayerCapacity);
 
 /** Stable native slot ownership for one group's lifetime, independent of live endpoints. */
 struct SharedSlotAssignments {
     struct Owner { std::uint64_t machineId{}; std::uint64_t initialPlayerId{}; };
     std::array<Owner, kSharedHumanCapacity> owners{};
 
-    /** A disconnected identity retains its slot; a third identity cannot replace it. */
+    /** A disconnected identity retains its slot; a new identity cannot replace it. */
     [[nodiscard]] bool reserve(std::uint64_t machineId, std::uint64_t initialPlayerId,
                                std::uint32_t& slot) noexcept {
         if (machineId == 0 || initialPlayerId == 0) { return false; }
@@ -53,10 +56,10 @@ struct SharedHuman {
     bool established{};
 };
 
-/** Owns every row referenced by a two-human, one-activity-host membership update. */
+/** Owns every row referenced by six humans and one activity control host. */
 struct SharedMembershipSnapshot {
-    std::array<middleware::gameplay::group::MembershipMember, 3> members{};
-    std::array<middleware::gameplay::group::MembershipPlayer, 2> players{};
+    std::array<middleware::gameplay::group::MembershipMember, kSharedHumanCapacity + 1> members{};
+    std::array<middleware::gameplay::group::MembershipPlayer, kSharedHumanCapacity> players{};
     std::size_t memberCount{};
     std::size_t playerCount{};
     std::uint64_t hostMachineId{};
@@ -67,9 +70,11 @@ struct SharedMembershipSnapshot {
                 std::span(members).first(memberCount), std::span(players).first(playerCount)};
     }
 };
+static_assert(sizeof(SharedMembershipSnapshot) <= 2 * 1024);
+static_assert(sizeof(SharedHuman) * kSharedHumanCapacity <= 1024);
 
 /**
- * Builds the exact existing native membership schema for one or two real human peers.
+ * Builds the exact existing native membership schema for one through six human peers.
  * It does not invent profile/entity property bodies. The inputs must come from the
  * authenticated runtime boundary and the peers' own native publications.
  * Failure leaves output unchanged.
@@ -82,7 +87,7 @@ struct SharedMembershipSnapshot {
     std::span<const SharedHuman> humans,
     SharedMembershipSnapshot& output) noexcept {
     if (hostMachineId == 0 || joiningId == 0 || revision == 0
-        || humans.empty() || humans.size() > 2) { return false; }
+        || humans.empty() || humans.size() > kSharedHumanCapacity) { return false; }
     const auto usableAddress = [](const auto& address) noexcept {
         bool any = false;
         for (const auto byte : address) { any = any || byte != std::byte{}; }

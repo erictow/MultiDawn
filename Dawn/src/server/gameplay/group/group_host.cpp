@@ -54,8 +54,8 @@ constexpr std::size_t kPeerMemberIndex = 1;
 constexpr std::size_t kSnapshotMemberCount = 2;
 /** Registry index the join-latch update names. Any of the 25 would do; none is ever filled. */
 constexpr std::uint8_t kJoinLatchParameter = 0;
-/** Two humans each retain current/target regions and may stage one replacement before eviction. */
-constexpr std::size_t kAdmittedCapacity = 6;
+/** Each human retains current/target regions and may stage one replacement before eviction. */
+constexpr std::size_t kAdmittedCapacity = kSharedHumanCapacity * 3;
 /** Loopback address the BAP listener binds, in host order. */
 constexpr std::uint32_t kLoopbackAddress = 0x7F000001;
 /** Every member index the `activity-host` parameter covers. The peer needs its own bit set. */
@@ -160,6 +160,7 @@ std::atomic<std::uint64_t> g_admitClock{0};
 SRWLOCK g_admittedLock{SRWLOCK_INIT};
 /** Admitted peers. A join claims a slot and a leave never reclaims one in this POC. */
 std::array<Admitted, kAdmittedCapacity> g_admitted{};
+static_assert(sizeof(g_admitted) <= 8 * 1024, "The admitted table must remain bounded static storage.");
 
 /** Endpoint authorization is transient; slot identity survives disconnect/rejoin. */
 struct SharedGroupSlots {
@@ -246,7 +247,7 @@ template <typename Body>
     if (sessionId == 0) {
         return nullptr;
     }
-    // Each human has its own native link, while both can name the same actual group session.
+    // Each human has its own native link, while all can name the same actual group session.
     const std::uint64_t use = g_admitClock.fetch_add(1) + 1;
     bool sharedGroup = false;
     for (const auto& slots : g_sharedGroupSlots) {
@@ -287,7 +288,7 @@ void dirty_shared_membership(std::uint64_t sessionId) noexcept {
 
 /** Builds a shared update only from explicitly authorized humans and captured native data. */
 [[nodiscard]] bool publish_shared_snapshot(const Admitted& record) noexcept {
-    std::array<SharedHuman, 2> humans{};
+    std::array<SharedHuman, kSharedHumanCapacity> humans{};
     std::size_t count = 0;
     const Admitted* joining = nullptr;
     for (const auto& held : g_admitted) {
@@ -1394,7 +1395,7 @@ bool authorize_shared_peer(std::uint64_t sessionId,
     // A previously published solo member is already member 1/player 0. Converting
     // it to a different slot would silently reassign native ownership.
     const bool stableUpgrade = existing == nullptr || !existing->initialMembershipPublished || slot == 0;
-    Admitted* record = humans < 2 && assigned && stableUpgrade ? claim(endpoint, sessionId, true) : nullptr;
+    Admitted* record = humans < kSharedHumanCapacity && assigned && stableUpgrade ? claim(endpoint, sessionId, true) : nullptr;
     if (record != nullptr) {
         slots->sessionId = sessionId;
         slots->assignments = assignments;

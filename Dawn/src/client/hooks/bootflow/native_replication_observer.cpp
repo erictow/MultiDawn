@@ -53,6 +53,14 @@ template<class... Args> void report(const char* format,Args... args) noexcept {
     if(size>0 && static_cast<std::size_t>(size)<line.size())
         core::log::write(core::log::Channel::client,core::log::Level::info,{line.data(),static_cast<std::size_t>(size)});
 }
+bool binding_trace_requested() noexcept {
+    static const bool requested=[]() noexcept {
+        std::array<wchar_t,2> value{};
+        return GetEnvironmentVariableW(L"DAWN_ACTIVITY_BINDING_TRACE",value.data(),
+            static_cast<DWORD>(value.size()))==1 && value[0]==L'1';
+    }();
+    return requested;
+}
 // 1703910 validates the transport, then 16FF3C0 -> 16E8200 installs the peer.
 // Its fourth parameter is the public 86-byte NetAddr. Never log its fifth
 // parameter: that opaque 16-byte identity has not been classified as public.
@@ -70,11 +78,16 @@ __declspec(noinline) bool __fastcall connect_hook(std::uintptr_t owner,int membe
     const auto epoch=g_context.epoch;
     const bool result=original(owner,member,role,address,identity,activate);
     g_context=previous;
-    if(qualified && scope.accepts_side_effects() && changed_connection(group,machine,result))
+    if(qualified && scope.accepts_side_effects() && changed_connection(group,machine,result)) {
         report("ev=native_replication stage=connect thread=%lu group=%p member=%d machine=%016llX role=%u activate=%u address=%u.%u.%u.%u:%u public=%u.%u.%u.%u:%u method=%u control_epoch=%016llX accepted=%u",
         GetCurrentThreadId(),reinterpret_cast<void*>(group),member,static_cast<unsigned long long>(machine),
         static_cast<unsigned>(role),static_cast<unsigned>(activate),net[0],net[1],net[2],net[3],net[4]+256U*net[5],
         net[30],net[31],net[32],net[33],net[34]+256U*net[35],net[85],static_cast<unsigned long long>(epoch),result?1U:0U);
+        if(binding_trace_requested())
+            report("ev=native_group_owner pid=%lu owner=%p group=%p member=%d accepted=%u",
+                GetCurrentProcessId(),reinterpret_cast<void*>(owner),reinterpret_cast<void*>(group),
+                member,result?1U:0U);
+    }
     return result;
 }
 __declspec(noinline) void __fastcall add_hook(std::uintptr_t manager,std::uint32_t index,std::uintptr_t view) noexcept {

@@ -201,6 +201,7 @@
     <ClCompile Include="src\core\settings\state\social_parser.cpp" />
     <ClCompile Include="src\core\runtime\core_runtime.cpp" />
     <ClCompile Include="src\core\multiplayer\companion.cpp" />
+    <ClCompile Include="src\core\multiplayer\activity_binding.cpp" />
     <ClCompile Include="src\steam\ui\social_panel.cpp" />
     <ClCompile Include="src\core\runtime\host_environment.cpp" />
     <ClCompile Include="src\core\ui\modules\ui_module_descriptor.cpp" />
@@ -947,6 +948,9 @@
     <ClInclude Include="src\core\settings\steam\definition.h" />
     <ClInclude Include="src\core\runtime\core_runtime.h" />
     <ClInclude Include="src\core\multiplayer\companion.h" />
+    <ClInclude Include="src\core\multiplayer\activity_binding.h" />
+    <ClInclude Include="src\core\multiplayer\identity_activity_correlation.h" />
+    <ClInclude Include="src\core\multiplayer\fireteam_limits.h" />
     <ClInclude Include="src\core\multiplayer\companion_protocol.h" />
     <ClInclude Include="src\core\multiplayer\companion_invitation_state.h" />
     <ClInclude Include="src\core\multiplayer\native_identity_observation_state.h" />

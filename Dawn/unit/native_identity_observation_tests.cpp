@@ -64,7 +64,8 @@ struct Fixture final {
     [[nodiscard]] bool allowed(std::size_t offset, std::size_t size) const noexcept {
         if (size != 4 && size != 8) return false;
         if (size == 4 && (offset == observation::kRoleOffset || offset == observation::kModeOffset
-            || offset == observation::kReplicaOffset + 4 || offset == observation::kReplicaOffset + 28
+            || offset == observation::kReplicaOffset + 4 || offset == observation::kReplicaOffset + 12
+            || offset == observation::kReplicaOffset + 28
             || offset == observation::kReplicaOffset + 15184 || offset == observation::kReplicaOffset + 15188)) return true;
         if (size == 8 && (offset == observation::kReplicaOffset + 40 || offset == observation::kReplicaOffset + 48)) return true;
         for (std::size_t index = 0; index < 32; ++index) {
@@ -106,6 +107,7 @@ void parser_tests() {
     CHECK(observation::capture(&Fixture::read, &fixture, sample));
     CHECK(!fixture.forbiddenRead && fixture.roleReads == 2);
     CHECK(sample.role == 1 && sample.mode == 6 && sample.revision == 19);
+    CHECK(sample.hostMemberIndex == 0);
     CHECK(sample.memberMask == 7 && sample.playerMask == 3);
     CHECK(sample.members[0].machineId == 0x1000 && !sample.members[0].ownsPlayer);
     CHECK(sample.members[1].machineId == 0x1001 && sample.members[1].playerId == 0x7000 && sample.members[1].playerSlot == 0);
@@ -121,6 +123,9 @@ void parser_tests() {
     malformed(observation::kRoleOffset, UINT32_MAX, 4);
     malformed(observation::kModeOffset, UINT32_MAX, 4);
     malformed(replica + 28, 33, 4);
+    malformed(replica + 12, 31, 4);
+    malformed(replica + 12, 32, 4);
+    malformed(replica + 12, UINT32_MAX, 4);
     malformed(replica + 28, 0, 4);
     malformed(replica + 28, 2, 4);
     malformed(replica + 40, std::uint64_t{1} << 32U, 8);
@@ -150,6 +155,7 @@ void parser_tests() {
 
     Fixture sparse;
     sparse.put(replica + 28, 1, 4);
+    sparse.put(replica + 12, 31, 4);
     sparse.put(replica + 40, std::uint64_t{1} << 31U, 8);
     sparse.put(replica + 48, 1, 8);
     sparse.put(replica + 15184, 1, 4);
@@ -176,6 +182,9 @@ void mailbox_tests() {
     observation::Mailbox box;
     observation::Observation first{}, current{};
     CHECK(!box.snapshot(1, 100, current) && current.manager == 0);
+    std::array<observation::Observation, observation::kManagerCapacity> collected{};
+    std::size_t collectedCount = 99;
+    CHECK(box.collect(collected, 100, collectedCount) && collectedCount == 0);
     CHECK(!box.publish(0, &sample, 100));
     CHECK(box.publish(0x10000, &sample, 100));
     CHECK(box.snapshot(1, 100, first) && first.manager == 0x10000 && first.incarnation != 0 && first.generation != 0);
@@ -203,6 +212,14 @@ void mailbox_tests() {
     CHECK(box.snapshot(2, 1126, current) && current.incarnation > first.incarnation);
     CHECK(box.publish(0x20000, &sample, 1126));
     CHECK(!box.snapshot(2, 1126, current) && current.manager == 0);
+    CHECK(box.collect(collected, 1126, collectedCount) && collectedCount == 2);
+    CHECK(collected[0].sample.role == 2 && collected[1].sample.role == 2
+        && collected[0].manager != collected[1].manager);
+    std::array<observation::Observation, 1> shortOutput{};
+    shortOutput[0].manager = 999;
+    CHECK(!box.collect(shortOutput, 1126, collectedCount) && collectedCount == 0 && shortOutput[0].manager == 0);
+    CHECK(!box.collect(collected, 1125, collectedCount) && collectedCount == 0 && collected[0].manager == 0);
+    CHECK(box.collect(collected, 2127, collectedCount) && collectedCount == 0);
     CHECK(!box.publish(0x20000, nullptr, 1127));
     CHECK(box.snapshot(2, 1127, current) && current.manager == 0x10000);
     CHECK(!box.snapshot(-1, 1127, current));
@@ -220,10 +237,13 @@ void mailbox_tests() {
 
     observation::Collector collector;
     CHECK(collector.capture_token() == 0 && !collector.snapshot(2, 100, current));
+    collected[0].manager = 999;
+    CHECK(!collector.collect(collected, 100, collectedCount) && collectedCount == 0 && collected[0].manager == 0);
     collector.start();
     const auto oldToken = collector.capture_token();
     CHECK(oldToken != 0 && collector.publish(oldToken, 0x10000, &sample, 100));
     CHECK(collector.snapshot(2, 100, first));
+    CHECK(collector.collect(collected, 100, collectedCount) && collectedCount == 1 && collected[0].manager == 0x10000);
     collector.stop();
     CHECK(collector.capture_token() == 0 && !collector.snapshot(2, 100, current));
     CHECK(!collector.publish(oldToken, 0x10000, &sample, 100));
@@ -254,6 +274,8 @@ void fingerprint_tests() {
     sample.members[0].playerId = 0x8877665544332211ULL;
     // Independently packed 57-byte Python struct fixture, FNV-1a64 canonical LE contract.
     constexpr auto expected = 0xC24B5351E11130ABULL;
+    CHECK(observation::fingerprint(sample) == expected);
+    ++sample.hostMemberIndex; // Native host index is deliberately outside the diagnostic hash contract.
     CHECK(observation::fingerprint(sample) == expected);
     ++sample.revision;
     CHECK(observation::fingerprint(sample) == expected);
@@ -336,6 +358,11 @@ int main(int argc, char** argv) {
     observation::Observation empty{};
     CHECK(!adapter::snapshot(1, GetTickCount64(), empty) && empty.manager == 0);
     adapter::reset();
+    std::array<observation::Observation, observation::kManagerCapacity> disabledOutput{};
+    disabledOutput[0].manager = 999;
+    std::size_t disabledCount = 99;
+    CHECK(!adapter::collect(disabledOutput, GetTickCount64(), disabledCount)
+        && disabledCount == 0 && disabledOutput[0].manager == 0);
     std::printf("PASS: %u native identity observation checks; no gameplay admission\n", checks);
     return 0;
 }

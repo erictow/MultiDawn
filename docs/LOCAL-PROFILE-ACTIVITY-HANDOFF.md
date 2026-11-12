@@ -1,7 +1,7 @@
 # Local profiles and shared activity handoff
 
-This is a design for the next implementation stage. The typed activity proxy,
-gameplay grant, and endpoint handoff described here are not implemented. Each PC
+The public activity observation is implemented. The typed activity proxy,
+gameplay grant, and endpoint handoff below remain planned. Each PC
 keeps its own saves and profile service; the host owns the shared activity.
 
 ## Existing observations
@@ -16,7 +16,7 @@ include connection, authentication, binding, activity, and region generations to
 reject reused lifetimes.
 
 The exact-activity overloads of
-[`member_key` and `join_identity`](../Dawn/src/state/activity/membership/activity_membership_query.cpp#L180)
+[`member_key` and `join_identity`](../Dawn/src/state/activity/membership/activity_membership_query.cpp#L187)
 read the local BAP machine and join identities, but each takes its own State lock.
 Combining those calls with a region snapshot does not produce one coherent
 identity/region observation. Also, the existing
@@ -30,24 +30,29 @@ object, raw descriptor, account SOIDs, nonces, tokens, or keys to a companion
 message or diagnostic log. A native NetAddr also contains opaque method-dependent
 data; forwarding its private body is not a substitute for a public routing API.
 
-## Proposed public snapshot
+## Public snapshot implementation
 
-Extend the State [`RegionView`](../Dawn/src/state/activity/membership/activity_membership_query.h#L31)
-with only the required public routing scalars: committed member key, join
-identity, and their presence/provenance flags. Capture them with the existing
-destination and reported-region fields under the same State read lock. Keep
-account identity fields and opaque descriptor bytes outside this output.
+The State [`RegionView`](../Dawn/src/state/activity/membership/activity_membership_query.h#L31)
+captures the committed member key, stored join identity, identity presence, and
+member-key agreement with the existing destination and reported-region fields
+under the same State read lock. It does not claim client or native provenance.
 
-Add a creator-owned BAP snapshot API following the HUD locking pattern. Its
-value-only result should contain:
+[`snapshot_creator_activity` and `snapshot_current_creator_activity`](../Dawn/src/server/bap/runtime.h#L21)
+follow the HUD locking pattern. Both require the exact committed HUD creator
+anchor; neither selects the newest session. Their public value-only result
+contains:
 
 - The exact current `BindingKey` and `ActivityInstanceKey`.
 - The exact `RegionLineage` and `HostRegionKey`, plus reported region.
-- The public destination selection and coherent BAP machine/join routing scalars.
+- The public destination package, activity index, reason, and coherent BAP
+  machine/join routing scalars. Opaque descriptor bytes and account fields are
+  excluded.
 
-Require an authenticated, current, non-retiring binding that owns its creator
-record, a joined exact State record, and matching machine identity. Failure must
-clear the output. A creator snapshot is an observation, not a retained lease.
+The API requires an authenticated, current, non-retiring binding that owns its
+creator record, a joined exact State record, and matching nonzero machine
+identity. Failure clears the output. Missing membership identity is reported
+accurately, and a stored zero join identity is not replaced with a guessed value.
+A creator snapshot is an observation, not a retained lease.
 Any later derived activity must additionally prove and pin its exact
 [`HostActivityLineageLease`](../Dawn/src/server/gameplay/group/group_host_sessions.h#L16),
 then revalidate it before using that group edge.
@@ -64,6 +69,12 @@ Two other observations remain separate:
   authentication lifetime. They expose no resolver material and grant no group
   admission. The observed gameplay source port is distinct from the launcher's
   TCP pairing port.
+
+`creator_activity_snapshot_tests.vcxproj` links the production BAP coordinator,
+State query, exact lookup, and retirement code. Its 67 checks cover stale
+lifetimes, creator selection, identity consistency, private-byte exclusion,
+teardown, and concurrent State reads. Unused frame, resolver, and derived-group
+services are stubbed; the test opens no game, account service, or save.
 
 ## Future handoff
 

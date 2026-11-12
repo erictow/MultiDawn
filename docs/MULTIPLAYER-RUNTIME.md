@@ -3,6 +3,8 @@
 MultiDawn's launcher provides solo launch and a two-person pairing connection.
 Pairing does not yet put two Guardians into the same Destiny activity. Multiplayer
 game launch is blocked until the game runtime supports that behavior.
+The [milestones](MULTIPLAYER-MILESTONES.md) are two visible players first, then
+three-player fireteams, then six-player raid support and project completion.
 
 ## Native implementation added
 
@@ -10,8 +12,9 @@ The source now includes these native components:
 
 - Endpoint-scoped reliable queues, addresses, views, readiness and disconnects.
   Two human peers that name the same group no longer resolve to the first link.
-- A two-human membership builder using the existing native encoder and state
-  hash. `authorize_shared_peer` requires actual group, endpoint, machine and
+- A membership builder with storage for six humans, using the existing native
+  encoder and state hash. Three maximum-width human rows fit the tested current
+  queue; six exceed its present limits. `authorize_shared_peer` requires actual group, endpoint, machine and
   player identities. A launcher pair code does not authorize a game descriptor.
 - SteamFriends017 enumeration, persona, presence, and invitation methods.
   Protocol 2 invitations stay pending after explicit acceptance while the host
@@ -205,7 +208,7 @@ launcher pairing protocol.
    silently fall back to a separate local world. Do not call the existing broad
    `server::shutdown` during live gameplay: client hooks and native activity work
    can still depend on its state.
-4. **Activate a shared native session.** Connect the guarded two-human membership
+4. **Activate a shared native session.** Connect the guarded membership
    builder to authenticated native descriptors and a working peer channel.
    Preserve stable and distinct player/machine IDs, assign entity ownership, and
    publish per-recipient session data. Complete the required property codecs and
@@ -240,6 +243,9 @@ verified. No automated live server shutdown or account migration is implemented.
 The [local-profile handoff design](LOCAL-PROFILE-ACTIVITY-HANDOFF.md) records the
 remaining exact BAP activity boundary. Existing seeded join IDs and local BAP
 handshake state are not proof of a remote native player identity.
+The [activity-binding probe](ACTIVITY-BINDING.md) now observes these boundaries
+without granting admission. The native managed session and the BAP world/facet
+group remain distinct structures whose relationship still needs recovery.
 
 ## Component verification
 
@@ -265,8 +271,9 @@ The native test projects are:
   against an isolated Windows pipe server, including fragmented input.
 - `Dawn/unit/steam_social_tests.vcxproj`: social ABI values, callback payloads,
   invitation acceptance, stale IDs, transport failures and queue backpressure.
-- `Dawn/unit/shared_membership_tests.vcxproj`: two distinct human rows, native
-  membership encoding/hash state and endpoint-scoped link lookup.
+- `Dawn/unit/shared_membership_tests.vcxproj`: 298 checks including three-human
+  production enqueue/packet/reassembly/hash round trips, six-human storage and
+  fail-closed transport limits, stable identity slots and endpoint-scoped links.
 - `Dawn/unit/address_resolution_tests.vcxproj`: 1,288 body-codec and service-301
   framing checks, including preservation of other services' status-200 headers.
 - `Dawn/unit/des_cbc_tests.vcxproj`: 53 compatibility-primitive checks.
@@ -282,10 +289,18 @@ The native test projects are:
 - `Dawn/unit/peer_view_echo_tests.vcxproj`: 2,006 checks with compiler warnings
   treated as errors, covering
   exact link ownership, malformed views, queue rollback and unchanged group slots.
-- `Dawn/unit/native_identity_observation_tests.vcxproj`: 301 checks plus three
+- `Dawn/unit/native_identity_observation_tests.vcxproj`: 321 checks plus three
   unsupported-layout checks, with the real adapter and production membership
   encoder. Covers scalar-read restrictions, native ownership, unstable samples,
   ambiguous roles, expiry, capacity reclamation and lifecycle fencing.
+- `Dawn/unit/identity_activity_correlation_tests.vcxproj`: 95 managed-session
+  correspondence checks, without assigning semantic meaning to a raw role.
+- `Dawn/unit/creator_activity_snapshot_tests.vcxproj`: 67 checks with the real
+  BAP coordinator, State query and exact retirement paths.
+- `Dawn/unit/activity_binding_tests.vcxproj`: 85 cross-boundary checks with
+  substituted providers, including stale/changed lifetimes and pin release.
+- `Dawn/unit/advertisement_observation_tests.vcxproj`: 133 checks of production
+  advertisement observation, unchanged publication and exact lineage failures.
 
 `companion_bridge_harness.vcxproj` builds a small native test worker that links
 the production companion client with test social/log sinks. The launcher's
@@ -297,7 +312,7 @@ It does not verify the game's friend roster or a shared activity.
 
 Native build instructions are in
 [`tools/build/PORTABLE-WINDOWS.md`](../tools/build/PORTABLE-WINDOWS.md).
-The native GitHub workflow builds and runs the twelve component test projects;
+The native GitHub workflow builds and runs the sixteen component test projects;
 preparing the workflow does not mean a remote run has passed.
 
 For production commit `21c2a980`, the remote
