@@ -98,8 +98,9 @@ does not reinterpret the view token. Existing admitted-group and legacy paths
 are unchanged. Unit checks pass. In the isolated Tower test, the native client
 acknowledged all eleven queued view replies and Dawn retired their reliable
 fragments with the queue empty. The former `unresolved_group` errors were absent.
-This proves transport delivery; native view compatibility flags and two-player
-gameplay remain unverified.
+The later [world connection capture](NATIVE-WORLD-CONNECTION.md) confirmed the
+accepted control peer's native compatibility flag and recovered predicate were
+both true. Two-player gameplay remains unverified.
 
 The read-only snapshot tool also has an opt-in `--native-players` capture. It
 reports native player IDs only after count/mask and member-slot ownership checks,
@@ -301,6 +302,8 @@ The native test projects are:
   substituted providers, including stale/changed lifetimes and pin release.
 - `Dawn/unit/advertisement_observation_tests.vcxproj`: 133 checks of production
   advertisement observation, unchanged publication and exact lineage failures.
+- `Dawn/unit/packets_discarded_tests.vcxproj`: 973 checks of native ID4's five-bit
+  increment, declared size, logical/rounded forms, padding and failed-output preservation.
 
 `companion_bridge_harness.vcxproj` builds a small native test worker that links
 the production companion client with test social/log sinks. The launcher's
@@ -312,7 +315,7 @@ It does not verify the game's friend roster or a shared activity.
 
 Native build instructions are in
 [`tools/build/PORTABLE-WINDOWS.md`](../tools/build/PORTABLE-WINDOWS.md).
-The native GitHub workflow builds and runs the sixteen component test projects;
+The native GitHub workflow builds and runs the seventeen component test projects;
 preparing the workflow does not mean a remote run has passed.
 
 For production commit `21c2a980`, the remote

@@ -3,8 +3,9 @@
 `core/multiplayer/identity_activity_correlation.h` correlates copied routing
 observations. It grants no access and does not select a native role by its number.
 This is the managed SessionState path. A BAP world/facet group uses a different
-native structure; its relationship to that session table remains under
-investigation. `noMatch` must not be interpreted as proof that world replication
+native structure. The [live Tower comparison](NATIVE-WORLD-CONNECTION.md) matched
+its human to the managed player owner even though the control host was absent
+from the managed table. `noMatch` must not be interpreted as proof that world replication
 is disconnected or that a native group-join request is missing.
 
 Two source relationships support the comparison:

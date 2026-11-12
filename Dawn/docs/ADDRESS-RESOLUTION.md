@@ -118,8 +118,12 @@ legacy and admitted-group view handling is retained. In the subsequent isolated
 Tower run, the native client acknowledged all eleven queued view replies and
 the corresponding reliable fragments retired with the queue empty. No
 `unresolved_group` or rejected-view event remained in that run. This verifies
-transport delivery of the replies. Application-level native view compatibility
-flags and shared two-player gameplay remain unverified.
+transport delivery of the replies. In the later isolated Tower run at
+`c478247c`, read-only inspection confirmed the accepted world control peer's
+native compatibility flag and independently evaluated native predicate were both
+true. Local and remote view kind five matched. This validates that sampled world
+link's application-level view compatibility. Shared two-player gameplay remains
+unverified. See [the world connection evidence](../../docs/NATIVE-WORLD-CONNECTION.md).
 
 ## Embedded backend policy
 

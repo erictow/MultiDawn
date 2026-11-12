@@ -951,6 +951,7 @@
     <ClInclude Include="src\core\multiplayer\activity_binding.h" />
     <ClInclude Include="src\core\multiplayer\identity_activity_correlation.h" />
     <ClInclude Include="src\core\multiplayer\fireteam_limits.h" />
+    <ClInclude Include="src\middleware\gameplay\peer\packets_discarded.h" />
     <ClInclude Include="src\core\multiplayer\companion_protocol.h" />
     <ClInclude Include="src\core\multiplayer\companion_invitation_state.h" />
     <ClInclude Include="src\core\multiplayer\native_identity_observation_state.h" />

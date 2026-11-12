@@ -17,6 +17,7 @@
 #include "../../../middleware/gameplay/peer/established_packet.h"
 #include "../../../middleware/gameplay/peer/join_messages.h"
 #include "../../../middleware/gameplay/peer/peer_container.h"
+#include "../../../middleware/gameplay/peer/packets_discarded.h"
 #include "../../../middleware/gameplay/peer/reliable_assembly.h"
 #include "../association/association_host.h"
 #include "../dtls/dtls_host.h"
@@ -54,8 +55,6 @@ constexpr std::size_t kReplyCapacity = 1024;
 constexpr unsigned kMarkerShift = 7;
 /** Bits in one byte. */
 constexpr unsigned kByteBits = 8;
-/** Mask of one byte. */
-constexpr std::uint32_t kByteMask = 0xFF;
 /** The connection guard is the sequence modulo four. */
 constexpr std::uint32_t kSequenceGuardBase = 4;
 /** Delay sentinel used until a round trip has been measured. */
@@ -85,13 +84,41 @@ constexpr std::uint8_t kPlayerPropertiesId = 37;
 constexpr std::size_t kSessionPublicationDumpCapacity = 128;
 std::atomic<std::uint64_t> g_publicationCaptureId{0};
 
-SRWLOCK g_lock{SRWLOCK_INIT};
+SRWLOCK g_lock = SRWLOCK_INIT;
 std::array<state::gameplay::PeerLink, state::gameplay::kAssociationCapacity> g_peers;
 /** Channel ids this host hands out. The peer refuses one that does not increase. */
 std::uint32_t g_channelId{0};
 /** Reporting state is independent of transport state and uses its own short-held lock. */
-SRWLOCK g_trafficReportLock{SRWLOCK_INIT};
+SRWLOCK g_trafficReportLock = SRWLOCK_INIT;
 TrafficLogRepetition g_trafficReports{};
+/** Diagnostic state is separate from all native counters and reliable queues. */
+struct DiscardReportState { std::uint32_t count{}; bool seen{}; };
+core::log::ObservationTable<TrafficLogKey, DiscardReportState, 32> g_discardReports{};
+unsigned g_discardEvents{};
+
+/** Observe ID4 only; do not consume it or synthesize any protocol reply. */
+void report_packets_discarded(const TrafficLogKey& key, const wire::AssembledMessage& message) noexcept {
+    static const bool enabled = []() noexcept {
+        std::array<wchar_t, 2> value{};
+        return GetEnvironmentVariableW(L"DAWN_ACTIVITY_BINDING_TRACE", value.data(),
+            static_cast<DWORD>(value.size())) == 1 && value[0] == L'1';
+    }();
+    if (!enabled || message.id != wire::packets_discarded::kMessageId) return;
+    std::uint32_t increment{};
+    if (!wire::packets_discarded::decode(message, increment)) return;
+    bool emit{};
+    AcquireSRWLockExclusive(&g_trafficReportLock);
+    if (g_discardEvents < 128) {
+        auto* state = g_discardReports.find_or_insert(key);
+        if (state != nullptr && (!state->seen || state->count != increment)) {
+            state->seen = true; state->count = increment; ++g_discardEvents; emit = true;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_trafficReportLock);
+    if (emit) report(core::log::Level::info,
+        "ev=gameplay stage=packets_discarded pid=%lu count=%u semantics=increment",
+        GetCurrentProcessId(), static_cast<unsigned>(increment));
+}
 
 [[nodiscard]] core::log::RepetitionReport observe_traffic(const TrafficLogKey& key,
                                                          std::uint16_t sequence,
@@ -734,6 +761,7 @@ void consume_established(const state::gameplay::Endpoint& from,
         if (body.id == static_cast<std::uint8_t>(wire::ConnectId::establish)) {
             continue;
         }
+        report_packets_discarded(logKey, body);
         report_session_publication_message(from, body);
         // Group handling runs outside the lock because answering takes it again.
         bits::Reader reader({body.bytes.data(), state::gameplay::kReassemblyCapacity});
@@ -1107,6 +1135,8 @@ void reset() noexcept {
     ReleaseSRWLockExclusive(&g_lock);
     AcquireSRWLockExclusive(&g_trafficReportLock);
     g_trafficReports.clear();
+    // No links survive reset. Keep the per-DLL event budget monotonic.
+    g_discardReports.clear();
     ReleaseSRWLockExclusive(&g_trafficReportLock);
 }
 

@@ -19,7 +19,9 @@ lineage are rechecked before a copied observation is returned. Pins are released
 before return, so every later use still needs revalidation.
 
 The BAP world/facet replication group and the native managed SessionState are
-distinct structures. Their exact relationship is not yet established. In
+distinct structures. The [live Tower comparison](NATIVE-WORLD-CONNECTION.md)
+matched the world's machine pair to the BAP source and its human to both managed
+player owners, while neither managed table contained the control host. In
 particular, `no_managed_group` does not prove the world connection failed or that
 the game should have sent OOB JoinId10. It must not be used as a gameplay grant
 condition without recovering the applicable native path.
@@ -46,5 +48,6 @@ The component suites cover:
 - 85 binding-boundary checks with substituted providers, including stale epochs,
   ambiguous membership, changed routes and released pins on failure.
 
-The whole binding probe still needs live validation. None of these component
-checks completes [multiplayer milestone 1](MULTIPLAYER-MILESTONES.md).
+The live probe correctly reported `no_managed_group` for that distinct world
+path; this does not reject or authorize the actual world connection. None of
+these checks completes [multiplayer milestone 1](MULTIPLAYER-MILESTONES.md).
