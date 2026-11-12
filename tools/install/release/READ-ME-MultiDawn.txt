@@ -12,6 +12,8 @@ HOST AND JOIN
 
 Turn Multiplayer on to test the connection between two launchers. Both PCs
 must use the same launcher version and a reachable LAN or VPN connection.
+Launcher 0.5 requires its protected connection protocol on both PCs. The pair
+code still starts with MD2-. Earlier launchers cannot pair with this version.
 The host selects its LAN/VPN address and Host, then shares the displayed pair
 code privately with the guest. The guest enters that code and selects Join.
 Disconnect ends the connection. Allow the launcher through your firewall if
@@ -31,6 +33,8 @@ are stored locally with names and addresses, without pair-code secrets.
 The pair code contains the host's address and a temporary connection secret.
 Treat it as private. A code does not create an internet relay or open a router.
 Use a trusted LAN or encrypted VPN when testing across machines.
+Post-handshake launcher controls are encrypted, authenticated and checked for
+replay. This connection does not yet carry Destiny gameplay packets.
 
 CURRENT LIMIT
 

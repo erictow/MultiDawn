@@ -4,9 +4,10 @@
 Framework. It launches an already installed Dawn copy; it does not download game
 files, install the DLL, or change saves and settings.
 
-Launcher 0.2 and later use the `MD2` pairing protocol and pair codes. Both people need
-the same compatible build. Earlier `MD1` codes and handshakes are rejected
-before pairing because their launchers do not support native social controls.
+Launcher 0.5 uses the `MD3` connection protocol with encrypted, authenticated
+control frames. Pair codes retain their `MD2-` format. Both people need launcher
+0.5 or later; older connection handshakes are rejected before pairing. The
+native companion pipe still uses its separate invitation protocol versions.
 
 ## Build
 
@@ -97,12 +98,15 @@ VPN addresses such as `25.x.x.x` and `100.64.x.x` are accepted when the network
 provides connectivity. Saving an address does not make an otherwise unreachable
 PC reachable.
 
-Pairing uses plain TCP with a versioned handshake, mutual HMAC authentication,
-fresh nonces, timeouts, one authenticated partner, and heartbeat checks. The
-bearer token is never sent over the connection. Session traffic is unencrypted,
-so use a trusted LAN or encrypted VPN. Keep the code private; it grants access
-to the lobby. Codes are not saved or written to logs. The checksum detects
-typing mistakes; it is not encryption.
+Pairing uses TCP with a versioned handshake, mutual HMAC authentication, fresh
+nonces, timeouts, one authenticated partner, and heartbeat checks. The bearer
+token is never sent over the connection. Every post-handshake frame is encrypted
+and authenticated, including social controls, endpoint announcements and
+heartbeats. Separate directional keys and sequence numbers reject modification,
+replay and frames from another connection. There is no plaintext fallback.
+Keep the code private; it grants access to the lobby. Codes are not saved or
+written to logs. The code checksum detects typing mistakes; it is not encryption.
+See [the control transport](../../docs/PROTECTED-PAIRING-CONTROL.md) for its scope.
 
 ## Verification
 
@@ -144,7 +148,7 @@ Get-Content C:\Temp\native-pipe-test.txt
 The workers have a 25-second execution deadline and use the actual pipe client,
 separate identities, and invitations. They do not load Destiny or a game DLL.
 
-Launcher 0.4 requests native companion protocol 2. Invitation tickets expire
+Launcher 0.4 and later request native companion protocol 2. Invitation tickets expire
 after 60 seconds and bind both native runtime instances and the current pairing.
 Acceptance reports an intent to the host and waits for authorization. It does
 not queue a game join callback or grant access to a shared world. Protocol 2

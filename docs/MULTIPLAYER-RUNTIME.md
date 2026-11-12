@@ -30,6 +30,15 @@ The source now includes these native components:
   configured embedded endpoint and owns bounded contexts for each BAP
   authentication lifetime. An isolated native game completed the channel
   handshake and acknowledged view replies. Two-player gameplay remains unverified.
+- Exact authenticated route identity survives native UDP dispatch. Internal
+  consumers can reply through that specific context when several native peers
+  share a socket. No human relay or gameplay grant is installed by these APIs.
+  See [explicit native routes](EXPLICIT-NATIVE-ROUTES.md).
+- Launcher 0.5 protects every post-handshake control frame with encryption,
+  authentication and strict directional sequences. The final welcome is also
+  authenticated before pairing is published. Both PCs need the new connection
+  protocol; pair codes retain their `MD2-` format. See
+  [protected launcher control](PROTECTED-PAIRING-CONTROL.md).
 
 These changes have not been installed over the existing game. The approved
 Windows SDK is installed locally. The full DLL and native component tests now
@@ -157,8 +166,8 @@ The standalone Windows launcher is built with
 
 Solo Play starts the selected installation with `DAWN_SESSION_MODE=solo` in that
 child process. The launcher does not replace the installed account or settings.
-The multiplayer controls establish a separate authenticated TCP connection for
-one host and one guest, with connection health and disconnect handling.
+The multiplayer controls establish a separate encrypted, authenticated TCP
+connection for one host and one guest, with connection health and disconnect handling.
 This connection is a control channel, not Destiny's BAP or gameplay channel.
 
 The pairing address must be reachable over a LAN or a configured VPN. A pair code
@@ -320,7 +329,7 @@ It does not verify the game's friend roster or a shared activity.
 
 Native build instructions are in
 [`tools/build/PORTABLE-WINDOWS.md`](../tools/build/PORTABLE-WINDOWS.md).
-The native GitHub workflow builds and runs the seventeen component test projects;
+The native GitHub workflow builds and runs the eighteen component test projects;
 preparing the workflow does not mean a remote run has passed.
 
 For production commit `21c2a980`, the remote

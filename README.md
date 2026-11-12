@@ -47,7 +47,7 @@ To build, test, and package a portable launcher ZIP for GitHub:
 ```powershell
 .\tools\launcher\Build-Launcher.ps1 -RunTests
 .\tools\install\tests\launcher_release.tests.ps1
-.\tools\install\New-MultiDawnLauncherRelease.ps1 -Release '0.4.0-preview.1'
+.\tools\install\New-MultiDawnLauncherRelease.ps1 -Release '0.5.0-preview.1'
 ```
 
 The ZIP is written under `build/releases/`. The **Build and test MultiDawn

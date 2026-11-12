@@ -4,7 +4,7 @@
 Packages the prebuilt MultiDawn launcher without game files or local settings.
 .EXAMPLE
 .\tools\launcher\Build-Launcher.ps1
-.\tools\install\New-MultiDawnLauncherRelease.ps1 -Release '0.4.0-preview.1'
+.\tools\install\New-MultiDawnLauncherRelease.ps1 -Release '0.5.0-preview.1'
 #>
 [CmdletBinding()]
 param(
@@ -25,8 +25,8 @@ if ($launcher.PSIsContainer -or ($launcher.Attributes -band [IO.FileAttributes]:
 if ($launcher.VersionInfo.ProductName -cne 'MultiDawn Launcher' -or $launcher.VersionInfo.IsDebug) {
     throw 'Use a Release MultiDawn Launcher EXE from tools/launcher/Build-Launcher.ps1.'
 }
-if ([version]$launcher.VersionInfo.FileVersion -lt [version]'0.4.0.0') {
-    throw 'Build MultiDawn Launcher 0.4 or later for this invitation-control package.'
+if ([version]$launcher.VersionInfo.FileVersion -lt [version]'0.5.0.0') {
+    throw 'Build MultiDawn Launcher 0.5 or later for this protected-control package.'
 }
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repo "build/releases/MultiDawn-Launcher-$Release" }
 $output = [IO.Path]::GetFullPath($OutputDirectory).TrimEnd('\', '/')
@@ -72,6 +72,7 @@ $manifest = [ordered]@{
     capabilities = [ordered]@{
         soloLaunch = $true
         launcherPairing = $true
+        protectedPairingControl = $true
         savedLauncherFriends = $true
         manualPairingAddress = $true
         gameplayMultiplayer = $false
