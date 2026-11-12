@@ -14,8 +14,9 @@ The source now includes these native components:
   hash. `authorize_shared_peer` requires actual group, endpoint, machine and
   player identities. A launcher pair code does not authorize a game descriptor.
 - SteamFriends017 enumeration, persona, presence, and invitation methods.
-  Incoming invitations stay pending until explicit acceptance queues the
-  native 264-byte `GameRichPresenceJoinRequested_t` callback.
+  Protocol 2 invitations stay pending after explicit acceptance while the host
+  receives an expiring intent. They do not queue the native game-join callback.
+  Legacy protocol 1 retains its callback behavior between legacy runtimes.
 - A Dawn Friends page and an invitation notice in the game overlay.
 - A local named-pipe companion client, bound to the launcher's process ID and
   a per-launch nonce. The launcher restricts the pipe to the current Windows
@@ -24,8 +25,8 @@ The source now includes these native components:
 - An experimental BAP300/301 resolver and authenticated gameplay UDP envelope,
   enabled only with `DAWN_NATIVE_ADDRESS_RESOLUTION=1`. The resolver targets the
   configured embedded endpoint and owns bounded contexts for each BAP
-  authentication lifetime. This path has component tests, not verified native
-  channel establishment or two-player gameplay.
+  authentication lifetime. An isolated native game completed the channel
+  handshake and acknowledged view replies. Two-player gameplay remains unverified.
 
 These changes have not been installed over the existing game. The approved
 Windows SDK is installed locally. The full DLL and native component tests now
@@ -89,13 +90,23 @@ the exact authenticated native channel. It requires connected/application-ready
 state and empty group slots, checks both channel incarnation values, and queues
 the reply and binds its signature atomically. It grants no group membership and
 does not reinterpret the view token. Existing admitted-group and legacy paths
-are unchanged. Unit checks pass; a native-game test of this view fix is pending.
+are unchanged. Unit checks pass. In the isolated Tower test, the native client
+acknowledged all eleven queued view replies and Dawn retired their reliable
+fragments with the queue empty. The former `unresolved_group` errors were absent.
+This proves transport delivery; native view compatibility flags and two-player
+gameplay remain unverified.
 
-The opt-in trace subsequently located the actual fireteam and activity sessions.
+The read-only snapshot tool also has an opt-in `--native-players` capture. It
+reports native player IDs only after count/mask and member-slot ownership checks,
+without reading player configuration. The isolated game's populated player rows
+passed those checks with stable membership/player headers. This manual evidence
+is not yet an in-process identity publisher or a gameplay authorization grant.
+
+The opt-in trace also located the actual fireteam and activity sessions.
 Both sampled sessions were in native mode 6, with one established local member,
 and both current managed descriptions used Steam-format NetAddr method 6.
 The read-only reporter distinguishes that opaque transport address from a direct
-IPv4 endpoint. This baseline still has no second player or native peer connection.
+IPv4 endpoint. These session observations do not establish a second human peer.
 
 ## Experimental native address resolution
 
@@ -118,9 +129,10 @@ duplicates. That window size is server policy, not a recovered native constant.
 Introduction probes remain unwrapped.
 
 Wire layouts, lifecycle policy and component test details are in
-[the address-resolution notes](../Dawn/docs/ADDRESS-RESOLUTION.md). None of these
-component passes verifies a native peer connection, shared activity, or remote
-Guardian replication.
+[the address-resolution notes](../Dawn/docs/ADDRESS-RESOLUTION.md). Component
+passes alone do not verify a shared activity or remote Guardian replication.
+The isolated native connection evidence above covers one client and its embedded
+server.
 
 ## What the launcher connection means
 
@@ -153,7 +165,7 @@ not a claim about an untested two-machine game session.
 | Accounts and secrets | `src/state/runtime/state.h`, `State`, contains one `AccountState`, one `SignOnState`, and one `BapState`. `src/state/runtime/storage/internal.h` exposes one process-wide root State. | Two network connections are not two isolated player accounts. |
 | Account mutation | `src/server/bap/bap_route.cpp`, `publish_account_mutation`, refreshes other active sessions from the shared account. `src/server/web_service/web_service_runtime.cpp` can change the primary account globally. | Forwarding a guest into the host's current backend could operate on the host's save. |
 | Gameplay endpoint | `src/server/gameplay/endpoint/gameplay_endpoint.cpp`, `initialize`, can bind the configured embedded UDP endpoint. Defaults in `src/core/settings/server/gameplay/definition.h` use loopback addresses. | A UDP endpoint exists, but its presence does not establish a shared two-player world. |
-| Address resolution | `src/server/gameplay/resolution/address_resolution_host.cpp` conditionally handles BAP300/301 and the DES-CBC/HMAC envelope for the configured embedded endpoint. | The missing resolver path is implemented behind a development opt-in; live native channel establishment and remote peer resolution remain unverified. |
+| Address resolution | `src/server/gameplay/resolution/address_resolution_host.cpp` conditionally handles BAP300/301 and the DES-CBC/HMAC envelope for the configured embedded endpoint. | The isolated game established a native channel and acknowledged view replies behind a development opt-in. Remote human resolution remains unverified. |
 | Group membership | `src/server/gameplay/group/shared_membership.h` builds a control host and up to two authenticated humans. `group_host.cpp` requires endpoint-scoped authorization and real captured NetAddr values. | The base native roster now has a shared path, but the companion does not yet have the actual game descriptors needed to activate it. |
 | Player properties | `group_host.cpp`, `consume`, reads the peer-properties header and player-add identity prefix; its comments explicitly identify undecoded profile/property bodies. `bind_view` echoes the peer's view signature. | The existing handshake is insufficient evidence of complete remote Guardian replication. |
 | Steam friend interface | `src/steam/interfaces/tables/common_tables.cpp` registers Friends017 enumeration, persona, presence and invitation methods. `src/steam/interfaces/methods/friends.cpp` exposes only a peer published by the authenticated companion. | The native APIs and Dawn Friends overlay are implemented in source. Visibility in the game's own roster and party acceptance still require actual game verification and a joinable native session. |
@@ -167,22 +179,21 @@ Paths beginning with `src/` in this table are relative to `Dawn/`.
 The following is an implementation sequence. These items are not supplied by the
 launcher pairing protocol.
 
-1. **Separate player state from the activity host.** Introduce authenticated player
-   contexts for account identity, selected character, inventory transactions, keys,
-   and persistence. Thread the context through BAP and web-service handlers rather
-   than resolving every request through `state::account_snapshot()`. A guest must
-   never inherit the host's account merely because both use the same process.
-2. **Provide a complete remote backend boundary.** Either expose the required
-   SignOn/config/BAP services through an authenticated transport or implement an
-   explicit proxy for the existing client-consumer boundary. The host must publish
-   reachable endpoints and connection-scoped credentials. The guest runtime must
-   select this boundary before registering its embedded server consumers.
-3. **Make guest startup conditional.** Add a supported guest runtime branch in
-   `core::initialize` before `state::initialize` and `server::initialize`. Only a
-   successfully validated, compatible host session may enter that branch. A lost
-   connection must not silently fall back to a local world or a different account.
-   Do not call the existing broad `server::shutdown` during live gameplay: client
-   hooks and native activity work can still depend on its state.
+1. **Keep player services local.** Each PC retains its own account identity,
+   selected character, inventory, keys, persistence and local profile/BAP service.
+   The host owns the shared activity. Do not forward account operations into the
+   host's single process-wide account or infer native player IDs from Steam IDs.
+2. **Add a typed activity boundary.** Introduce a guest-local proxy for only the
+   authorized activity operations. Bind its messages to the exact BAP connection,
+   authentication generation, activity instance and host lineage. The host must
+   advertise reachable gameplay endpoints. The ordinary account BAP listener
+   remains on loopback; publishing it to the LAN would not provide this boundary.
+3. **Make gameplay handoff conditional.** Disable the guest's embedded gameplay
+   endpoint only after a validated host grant and compatible native session are
+   ready. Keep its local profile services running. A lost connection must not
+   silently fall back to a separate local world. Do not call the existing broad
+   `server::shutdown` during live gameplay: client hooks and native activity work
+   can still depend on its state.
 4. **Activate a shared native session.** Connect the guarded two-human membership
    builder to authenticated native descriptors and a working peer channel.
    Preserve stable and distinct player/machine IDs, assign entity ownership, and
@@ -195,7 +206,9 @@ launcher pairing protocol.
 6. **Complete the in-game social path.** Connect the implemented friend,
    presence and invitation APIs to a verified shared-session join path. Verify
    the paired player in the game's own roster, the receiving notification, and
-   invitation acceptance in game.
+   invitation acceptance in game. The new [ticketed acceptance protocol](INVITATION-CONTROL-V2.md)
+   supplies intent only. A future grant must revalidate the current native epochs,
+   activity binding, native machine/player identities and authenticated UDP source.
 7. **Advertise tested capabilities.** Enable multiplayer Play only when the actual
    loaded runtime implements the above contract. A launcher flag or editable file
    is not sufficient proof that a stock installed DLL can host multiplayer.
@@ -221,8 +234,10 @@ disconnects and UI state using test native clients. Connection generations
 prevent queued profiles, invitations, sends, and errors from affecting a later
 pairing, including reconnection to the same identity. They do not start the game.
 
-Current local verification passed 155 launcher assertions and 227 social/IPC/
-membership checks (40 protocol, 33 IPC, 90 social, and 64 membership/link checks).
+Before protocol 2, local verification passed 155 launcher assertions and 227
+social/IPC/membership checks. Protocol 2 now has 78 protocol, 292 native IPC,
+and 221 Social checks. Its launcher and cross-language checks are described in
+the invitation protocol notes.
 Shared member/player slots now remain assigned to the same native identity
 across disconnect/rejoin. If a missing member would require an unsupported
 sparse native membership, publication stops rather than renumbering a survivor.
@@ -273,7 +288,7 @@ both completed successfully. Later experimental changes need their own checks.
 
 The [runtime snapshot tool](../tools/testing/MULTIPLAYER-RUNTIME-SNAPSHOT.md)
 verifies the actual loaded build and reads bounded native session/facet state.
-Its thirteen offline tests cover layout checks, consistency, key redaction,
+Its seventeen offline tests cover layout checks, consistency, key redaction,
 Steam-address redaction, and PID-scoped trace parsing. An optional bounded native session trace reuses the
 existing session-update hook to locate structures without enabling legacy probes.
 
@@ -289,8 +304,9 @@ Keep each original profile and game installation available for comparison.
   Reject malformed/incorrect codes, incompatible protocol versions, and a third
   participant. Verify timeout, disconnect, and session cleanup on both sides.
 - Confirm that both game processes negotiate the intended host and distinct player
-  identities. Confirm that the guest does not bind or use an embedded gameplay/BAP
-  backend. Check the actual loaded DLL and endpoint logs, not just launcher status.
+  identities. Confirm that the guest uses the host's gameplay endpoint while its
+  own profile/BAP service and saves remain local. Check the actual loaded DLL and
+  endpoint logs, not just launcher status.
 - Put both Guardians in the same activity. Observe each player's movement and
   appearance from the other machine. Exercise weapons, damage, enemies, revive,
   objective progression, loading, and return to orbit.

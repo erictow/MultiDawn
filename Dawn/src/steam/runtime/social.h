@@ -27,15 +27,19 @@ struct PeerProfile {
     bool sameGameServer{};
 };
 
-/** A pending request is delivered to the game only after this exact invitation is accepted. */
+/** Legacy acceptance joins directly; ticketed acceptance waits for host authorization. */
 struct PendingInvitation {
     std::uint64_t id{};
     std::uint64_t from{};
     std::array<char, kConnectCapacity> connect{};
+    /** Exact upper-hex native-v2 invitation correlation, never a gameplay grant. */
+    std::array<char, 33> ticket{};
+    bool waitingForAuthorization{};
 };
 
 /** Called outside the social lock. True means the authenticated transport accepted the request. */
 using InviteSender = bool (*)(void*, std::uint64_t, std::string_view) noexcept;
+using InviteAcceptedSender = bool (*)(void*, std::uint64_t, std::string_view) noexcept;
 
 /** Configure identity before the game first asks SteamUser for its Steam ID. */
 [[nodiscard]] bool set_local_identity(std::uint64_t id, std::string_view name) noexcept;
@@ -50,8 +54,14 @@ void clear_peer() noexcept;
 
 /** The sender/context must remain valid until all in-flight send calls have returned. */
 void set_invite_sender(InviteSender sender, void* context) noexcept;
+/** Outside-lock acceptance intent; sender lifetime must cover all in-flight calls. */
+void set_invite_accepted_sender(InviteAcceptedSender sender, void* context) noexcept;
 [[nodiscard]] bool send_invitation(std::uint64_t recipient, std::string_view connect) noexcept;
 [[nodiscard]] bool receive_invitation(std::uint64_t from, std::string_view connect) noexcept;
+[[nodiscard]] bool receive_invitation(std::uint64_t from, std::string_view connect,
+                                      std::string_view ticket) noexcept;
+/** Revokes only the exact current canonical native-v2 ticket. */
+[[nodiscard]] bool revoke_invitation(std::string_view ticket) noexcept;
 [[nodiscard]] bool pending_invitation(PendingInvitation& invitation) noexcept;
 [[nodiscard]] bool accept_invitation(std::uint64_t id) noexcept;
 [[nodiscard]] bool dismiss_invitation(std::uint64_t id) noexcept;

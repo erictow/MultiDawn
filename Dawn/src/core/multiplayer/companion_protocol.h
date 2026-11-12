@@ -10,6 +10,16 @@ namespace dawn::core::multiplayer::protocol {
 
 inline constexpr std::size_t kMaximumMessage = 1024;
 inline constexpr std::uint32_t kVersion = 1;
+inline constexpr std::uint32_t kIntentVersion = 2;
+
+/** Runtime epochs and invitation tickets use one canonical, bounded wire form. */
+[[nodiscard]] inline bool ticket(std::string_view value) noexcept {
+    if (value.size() != 32) return false;
+    for (const char byte : value) {
+        if (!((byte >= '0' && byte <= '9') || (byte >= 'A' && byte <= 'F'))) return false;
+    }
+    return true;
+}
 
 /** A bounded local IPC message. No game packet or account data crosses this channel. */
 struct Message {

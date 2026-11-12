@@ -13,8 +13,8 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("MultiDawn Launcher")]
 [assembly: System.Reflection.AssemblyProduct("MultiDawn Launcher")]
-[assembly: System.Reflection.AssemblyVersion("0.3.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.3.0.0")]
+[assembly: System.Reflection.AssemblyVersion("0.4.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.4.0.0")]
 
 namespace MultiDawn.Launcher
 {
@@ -51,6 +51,7 @@ namespace MultiDawn.Launcher
                     report = PairingSelfTests.Report;
                     if (result == 0) report += LauncherSelfTests.Run();
                     if (result == 0) report += RuntimeBridgeSelfTests.Run();
+                    if (result == 0) report += InvitationV2SelfTests.Run();
                     if (result == 0) report += FriendsSelfTests.Run();
                     report += result == 0 ? "PASS: launcher validation, UI state, TCP pairing, and native companion protocol tests.\r\n" : "FAIL: " + PairingSelfTests.LastError + "\r\n";
                 }

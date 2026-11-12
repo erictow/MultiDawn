@@ -43,7 +43,7 @@ To build, test, and package a portable launcher ZIP for GitHub:
 ```powershell
 .\tools\launcher\Build-Launcher.ps1 -RunTests
 .\tools\install\tests\launcher_release.tests.ps1
-.\tools\install\New-MultiDawnLauncherRelease.ps1 -Release '0.3.0-preview.1'
+.\tools\install\New-MultiDawnLauncherRelease.ps1 -Release '0.4.0-preview.1'
 ```
 
 The ZIP is written under `build/releases/`. The **Build and test MultiDawn
@@ -55,6 +55,12 @@ beside a complete Dawn installer, pass `-LauncherPath
 Pairing requires reachable IPv4 addresses on a LAN or VPN. Codes do not provide
 NAT traversal or an internet relay. See the [launcher guide](tools/launcher/README.md)
 and the [runtime implementation requirements](docs/MULTIPLAYER-RUNTIME.md).
+
+Experimental `main` adds versioned invitation acceptance between the launcher
+and native runtime. Accepting an invitation waits for host authorization;
+it does not yet join a shared activity. Each PC will retain its own save and
+local profile service. The host will own the shared activity. The
+[invitation protocol](docs/INVITATION-CONTROL-V2.md) describes this control step.
 
 ## Requirements
 

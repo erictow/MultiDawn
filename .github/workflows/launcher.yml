@@ -35,7 +35,7 @@ jobs:
         run: ./tools/install/tests/launcher_release.tests.ps1
       - name: Package launcher preview
         shell: powershell
-        run: ./tools/install/New-MultiDawnLauncherRelease.ps1 -Release "0.2.0-preview.${{ github.run_number }}"
+        run: ./tools/install/New-MultiDawnLauncherRelease.ps1 -Release "0.4.0-preview.${{ github.run_number }}"
       - name: Upload portable launcher ZIP
         uses: actions/upload-artifact@v4
         with:

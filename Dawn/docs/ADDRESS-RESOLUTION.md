@@ -114,8 +114,12 @@ connected and application-ready, with every group slot empty. Endpoint and both
 channel incarnation values must match. Encoding, queue publication and signature
 binding happen under the peer lock, and a rejected/full queue leaves the old
 state intact. A view token never selects or creates group membership. Existing
-legacy and admitted-group view handling is retained. This change has passed
-isolated tests; its native-game verification is pending.
+legacy and admitted-group view handling is retained. In the subsequent isolated
+Tower run, the native client acknowledged all eleven queued view replies and
+the corresponding reliable fragments retired with the queue empty. No
+`unresolved_group` or rejected-view event remained in that run. This verifies
+transport delivery of the replies. Application-level native view compatibility
+flags and shared two-player gameplay remain unverified.
 
 ## Embedded backend policy
 

@@ -1,4 +1,5 @@
 #include "../src/core/multiplayer/companion_protocol.h"
+#include "../src/core/multiplayer/companion_invitation_state.h"
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -63,5 +64,51 @@ int main() {
     message = {};
     CHECK(wire::append(message, std::string(wire::kMaximumMessage, 'A')));
     CHECK(!wire::append(message, "A") && message.size == wire::kMaximumMessage);
+    constexpr std::string_view ticket = "0123456789ABCDEF0123456789ABCDEF";
+    constexpr std::string_view other = "ABCDEF0123456789ABCDEF0123456789";
+    CHECK(wire::ticket(ticket));
+    CHECK(!wire::ticket("0123456789abcdef0123456789abcdef"));
+    CHECK(!wire::ticket(std::string(31, 'A')));
+    CHECK(!wire::ticket(std::string(33, 'A')));
+    CHECK(!wire::ticket(std::string(32, 'G')));
+    dawn::core::multiplayer::InvitationIntentState intents;
+    dawn::core::multiplayer::AcceptedInvitationIntent intent;
+    constexpr std::uint64_t peer = 0x0110000100000002ULL;
+    bool changed = true;
+    CHECK(!intents.take(0, intent) && intent.peerSteamId == 0);
+    CHECK(!intents.accepted(peer, ticket, 100, 1));
+    CHECK(!intents.runtime(ticket, 0, changed));
+    CHECK(!intents.runtime("-", 2, changed));
+    CHECK(!intents.runtime(ticket, 3, changed));
+    CHECK(intents.runtime("-", 0, changed) && !changed);
+    CHECK(intents.runtime(ticket, 1, changed) && changed && !intents.ready());
+    CHECK(!intents.accepted(peer, ticket, 100, 1));
+    CHECK(intents.runtime(ticket, 2, changed) && changed && intents.ready());
+    CHECK(intents.runtime(ticket, 2, changed) && !changed);
+    CHECK(!intents.accepted(0, ticket, 100, 1));
+    CHECK(!intents.accepted(peer, "bad", 100, 1));
+    CHECK(!intents.accepted(peer, ticket, 0, 1));
+    CHECK(!intents.accepted(peer, ticket, 60'001, 1));
+    CHECK(!intents.accepted(peer, ticket, 100, UINT64_MAX - 99));
+    CHECK(intents.accepted(peer, ticket, 100, 1000));
+    CHECK(intents.accepted(peer, ticket, 60'000, 1050));
+    CHECK(intents.take(1099, intent) && intent.deadline == 1100 && intent.peerSteamId == peer);
+    CHECK(std::string_view(intent.ticket.data()) == ticket);
+    CHECK(!intents.take(1099, intent));
+    CHECK(intents.accepted(peer, ticket, 100, 1099) && !intents.take(1099, intent));
+    CHECK(intents.accepted(peer, other, 100, 1100));
+    intents.revoke(ticket);
+    CHECK(intents.take(1101, intent) && std::string_view(intent.ticket.data()) == other);
+    CHECK(intents.accepted(peer, ticket, 100, 1200));
+    intents.revoke(ticket);
+    CHECK(!intents.take(1201, intent));
+    CHECK(intents.accepted(peer, ticket, 100, 1201) && !intents.take(1202, intent));
+    CHECK(intents.accepted(peer, other, 100, 1300));
+    CHECK(!intents.take(1400, intent));
+    CHECK(intents.accepted(peer, ticket, 100, 1500));
+    CHECK(intents.runtime(other, 2, changed) && changed && !intents.take(1501, intent));
+    CHECK(intents.accepted(peer, ticket, 100, 1600));
+    CHECK(intents.runtime("-", 0, changed) && changed && !intents.ready());
+    CHECK(!intents.take(1601, intent));
     std::printf("PASS: %u companion protocol checks\n", checks);
 }

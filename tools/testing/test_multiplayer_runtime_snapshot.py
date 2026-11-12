@@ -154,6 +154,71 @@ class SnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "lengths"):
             snapshot.session_snapshot(memory.read, session)
 
+    def make_players(self):
+        memory, session = self.make_session()
+        replica = session + 0x868
+        memory.put(replica + 15184, "II", 2, 3)
+        for slot in range(2):
+            row = replica + 15192 + slot * 424
+            memory.put(row + 4, "QIII", 0x110000100001234 + slot, slot, 0, 10 + slot)
+            memory.blob(row + 32, b"PRIVATE-PLAYER-CONFIG")
+        return memory, session
+
+    def test_opt_in_native_players_preserves_public_ownership_only(self):
+        memory, session = self.make_players()
+        self.assertNotIn("players", snapshot.session_snapshot(memory.read, session))
+        result = snapshot.session_snapshot(memory.read, session, True)
+        self.assertEqual(result["player_mask"], "0x00000003")
+        self.assertEqual(result["players"], [
+            {"slot": 0, "player_id": "0x0110000100001234", "member_index": 0, "owned_index": 0, "sequence": 10},
+            {"slot": 1, "player_id": "0x0110000100001235", "member_index": 1, "owned_index": 0, "sequence": 11}])
+        self.assertTrue(result["player_header_stable"])
+        self.assertNotIn("PRIVATE-PLAYER", json.dumps(result))
+        # No player's private configuration bytes are even read.
+        def bounded_read(start, size):
+            for slot in range(2):
+                private = session + 0x868 + 15192 + slot * 424 + 32
+                self.assertFalse(start < private + 20 and start + size > private)
+            return memory.read(start, size)
+        snapshot.session_snapshot(bounded_read, session, True)
+
+    def test_native_players_reject_counts_slots_ids_and_owners(self):
+        changes = [(15184, "I", 33), (15188, "I", 1),
+                   (15192 + 4, "Q", 0), (15192 + 424 + 4, "Q", 0x110000100001234),
+                   (15192 + 12, "I", 2), (15192 + 16, "I", 1)]
+        for offset, fmt, value in changes:
+            with self.subTest(offset=offset):
+                memory, session = self.make_players()
+                memory.put(session + 0x868 + offset, fmt, value)
+                with self.assertRaisesRegex(ValueError, "Native player"):
+                    snapshot.session_snapshot(memory.read, session, True)
+        for offset, value in ((0x8A0 + 184 + 176, 0), (0x8A0 + 176, 32)):
+            memory, session = self.make_players()
+            memory.put(session + offset, "I", value)
+            with self.assertRaisesRegex(ValueError, "Native player"):
+                snapshot.session_snapshot(memory.read, session, True)
+
+    def test_native_player_header_stability_is_reported(self):
+        memory, session = self.make_players()
+        calls = 0
+        def changing_read(start, size):
+            nonlocal calls
+            data = memory.read(start, size)
+            if start == session + 0x868 + 15184:
+                calls += 1
+                if calls == 3:
+                    return struct.pack("<II", 1, 1)
+            return data
+        self.assertFalse(snapshot.session_snapshot(changing_read, session, True)["player_header_stable"])
+
+    def test_native_player_empty_table(self):
+        memory, session = self.make_session()
+        for index in range(2):
+            memory.put(session + 0x8A0 + index * 184 + 168, "Q", 0)
+        result = snapshot.session_snapshot(memory.read, session, True)
+        self.assertEqual(result["players"], [])
+        self.assertEqual(result["player_mask"], "0x00000000")
+
     def test_group_back_pointers_and_ownership(self):
         memory = Memory()
         group, peer = memory.base + 0x30000, memory.base + 0x50000

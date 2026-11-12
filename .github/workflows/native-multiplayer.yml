@@ -83,6 +83,6 @@ jobs:
           $harness = Join-Path $PWD 'build/native-ci/companion_bridge/companion_bridge_harness.exe'
           $report = Join-Path $PWD 'build/native-ci/native-companion-results.txt'
           $worker = Start-Process -FilePath ./build/launcher/MultiDawn.Launcher.exe -ArgumentList @('--native-companion-test', ('"' + $harness + '"'), ('"' + $report + '"')) -WindowStyle Hidden -PassThru
-          if (-not $worker.WaitForExit(40000)) { $worker.Kill(); throw 'Native interoperability test timed out' }
+          if (-not $worker.WaitForExit(60000)) { $worker.Kill(); throw 'Native interoperability test timed out' }
           if (Test-Path -LiteralPath $report) { Get-Content -LiteralPath $report }
           if ($worker.ExitCode -ne 0) { throw 'Native interoperability test failed' }

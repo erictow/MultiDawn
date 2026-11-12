@@ -144,6 +144,13 @@ Get-Content C:\Temp\native-pipe-test.txt
 The workers have a 25-second execution deadline and use the actual pipe client,
 separate identities, and invitations. They do not load Destiny or a game DLL.
 
+Launcher 0.4 requests native companion protocol 2. Invitation tickets expire
+after 60 seconds and bind both native runtime instances and the current pairing.
+Acceptance reports an intent to the host and waits for authorization. It does
+not queue a game join callback or grant access to a shared world. Protocol 2
+requires another protocol 2 runtime for invitations; legacy invitations cannot
+bypass that waiting state. See [the protocol contract](../../docs/INVITATION-CONTROL-V2.md).
+
 Capture the form without starting the game:
 
 ```powershell

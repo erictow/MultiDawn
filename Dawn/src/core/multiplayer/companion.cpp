@@ -1,5 +1,6 @@
 #include "companion.h"
 #include "companion_protocol.h"
+#include "companion_invitation_state.h"
 
 #include <Windows.h>
 #include <array>
@@ -17,6 +18,16 @@ HANDLE g_pipe{INVALID_HANDLE_VALUE};
 std::uint64_t g_peer{};
 bool g_peerGameRunning{};
 std::uint64_t g_lastReceived{};
+std::uint32_t g_version{protocol::kVersion};
+steam::social::PeerProfile g_profile{};
+InvitationIntentState g_invitations{};
+
+void clear_ticketed_invitation() noexcept {
+    steam::social::PendingInvitation pending{};
+    if (steam::social::pending_invitation(pending) && pending.ticket[0] != '\0') {
+        (void)steam::social::revoke_invitation(pending.ticket.data());
+    }
+}
 
 /** Every operation is cancellable; a stopped launcher cannot block the game indefinitely. */
 [[nodiscard]] bool transfer(HANDLE pipe, bool write, void* buffer, DWORD size, DWORD timeout) noexcept {
@@ -75,6 +86,25 @@ void close_locked() noexcept {
     g_peer = 0;
     g_peerGameRunning = false;
     g_lastReceived = 0;
+    g_version = protocol::kVersion;
+    g_profile = {};
+    g_invitations = {};
+}
+
+[[nodiscard]] bool accepted_sender(void*, std::uint64_t from, std::string_view ticket) noexcept {
+    if (!protocol::ticket(ticket)) return false;
+    protocol::Message message;
+    std::array<char, 48> prefix{};
+    const int count = std::snprintf(prefix.data(), prefix.size(), "ACCEPT %llu ",
+                                    static_cast<unsigned long long>(from));
+    if (count <= 0 || static_cast<std::size_t>(count) >= prefix.size()
+        || !protocol::append(message, {prefix.data(), static_cast<std::size_t>(count)})
+        || !protocol::append(message, ticket)) return false;
+    AcquireSRWLockExclusive(&g_lock);
+    const bool sent = g_version == protocol::kIntentVersion && from == g_peer
+        && g_peerGameRunning && g_invitations.ready() && send_locked(message);
+    ReleaseSRWLockExclusive(&g_lock);
+    return sent;
 }
 
 [[nodiscard]] bool invite_sender(void*, std::uint64_t target, std::string_view connect) noexcept {
@@ -85,7 +115,8 @@ void close_locked() noexcept {
         || !protocol::append(message, {prefix.data(), static_cast<std::size_t>(count)})
         || !protocol::append_hex(message, connect)) return false;
     AcquireSRWLockExclusive(&g_lock);
-    const bool sent = target == g_peer && g_peerGameRunning && send_locked(message);
+    const bool sent = target == g_peer && g_peerGameRunning
+        && (g_version != protocol::kIntentVersion || g_invitations.ready()) && send_locked(message);
     ReleaseSRWLockExclusive(&g_lock);
     return sent;
 }
@@ -105,6 +136,11 @@ void close_locked() noexcept {
     if (!steam::social::set_peer(profile)) return false;
     g_peer = peerId;
     g_peerGameRunning = profile.gameRunning;
+    g_profile = profile;
+    if (!profile.gameRunning) {
+        g_invitations = {};
+        clear_ticketed_invitation();
+    }
     return true;
 }
 
@@ -125,6 +161,14 @@ bool initialize() noexcept {
         report("unsupported_gameplay_mode");
         return false;
     }
+    std::array<wchar_t, 4> version{};
+    const DWORD versionSize = GetEnvironmentVariableW(L"DAWN_COMPANION_PROTOCOL", version.data(),
+                                                       static_cast<DWORD>(version.size()));
+    if (versionSize >= version.size()
+        || (versionSize != 0 && std::wstring_view(version.data(), versionSize) != L"1"
+            && std::wstring_view(version.data(), versionSize) != L"2")) return false;
+    const std::uint32_t selectedVersion = versionSize == 1 && version[0] == L'2'
+        ? protocol::kIntentVersion : protocol::kVersion;
     std::array<wchar_t, 40> id{}, nonce{};
     std::array<wchar_t, 16> process{};
     const DWORD idSize = GetEnvironmentVariableW(L"DAWN_COMPANION_ID", id.data(), static_cast<DWORD>(id.size()));
@@ -150,8 +194,9 @@ bool initialize() noexcept {
     ULONG actualProcess = 0;
     bool accepted = g_pipe != INVALID_HANDLE_VALUE && GetNamedPipeServerProcessId(g_pipe, &actualProcess)
                     && actualProcess == expectedProcess;
+    g_version = selectedVersion;
     protocol::Message hello;
-    accepted = accepted && protocol::append(hello, "HELLO 1 ");
+    accepted = accepted && protocol::append(hello, selectedVersion == 2 ? "HELLO 2 " : "HELLO 1 ");
     for (DWORD index = 0; accepted && index < nonceSize; ++index) {
         const char value = static_cast<char>(nonce[index]);
         accepted = protocol::append(hello, {&value, 1});
@@ -160,7 +205,8 @@ bool initialize() noexcept {
     protocol::Fields fields;
     accepted = accepted && send_locked(hello, 3000) && receive_locked(response, 3000)
                && protocol::split(response.view(), fields) && fields.count == 6
-               && fields.values[0] == "WELCOME" && fields.values[1] == "1";
+               && fields.values[0] == "WELCOME"
+               && fields.values[1] == (selectedVersion == 2 ? "2" : "1");
     std::uint64_t local = 0, remote = 0;
     if (accepted) {
         accepted = protocol::decimal(fields.values[2], local) && protocol::steam_identity(local)
@@ -170,7 +216,10 @@ bool initialize() noexcept {
     if (accepted) g_lastReceived = GetTickCount64();
     else close_locked();
     ReleaseSRWLockExclusive(&g_lock);
-    if (accepted) steam::social::set_invite_sender(&invite_sender, nullptr);
+    if (accepted) {
+        steam::social::set_invite_sender(&invite_sender, nullptr);
+        steam::social::set_invite_accepted_sender(selectedVersion == 2 ? &accepted_sender : nullptr, nullptr);
+    }
     else { steam::social::reset(); report("handshake_failed"); }
     if (accepted) report("authenticated");
     return accepted;
@@ -198,7 +247,41 @@ void service(std::uint64_t now) noexcept {
             if (fields.count != 4 || !protocol::decimal(fields.values[1], identity) || identity != g_peer || !apply_peer(fields, false)) { failed = true; break; }
             continue;
         }
-        if (fields.values[0] == "INVITEFROM" && fields.count == 3) {
+        if (g_version == protocol::kIntentVersion && fields.values[0] == "RUNTIME") {
+            std::uint64_t peer{}, version{};
+            bool changed = false;
+            if (fields.count != 4 || !protocol::decimal(fields.values[1], peer) || peer != g_peer
+                || !protocol::decimal(fields.values[3], version)
+                || !g_invitations.runtime(fields.values[2], version, changed)) { failed = true; break; }
+            if (changed) clear_ticketed_invitation();
+            g_peerGameRunning = version != 0;
+            g_profile.gameRunning = g_peerGameRunning;
+            if (!steam::social::set_peer(g_profile)) { failed = true; break; }
+            continue;
+        }
+        if (g_version == protocol::kIntentVersion && fields.values[0] == "INVITEFROM2") {
+            std::uint64_t sender{};
+            std::array<char, steam::social::kConnectCapacity> connect{};
+            if (fields.count != 4 || !g_peerGameRunning || !g_invitations.ready()
+                || !protocol::decimal(fields.values[1], sender) || sender != g_peer
+                || !protocol::ticket(fields.values[2]) || !protocol::decode_text(fields.values[3], connect)
+                || !steam::social::receive_invitation(sender, connect.data(), fields.values[2])) { failed = true; break; }
+            continue;
+        }
+        if (g_version == protocol::kIntentVersion && fields.values[0] == "ACCEPTED") {
+            std::uint64_t peer{}, ttl{};
+            if (fields.count != 4 || !g_peerGameRunning || !protocol::decimal(fields.values[1], peer)
+                || peer != g_peer || !protocol::decimal(fields.values[3], ttl)
+                || !g_invitations.accepted(peer, fields.values[2], ttl, now)) { failed = true; break; }
+            continue;
+        }
+        if (g_version == protocol::kIntentVersion && fields.values[0] == "REVOKED") {
+            if (fields.count != 2 || !protocol::ticket(fields.values[1])) { failed = true; break; }
+            g_invitations.revoke(fields.values[1]);
+            (void)steam::social::revoke_invitation(fields.values[1]);
+            continue;
+        }
+        if (g_version == protocol::kVersion && fields.values[0] == "INVITEFROM" && fields.count == 3) {
             std::uint64_t sender = 0;
             std::array<char, steam::social::kConnectCapacity> connect{};
             if (!g_peerGameRunning || !protocol::decimal(fields.values[1], sender) || sender != g_peer
@@ -209,14 +292,20 @@ void service(std::uint64_t now) noexcept {
         failed = true;
         break;
     }
+    g_invitations.expire(now);
     if (g_pipe != INVALID_HANDLE_VALUE && now > g_lastReceived && now - g_lastReceived > 15000) failed = true;
     if (failed) close_locked();
     ReleaseSRWLockExclusive(&g_lock);
-    if (failed) { steam::social::set_invite_sender(nullptr, nullptr); steam::social::clear_peer(); report("disconnected"); }
+    if (failed) {
+        steam::social::set_invite_sender(nullptr, nullptr);
+        steam::social::set_invite_accepted_sender(nullptr, nullptr);
+        steam::social::clear_peer(); report("disconnected");
+    }
 }
 
 void shutdown() noexcept {
     steam::social::set_invite_sender(nullptr, nullptr);
+    steam::social::set_invite_accepted_sender(nullptr, nullptr);
     AcquireSRWLockExclusive(&g_lock);
     close_locked();
     ReleaseSRWLockExclusive(&g_lock);
@@ -228,6 +317,22 @@ bool connected() noexcept {
     const bool result = g_pipe != INVALID_HANDLE_VALUE;
     ReleaseSRWLockShared(&g_lock);
     return result;
+}
+
+bool take_accepted_invitation(AcceptedInvitationIntent& output) noexcept {
+    AcquireSRWLockExclusive(&g_lock);
+    const bool found = g_pipe != INVALID_HANDLE_VALUE && g_invitations.take(GetTickCount64(), output);
+    if (!found) output = {};
+    ReleaseSRWLockExclusive(&g_lock);
+    return found;
+}
+
+bool invitation_intents_ready() noexcept {
+    AcquireSRWLockShared(&g_lock);
+    const bool ready = g_pipe != INVALID_HANDLE_VALUE && g_version == protocol::kIntentVersion
+        && g_peerGameRunning && g_invitations.ready();
+    ReleaseSRWLockShared(&g_lock);
+    return ready;
 }
 
 } // namespace dawn::core::multiplayer

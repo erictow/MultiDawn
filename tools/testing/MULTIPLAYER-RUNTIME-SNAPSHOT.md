@@ -93,6 +93,15 @@ retired observations, and refuses missing or excessive initialized sessions.
 Log input is bounded to 32 MiB; session and definition lists each remain bounded
 to 16 entries. Existing explicit address options can be combined with the trace.
 
+Add `--native-players` to a session/trace capture to include public native player
+IDs and their owning membership slots. This reads only each player's 25-byte
+identity/ownership prefix. Counts, masks, unique nonzero IDs, member ownership,
+and the supported one-local-player index must agree before any player result is
+reported. The remaining player configuration is not read. This is an opt-in
+observation of the native table, not a Steam-ID or character-SOID substitute and
+not permission to admit a player to a host. Inspect `player_header_stable` along
+with `membership_header_stable`; neither makes the sample atomic.
+
 Output files must be new and their parent directory must exist. Exit code 0
 means requested reads passed the tool's checks; exit code 2 indicates refusal or
 a section error. Inspect the per-section stability fields even when the exit
