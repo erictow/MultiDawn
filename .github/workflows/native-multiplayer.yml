@@ -5,6 +5,9 @@ on:
   push:
     paths:
       - 'Dawn/src/core/multiplayer/**'
+      - 'Dawn/src/client/hooks/bootflow/native_identity_observation.*'
+      - 'Dawn/src/client/hooks/bootflow/towerfall_executor_bootstrap.cpp'
+      - 'Dawn/Dawn.vcxproj'
       - 'Dawn/src/middleware/bap/address_resolution.*'
       - 'Dawn/src/middleware/bap/bap_frame.cpp'
       - 'Dawn/src/middleware/bap/frame.h'
@@ -22,10 +25,15 @@ on:
       - 'Dawn/unit/*peer_view_echo*'
       - 'Dawn/unit/*shared_membership*'
       - 'Dawn/unit/*steam_social*'
+      - 'Dawn/unit/*native_identity_observation*'
+      - 'tools/testing/*multiplayer_runtime_snapshot.py'
       - '.github/workflows/native-multiplayer.yml'
   pull_request:
     paths:
       - 'Dawn/src/core/multiplayer/**'
+      - 'Dawn/src/client/hooks/bootflow/native_identity_observation.*'
+      - 'Dawn/src/client/hooks/bootflow/towerfall_executor_bootstrap.cpp'
+      - 'Dawn/Dawn.vcxproj'
       - 'Dawn/src/middleware/bap/address_resolution.*'
       - 'Dawn/src/middleware/bap/bap_frame.cpp'
       - 'Dawn/src/middleware/bap/frame.h'
@@ -43,6 +51,8 @@ on:
       - 'Dawn/unit/*peer_view_echo*'
       - 'Dawn/unit/*shared_membership*'
       - 'Dawn/unit/*steam_social*'
+      - 'Dawn/unit/*native_identity_observation*'
+      - 'tools/testing/*multiplayer_runtime_snapshot.py'
       - '.github/workflows/native-multiplayer.yml'
 
 permissions:
@@ -59,7 +69,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          foreach ($suite in @('companion_protocol', 'companion_client', 'steam_social', 'shared_membership', 'address_resolution', 'des_cbc', 'routed_datagram', 'resolution_replay', 'address_resolution_host', 'endpoint_resolution', 'peer_view_echo')) {
+          foreach ($suite in @('companion_protocol', 'companion_client', 'steam_social', 'shared_membership', 'address_resolution', 'des_cbc', 'routed_datagram', 'resolution_replay', 'address_resolution_host', 'endpoint_resolution', 'peer_view_echo', 'native_identity_observation')) {
             $destination = Join-Path $PWD "build/native-ci/$suite/"
             & msbuild "Dawn/unit/$($suite)_tests.vcxproj" /nologo /v:minimal /m:2 /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0 "/p:OutDir=$destination" "/p:IntDir=$($destination)obj/"
             if ($LASTEXITCODE -ne 0) { throw "$suite compilation failed" }
@@ -69,7 +79,14 @@ jobs:
               & (Join-Path $destination "$($suite)_tests.exe") --disabled
               if ($LASTEXITCODE -ne 0) { throw 'Disabled address-resolution mode failed' }
             }
+            if ($suite -eq 'native_identity_observation') {
+              & (Join-Path $destination "$($suite)_tests.exe") --layout-refused
+              if ($LASTEXITCODE -ne 0) { throw 'Unsupported identity-observation layout was accepted' }
+            }
           }
+      - name: Test read-only runtime snapshots
+        shell: powershell
+        run: python -m unittest discover -s tools/testing -p test_multiplayer_runtime_snapshot.py -v
       - name: Build production companion test workers
         shell: powershell
         run: |

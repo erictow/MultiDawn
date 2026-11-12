@@ -16,6 +16,23 @@ struct Statistics {
     std::uint64_t created{}, opened{}, rejected{}, replayed{}, wrapped{};
 };
 
+/** One resolver context lifetime, scoped to its exact BAP authentication lifetime. */
+struct RouteHandle {
+    state::activity::AuthenticationKey owner{};
+    std::uint64_t generation{};
+
+    [[nodiscard]] explicit constexpr operator bool() const noexcept {
+        return static_cast<bool>(owner) && generation != 0;
+    }
+    friend constexpr bool operator==(RouteHandle, RouteHandle) noexcept = default;
+};
+
+/** Public routing identity only. Contains no resolver keys, tokens or account data. */
+struct AuthenticatedRoute {
+    RouteHandle handle{};
+    state::gameplay::Endpoint source{};
+};
+
 /** Explicit development opt-in, cached for this loaded DLL's lifetime. */
 [[nodiscard]] bool enabled() noexcept;
 
@@ -39,6 +56,21 @@ struct Statistics {
                                 std::span<const std::byte> plaintext,
                                 std::span<std::byte> packet,
                                 std::size_t& written) noexcept;
+
+/**
+ * Observes this owner's currently selected authenticated route. Unbound contexts
+ * and routes superseded for the same owner or endpoint are unavailable. Failure
+ * clears output. This observation grants no admission or gameplay authorization.
+ */
+[[nodiscard]] bool lookup_authenticated_route(state::activity::AuthenticationKey owner,
+                                             AuthenticatedRoute& output) noexcept;
+
+/**
+ * Rechecks exact ownership, context generation, pinned source and current route
+ * selection. Release, reset and slot reuse invalidate handles without reuse.
+ * The result is an observation under the resolver lock, not a retained lease.
+ */
+[[nodiscard]] bool validate_authenticated_route(const AuthenticatedRoute& observed) noexcept;
 
 void release_owner(state::activity::AuthenticationKey owner) noexcept;
 void reset() noexcept;

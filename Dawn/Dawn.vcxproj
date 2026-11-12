@@ -425,6 +425,7 @@
     <ClCompile Include="src\client\hooks\bootflow\world_step.cpp" />
     <ClCompile Include="src\client\hooks\bootflow\spawn_hold.cpp" />
     <ClCompile Include="src\client\hooks\bootflow\towerfall_executor_bootstrap.cpp" />
+    <ClCompile Include="src\client\hooks\bootflow\native_identity_observation.cpp" />
     <ClCompile Include="src\client\hooks\bootflow\spawn\spawn_gate_probe.cpp" />
     <ClCompile Include="src\client\hooks\bootflow\spawn\spawn_gate_targets.cpp" />
     <ClCompile Include="src\client\hooks\bootflow\spawn\spawn_gate_record_dump.cpp" />
@@ -947,6 +948,9 @@
     <ClInclude Include="src\core\runtime\core_runtime.h" />
     <ClInclude Include="src\core\multiplayer\companion.h" />
     <ClInclude Include="src\core\multiplayer\companion_protocol.h" />
+    <ClInclude Include="src\core\multiplayer\companion_invitation_state.h" />
+    <ClInclude Include="src\core\multiplayer\native_identity_observation_state.h" />
+    <ClInclude Include="src\client\hooks\bootflow\native_identity_observation.h" />
     <ClInclude Include="src\steam\runtime\social.h" />
     <ClInclude Include="src\steam\ui\social_panel.h" />
     <ClInclude Include="src\server\gameplay\group\shared_membership.h" />

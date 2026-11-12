@@ -143,6 +143,15 @@ not publish plaintext or commit endpoint/replay state. The server permits each
 counter once within a 128-packet window, with a floor of B + 1. This is a server
 policy, not a claim about the native client's replay-window size.
 
+`lookup_authenticated_route(owner, output)` now exposes the exact authentication
+lifetime, a unique resolver-context generation and the pinned UDP source. An
+unbound context supplies no observation. Lookup and revalidation follow the
+current outbound selection for both the owner and endpoint, so an endpoint
+shared with another current owner cannot alias a route. Release, reset and slot
+reuse invalidate old handles. Snapshots contain no resolver material and are
+observations, not retained leases or gameplay authorization. A later admission
+controller must revalidate them with its exact activity and native identities.
+
 ## Routed UDP envelope
 
 `src/middleware/gameplay/routed_datagram.{h,cpp}` implements:
@@ -199,14 +208,14 @@ includes these isolated suites. Current local results are:
 | `des_cbc_tests.vcxproj` | 53 |
 | `routed_datagram_tests.vcxproj` | 535 |
 | `resolution_replay_tests.vcxproj` | 16,554 |
-| `address_resolution_host_tests.vcxproj` | 1,084 enabled; 11 with `--disabled` |
+| `address_resolution_host_tests.vcxproj` | 1,276 enabled; 14 with `--disabled` |
 | `endpoint_resolution_tests.vcxproj` | 136 in the recorded loopback run |
 | `peer_view_echo_tests.vcxproj` | 2,006 |
 
 The backend tests link the production store, random generator, packet codec,
 DES and HMAC with test settings/log sinks. They exercise endpoint pinning,
 authenticated malformed padding, replay boundaries, rekey selection, generation
-cleanup and capacity limits. The address codec suite also verifies status-free
+cleanup, route observation lifetimes and capacity limits. The address codec suite also verifies status-free
 301 payloads and complete plaintext frames while retaining status 200 on other
 responses. These tests use no sockets, game processes, or
 player saves. A workflow definition is not evidence of a remote CI pass, and

@@ -89,8 +89,10 @@ int main(int argc, char** argv) {
             && (!v2 || client::invitation_intents_ready())) {
             sent = fixture::sender(fixture::senderContext, fixture::peer.steamId, outgoing);
         }
-        received = fixture::from == fixture::peer.steamId && fixture::from != 0
-                   && std::string_view(fixture::connect.data()) == expected;
+        // Record completed delivery. The other worker may exit during our final
+        // linger window, which correctly revokes its pending invitation locally.
+        received = received || (fixture::from == fixture::peer.steamId && fixture::from != 0
+                   && std::string_view(fixture::connect.data()) == expected);
         if (v2 && received && !accepted && fixture::acceptedSender != nullptr && fixture::ticket[0] != '\0') {
             accepted = fixture::acceptedSender(fixture::acceptedContext, fixture::from, fixture::ticket.data());
         }

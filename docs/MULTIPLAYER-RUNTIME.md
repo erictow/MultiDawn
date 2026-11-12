@@ -102,6 +102,13 @@ without reading player configuration. The isolated game's populated player rows
 passed those checks with stable membership/player headers. This manual evidence
 is not yet an in-process identity publisher or a gameplay authorization grant.
 
+The new [in-process observation reader](NATIVE-IDENTITY-OBSERVATION.md) captures
+those public routing scalars on the native manager thread. It requires
+`DAWN_NATIVE_IDENTITY_OBSERVATION=1` and pinned build signatures, rejects ambiguous
+roles and inconsistent ownership, and expires samples after one second. Its
+component tests pass; comparison against a live game is still pending. It neither
+identifies a unique local human nor publishes identities to another PC.
+
 The opt-in trace also located the actual fireteam and activity sessions.
 Both sampled sessions were in native mode 6, with one established local member,
 and both current managed descriptions used Steam-format NetAddr method 6.
@@ -226,6 +233,10 @@ Changing the platform identity can still affect the account's sign-in identity;
 native game testing must use isolated copies of saves until preservation is
 verified. No automated live server shutdown or account migration is implemented.
 
+The [local-profile handoff design](LOCAL-PROFILE-ACTIVITY-HANDOFF.md) records the
+remaining exact BAP activity boundary. Existing seeded join IDs and local BAP
+handshake state are not proof of a remote native player identity.
+
 ## Component verification
 
 The launcher self-tests exercise authenticated TCP pairing, bounded control
@@ -257,8 +268,8 @@ The native test projects are:
 - `Dawn/unit/des_cbc_tests.vcxproj`: 53 compatibility-primitive checks.
 - `Dawn/unit/routed_datagram_tests.vcxproj`: 535 envelope and failure checks.
 - `Dawn/unit/resolution_replay_tests.vcxproj`: 16,554 replay-window checks.
-- `Dawn/unit/address_resolution_host_tests.vcxproj`: 1,084 enabled-backend checks
-  and 11 checks in a separate `--disabled` process. These link production crypto
+- `Dawn/unit/address_resolution_host_tests.vcxproj`: 1,276 enabled-backend checks
+  and 14 checks in a separate `--disabled` process. These link production crypto
   and the context store without sockets, game processes, or saves.
 - `Dawn/unit/endpoint_resolution_tests.vcxproj`: 136 checks in the recorded
   loopback run, using real UDP and production endpoint/crypto code with stubbed
@@ -267,6 +278,10 @@ The native test projects are:
 - `Dawn/unit/peer_view_echo_tests.vcxproj`: 2,006 checks with compiler warnings
   treated as errors, covering
   exact link ownership, malformed views, queue rollback and unchanged group slots.
+- `Dawn/unit/native_identity_observation_tests.vcxproj`: 149 checks plus three
+  unsupported-layout checks, with the real adapter and production membership
+  encoder. Covers scalar-read restrictions, native ownership, unstable samples,
+  ambiguous roles, expiry, capacity reclamation and lifecycle fencing.
 
 `companion_bridge_harness.vcxproj` builds a small native test worker that links
 the production companion client with test social/log sinks. The launcher's
@@ -278,7 +293,7 @@ It does not verify the game's friend roster or a shared activity.
 
 Native build instructions are in
 [`tools/build/PORTABLE-WINDOWS.md`](../tools/build/PORTABLE-WINDOWS.md).
-The native GitHub workflow builds and runs the eleven component test projects;
+The native GitHub workflow builds and runs the twelve component test projects;
 preparing the workflow does not mean a remote run has passed.
 
 For production commit `21c2a980`, the remote

@@ -19,6 +19,7 @@
 #include "../retail_log/retail_log_enqueue_observer.h"
 #include "internal.h"
 #include "mission_prelaunch.h"
+#include "native_identity_observation.h"
 #include "../../activity/mission_launch.h"
 
 namespace dawn::client::hooks::bootflow {
@@ -1858,6 +1859,7 @@ __declspec(noinline) void __fastcall manager_update_loop(std::byte* manager) noe
     const IdentityDefinitionSnapshot definitionAfter =
         snapshot_identity_definition(after.identity);
     trace_native_session(manager, after, definitionAfter);
+    native_identity_observation::observe(manager);
     if (traceOmegaCall) {
         log_omega_manager_call("exit",
                                next_binding_timeline(),
@@ -2256,6 +2258,7 @@ bool install_towerfall_executor_bootstrap() noexcept {
     g_identityTraceSequence.store(0U, std::memory_order_release);
     g_nativeSessionTraceEnabled.store(native_session_trace_requested(),
                                       std::memory_order_release);
+    native_identity_observation::start();
     g_callGate.accept();
     core::log::write(
         core::log::Channel::client,
@@ -2314,6 +2317,7 @@ void arm_towerfall_executor_bootstrap() noexcept {
 
 void quiesce_towerfall_executor_bootstrap() noexcept {
     g_callGate.quiesce();
+    native_identity_observation::reset();
     g_armed.store(false, std::memory_order_release);
 }
 

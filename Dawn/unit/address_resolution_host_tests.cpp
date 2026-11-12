@@ -367,6 +367,109 @@ static void owner_lifecycle_and_capacity() {
           && empty.rejected == 0 && empty.replayed == 0 && empty.wrapped == 0);
 }
 
+static void unavailable_route(Owner who) {
+    host::AuthenticatedRoute output{{owner(999), 999}, {0x01020304, 12345}};
+    CHECK(!host::lookup_authenticated_route(who, output));
+    CHECK(!static_cast<bool>(output.handle) && output.handle.owner == Owner{}
+          && output.handle.generation == 0 && output.source.address == 0 && output.source.port == 0);
+}
+
+static host::AuthenticatedRoute observed_route(Owner who, Endpoint source) {
+    host::AuthenticatedRoute output{};
+    CHECK(host::lookup_authenticated_route(who, output));
+    CHECK(output.handle.owner == who && output.handle.generation != 0);
+    CHECK(output.source.address == source.address && output.source.port == source.port);
+    CHECK(host::validate_authenticated_route(output));
+    return output;
+}
+
+static void authenticated_route_observation() {
+    configure();
+    const auto a = owner(60, 2, 3), b = owner(61, 2, 3);
+    const Endpoint firstSource{0xC0A8017C, 45400}, currentSource{0xC0A8017D, 45401};
+    const auto plain = payload();
+    unavailable_route({});
+    unavailable_route(a);
+    CHECK(!host::validate_authenticated_route({}));
+    const auto response = resolve(a);
+    unavailable_route(a); // BAP resolution alone is not proof of a UDP source.
+    const auto floor = counter(response.material.b) + 1;
+    auto tampered = client_packet(response, floor, plain);
+    tampered.back() ^= std::byte{1};
+    rejected(firstSource, tampered);
+    unavailable_route(a);
+    rejected({0, firstSource.port}, client_packet(response, floor, plain));
+    unavailable_route(a);
+    rejected(firstSource, client_packet(response, floor - 1, plain));
+    unavailable_route(a);
+    rejected(firstSource, client_packet(response, floor, plain), host::PacketResult::rejected, plain.size() - 1);
+    unavailable_route(a);
+    accepted(firstSource, client_packet(response, floor, plain), plain);
+    const auto initial = observed_route(a, firstSource);
+    unavailable_route(owner(60, 3, 3));
+    unavailable_route(owner(60, 2, 4));
+    unavailable_route(b);
+    for (const auto wrongOwner : {owner(60, 3, 3), owner(60, 2, 4), b}) {
+        auto altered = initial;
+        altered.handle.owner = wrongOwner;
+        CHECK(!host::validate_authenticated_route(altered));
+    }
+    auto altered = initial;
+    ++altered.handle.generation;
+    CHECK(!host::validate_authenticated_route(altered));
+    altered = initial; ++altered.source.address;
+    CHECK(!host::validate_authenticated_route(altered));
+    altered = initial; ++altered.source.port;
+    CHECK(!host::validate_authenticated_route(altered));
+
+    // An unbound or forged replacement cannot change the selected observation.
+    const auto newer = resolve(a);
+    CHECK(host::validate_authenticated_route(initial));
+    tampered = client_packet(newer, counter(newer.material.b) + 1, plain);
+    tampered.back() ^= std::byte{1};
+    rejected(currentSource, tampered);
+    CHECK(host::validate_authenticated_route(initial));
+    accepted(currentSource, client_packet(newer, counter(newer.material.b) + 1, plain), plain);
+    const auto current = observed_route(a, currentSource);
+    CHECK(current.handle.generation != initial.handle.generation);
+    CHECK(!host::validate_authenticated_route(initial)); // Old context is still allocated.
+
+    // Endpoint equality cannot alias another authentication owner's current route.
+    const auto otherResponse = resolve(b);
+    accepted(currentSource, client_packet(otherResponse, counter(otherResponse.material.b) + 1, plain), plain);
+    const auto other = observed_route(b, currentSource);
+    unavailable_route(a);
+    CHECK(!host::validate_authenticated_route(current));
+    altered = other; altered.handle.owner = a;
+    CHECK(!host::validate_authenticated_route(altered));
+    // Existing wrap selection follows the newest authenticated packet, not resolution order.
+    accepted(currentSource, client_packet(newer, counter(newer.material.b) + 2, plain), plain);
+    CHECK(host::validate_authenticated_route(current));
+    CHECK(!host::validate_authenticated_route(other));
+    unavailable_route(b);
+    host::release_owner(owner(60, 3, 3));
+    CHECK(host::validate_authenticated_route(current));
+    host::release_owner(a);
+    CHECK(!host::validate_authenticated_route(current));
+    unavailable_route(a);
+
+    // Reusing a free slot with the same owner and endpoint never reuses its handle.
+    const auto reused = resolve(a);
+    accepted(currentSource, client_packet(reused, counter(reused.material.b) + 1, plain), plain);
+    const auto afterRelease = observed_route(a, currentSource);
+    CHECK(afterRelease.handle.generation > current.handle.generation);
+    CHECK(!host::validate_authenticated_route(current));
+    host::reset();
+    unavailable_route(a);
+    CHECK(!host::validate_authenticated_route(afterRelease));
+    const auto resetResponse = resolve(a);
+    unavailable_route(a);
+    accepted(currentSource, client_packet(resetResponse, counter(resetResponse.material.b) + 1, plain), plain);
+    const auto afterReset = observed_route(a, currentSource);
+    CHECK(afterReset.handle.generation > afterRelease.handle.generation);
+    CHECK(!host::validate_authenticated_route(afterRelease));
+}
+
 static void disabled_mode() {
     CHECK(SetEnvironmentVariableW(L"DAWN_NATIVE_ADDRESS_RESOLUTION", nullptr) != 0);
     CHECK(!host::enabled());
@@ -379,6 +482,8 @@ static void disabled_mode() {
     std::size_t written = 999;
     CHECK(host::wrap({0x7F000001, 45000}, payload(), output, written) == host::PacketResult::notRouted);
     CHECK(written == 0 && output == before && host::snapshot().live == 0);
+    unavailable_route(owner(1));
+    CHECK(!host::validate_authenticated_route({{owner(1), 1}, {0x7F000001, 45000}}));
     CHECK(SetEnvironmentVariableW(L"DAWN_NATIVE_ADDRESS_RESOLUTION", L"1") != 0);
     CHECK(!host::enabled()); // This DLL/process lifetime keeps its initial policy.
 }
@@ -394,6 +499,7 @@ int main(int argc, char** argv) {
         authenticated_bad_padding();
         outbound_and_rekey();
         owner_lifecycle_and_capacity();
+        authenticated_route_observation();
     }
     host::reset();
     std::printf("address_resolution_host_tests: PASS %u checks\n", checks);

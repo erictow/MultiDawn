@@ -32,7 +32,7 @@ struct Context {
     codec::NetAddr requested{};
     state::gameplay::Endpoint peer{};
     ReplayWindow replay{};
-    std::uint64_t nextSend{}, heard{}, createdAt{};
+    std::uint64_t nextSend{}, heard{}, createdAt{}, generation{};
     std::uint32_t tag{};
     bool occupied{}, bound{}, sendExhausted{};
 };
@@ -41,6 +41,8 @@ SRWLOCK g_lock = SRWLOCK_INIT;
 std::array<Context, kCapacity> g_contexts{};
 Statistics g_statistics{};
 std::uint64_t g_heardClock{};
+// Neither reset nor owner release can make an old handle identify a new context.
+std::uint64_t g_routeGeneration{};
 
 class Lock final {
 public:
@@ -110,6 +112,24 @@ private:
         if (context.occupied && context.bound && same_endpoint(context.peer, source)) { return true; }
     }
     return false;
+}
+
+[[nodiscard]] Context* selected_for_endpoint(const state::gameplay::Endpoint& endpoint) noexcept {
+    Context* selected = nullptr;
+    for (auto& context : g_contexts) {
+        if (context.occupied && context.bound && same_endpoint(context.peer, endpoint)
+            && (selected == nullptr || context.heard > selected->heard)) { selected = &context; }
+    }
+    return selected;
+}
+
+[[nodiscard]] Context* selected_for_owner(state::activity::AuthenticationKey owner) noexcept {
+    Context* selected = nullptr;
+    for (auto& context : g_contexts) {
+        if (context.occupied && context.bound && context.owner == owner
+            && (selected == nullptr || context.heard > selected->heard)) { selected = &context; }
+    }
+    return selected != nullptr && selected_for_endpoint(selected->peer) == selected ? selected : nullptr;
 }
 } // namespace
 
@@ -185,6 +205,8 @@ bool resolve_address(state::activity::AuthenticationKey owner,
     body.routeTag = candidate.tag;
     std::size_t size = 0;
     if (!codec::encode_response(body, encoded, size)) { return false; }
+    if (g_routeGeneration == (std::numeric_limits<std::uint64_t>::max)()) { return false; }
+    candidate.generation = ++g_routeGeneration;
     candidate.occupied = true;
     SecureZeroMemory(slot, sizeof *slot);
     *slot = candidate;
@@ -226,6 +248,10 @@ PacketResult unwrap(const state::gameplay::Endpoint& source,
         ++g_statistics.replayed;
         return PacketResult::rejected;
     }
+    if (g_heardClock == (std::numeric_limits<std::uint64_t>::max)()) {
+        ++g_statistics.rejected;
+        return PacketResult::rejected;
+    }
     const bool first = !context->bound;
     context->replay = replay;
     context->peer = source;
@@ -248,11 +274,7 @@ PacketResult wrap(const state::gameplay::Endpoint& destination,
     written = 0;
     if (!enabled()) { return PacketResult::notRouted; }
     const Lock lock;
-    Context* selected = nullptr;
-    for (auto& context : g_contexts) {
-        if (context.occupied && context.bound && same_endpoint(context.peer, destination)
-            && (selected == nullptr || context.heard > selected->heard)) { selected = &context; }
-    }
+    Context* selected = selected_for_endpoint(destination);
     if (selected == nullptr) { return PacketResult::notRouted; }
     if (selected->sendExhausted) { return PacketResult::rejected; }
     const auto iv = counter_bytes(selected->nextSend);
@@ -264,6 +286,27 @@ PacketResult wrap(const state::gameplay::Endpoint& destination,
     }
     ++g_statistics.wrapped;
     return PacketResult::complete;
+}
+
+bool lookup_authenticated_route(state::activity::AuthenticationKey owner,
+                                 AuthenticatedRoute& output) noexcept {
+    output = {};
+    if (!enabled() || !static_cast<bool>(owner)) { return false; }
+    const Lock lock;
+    const Context* selected = selected_for_owner(owner);
+    if (selected == nullptr) { return false; }
+    output.handle = {selected->owner, selected->generation};
+    output.source = selected->peer;
+    return true;
+}
+
+bool validate_authenticated_route(const AuthenticatedRoute& observed) noexcept {
+    if (!enabled() || !static_cast<bool>(observed.handle)
+        || observed.source.address == 0 || observed.source.port == 0) { return false; }
+    const Lock lock;
+    const Context* selected = selected_for_owner(observed.handle.owner);
+    return selected != nullptr && selected->generation == observed.handle.generation
+        && same_endpoint(selected->peer, observed.source);
 }
 
 void release_owner(state::activity::AuthenticationKey owner) noexcept {
