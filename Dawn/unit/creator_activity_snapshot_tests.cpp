@@ -13,6 +13,7 @@
 #include "core/logging/log.h"
 #include "middleware/bap/frame.h"
 #include "server/bap/activity_retirement_test_support.h"
+#include "server/bap/local_identity_snapshot.h"
 #include "server/bap/runtime.h"
 #include "server/gameplay/group/group_host_sessions.h"
 #include "server/gameplay/resolution/address_resolution_host.h"
@@ -255,10 +256,67 @@ void concurrent_query() {
     writer.join();
     check(observations != 0 && !mismatch.load(), "real State lock keeps region and routing identity coherent during concurrent writes");
 }
+
+void local_client_identity() {
+    install_state();
+    const auto binding = open_creator();
+    bap::LocalClientIdentitySnapshot value{};
+    value.binding = binding;
+    value.publication.receipt.raw.accountSoid = 123;
+    check(!bap::snapshot_creator_client_identity(binding, value)
+        && !static_cast<bool>(value.binding) && value.publication.receipt.raw == membership::Identity{},
+        "a seeded identity cannot become an actual client publication and failure clears account fields");
+
+    const membership::Identity raw{kMember, -1, -1, kJoin, 0, 0, 0};
+    AcquireSRWLockExclusive(&storage::g_stateLock);
+    storage::g_state.activity.stateRevision = 7;
+    record().membership.identity = raw;
+    record().membership.identity.accountSoid = 0xF3F3F3F3F3F3F3F3ULL;
+    record().membership.identity.opaqueSoid = 0xF4F4F4F4F4F4F4F4ULL;
+    record().membership.revision = record().membership.acknowledgedRevision = 3;
+    record().membership.clientIdentityReceipt = {raw, 6};
+    ReleaseSRWLockExclusive(&storage::g_stateLock);
+    check(bap::snapshot_creator_client_identity(binding, value)
+        && value.binding == binding && value.lineage.owns(kActivity)
+        && value.publication.activity == kActivity && value.publication.hostRegion == activity::HostRegionKey{kActivity, {3}}
+        && value.publication.receipt.raw == raw && value.publication.receipt.revision == 6,
+        "exact current creator captures actual raw publication without local account or field5 fallback");
+
+    auto stale = binding;
+    ++stale.generation.value;
+    check(!bap::snapshot_creator_client_identity(stale, value) && !static_cast<bool>(value.binding),
+        "a stale creator generation cannot capture local private identity");
+    check(fixture::with_session_locked(1, [](bap::Session& session) noexcept { session.activity.memberKey = kMember + 1; return true; }),
+        "fixture replaces creator machine observation");
+    check(!bap::snapshot_creator_client_identity(binding, value) && value.publication.receipt.revision == 0,
+        "a creator whose machine differs from actual publication cannot capture it");
+    check(fixture::with_session_locked(1, select_creator), "fixture restores matching creator machine");
+
+    AcquireSRWLockExclusive(&storage::g_stateLock);
+    record().lifecycle.hostRegion.value = 4;
+    record().recordRevision = storage::g_state.activity.stateRevision = 8;
+    record().membership.region.index = 12;
+    ReleaseSRWLockExclusive(&storage::g_stateLock);
+    check(!bap::snapshot_creator_client_identity(binding, value) && !static_cast<bool>(value.binding),
+        "a stale HUD region cannot capture an otherwise valid receipt");
+    check(fixture::with_session_locked(1, [](bap::Session& session) noexcept {
+        bap::publish_hud_region_locked(session, {kActivity, {4}}); return true;
+    }), "production publisher commits the current region anchor");
+    check(bap::snapshot_creator_client_identity(binding, value)
+        && value.publication.hostRegion == activity::HostRegionKey{kActivity, {4}}
+        && value.publication.receipt.revision == 6 && value.publication.recordRevision == 8,
+        "current region observation preserves the original raw publication revision");
+
+    check(fixture::reset_authentication(1), "production teardown retires local private creator capture");
+    check(!bap::snapshot_creator_client_identity(binding, value)
+        && value.publication.receipt.raw == membership::Identity{} && value.publication.receipt.revision == 0,
+        "authentication teardown clears stale capture output without exposing another creator");
+    bap::shutdown(); fixture::reset_storage();
+}
 } // namespace
 
 int main() {
     static_assert(std::is_trivially_copyable_v<Snapshot> && sizeof(Snapshot) < 256);
-    state_queries(); bap_queries(); anchor_selection(); concurrent_query();
+    state_queries(); bap_queries(); anchor_selection(); concurrent_query(); local_client_identity();
     std::printf("PASS %u creator snapshot checks with production BAP coordinator and State query; no game or save\n", checks);
 }

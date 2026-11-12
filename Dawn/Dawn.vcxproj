@@ -1319,6 +1319,7 @@
     <ClInclude Include="src\middleware\bap\activity_message\activity_patch_epoch_parser.h" />
     <ClInclude Include="src\middleware\bap\activity_message\replicate_membership.h" />
     <ClInclude Include="src\middleware\bap\activity_message\membership_consumer_contract.h" />
+    <ClInclude Include="src\server\bap\local_identity_snapshot.h" />
     <ClInclude Include="src\middleware\bap\activity_message\activity_message_notification_encoder.h" />
     <ClInclude Include="src\middleware\bap\activity_message\activity_join_result_encoder.h" />
     <ClInclude Include="src\middleware\bap\activity_message\activity_entity_slot_request_parser.h" />

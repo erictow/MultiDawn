@@ -8,6 +8,38 @@
 
 namespace dawn::state::activity::membership {
 
+/** Captures a raw publication and its current activity/region lifetime under one State lock. */
+bool snapshot_client_identity(ActivityInstanceKey key, HostRegionKey expected,
+                               ClientIdentityPublication& output) noexcept {
+    output = {};
+    if (!static_cast<bool>(key) || !static_cast<bool>(expected) || expected.activity != key) { return false; }
+    ClientIdentityPublication selected{};
+    bool found = false;
+    AcquireSRWLockShared(&runtime::storage::g_stateLock);
+    const ActivityState& state = runtime::storage::g_state.activity;
+    const auto slot = activity::transactions::find_session(state, key);
+    if (slot != kInvalidSessionSlot) {
+        const SessionRecord& record = state.sessions[slot];
+        const auto hostRegion = activity::transactions::host_region_key(record);
+        const auto& receipt = record.membership.clientIdentityReceipt;
+        if (record.joined && record.joinedRevision != kInvalidRevision
+            && record.recordRevision != kInvalidRevision && hostRegion == expected
+            && record.membership.hasIdentity
+            && record.membership.revision != kAbsentRevision
+            && record.membership.identity.memberKey == record.memberKey
+            && receipt.revision != 0 && receipt.revision <= record.recordRevision
+            && record.recordRevision <= state.stateRevision && record.memberKey != 0
+            && receipt.raw.memberKey == record.memberKey && receipt.raw.smallOpaque >= -1
+            && receipt.raw.smallOpaque <= 1022) {
+            selected = {key, hostRegion, receipt, state.stateRevision, record.recordRevision};
+            found = true;
+        }
+    }
+    ReleaseSRWLockShared(&runtime::storage::g_stateLock);
+    if (found) { output = selected; }
+    return found;
+}
+
 /** Tests whether the client has applied the current membership revision. */
 bool acknowledged(std::uint64_t sessionId) noexcept {
     if (sessionId == kAbsentSessionId) {

@@ -24,6 +24,12 @@ identity/region observation. Also, the existing
 can initialize `joinIdentity` from the member key before a client identity message
 arrives. A BAP join identity must not be treated as a verified native player ID.
 
+The [client identity receipt](CLIENT-IDENTITY-PROVENANCE.md) now keeps the actual
+type-23 values separately from this seeded/reflected identity. A local-only
+creator capture checks the exact current binding and State region before
+returning that receipt. Its private account fields remain outside the public
+activity snapshot and companion controls.
+
 [`matchmaking::LatestSnapshot`](../Dawn/src/state/matchmaking/definition.h#L69)
 contains the full 128-byte secret-bearing runtime descriptor. Do not export that
 object, raw descriptor, account SOIDs, nonces, tokens, or keys to a companion

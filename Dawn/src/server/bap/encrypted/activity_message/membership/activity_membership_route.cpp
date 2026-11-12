@@ -84,13 +84,23 @@ void report_authoritative(
  * @return Whole State identity, with no borrowed payload views.
  */
 [[nodiscard]] membership_state::Identity
-make_identity(const service::client_identity::ClientIdentity& parsed) noexcept {
-    const state::AccountState account = state::account_snapshot();
+make_raw_identity(const service::client_identity::ClientIdentity& parsed) noexcept {
     membership_state::Identity identity{};
     identity.memberKey = parsed.memberKey;
     identity.smallOpaque = parsed.field1;
     identity.signedOpaque = parsed.field2;
     identity.joinIdentity = parsed.field3;
+    identity.accountSoid = parsed.accountSoid;
+    identity.opaqueSoid = parsed.field5;
+    identity.secondaryOpaque = parsed.field6;
+    return identity;
+}
+
+/** Existing local reflection fallback; the separate raw receipt never receives these values. */
+[[nodiscard]] membership_state::Identity
+make_identity(const service::client_identity::ClientIdentity& parsed) noexcept {
+    const state::AccountState account = state::account_snapshot();
+    membership_state::Identity identity = make_raw_identity(parsed);
     // The second (foreign) activity instance sends the same fixed identity schema but leaves its
     // account and character lanes clear. Reflecting those clear lanes replaces the valid identity
     // seeded by its join, and the simulation membership watcher then refuses member zero. The
@@ -99,7 +109,6 @@ make_identity(const service::client_identity::ClientIdentity& parsed) noexcept {
     identity.opaqueSoid = parsed.field5 != 0
                               ? parsed.field5
                               : state::account::selected_character_soid(account);
-    identity.secondaryOpaque = parsed.field6;
     return identity;
 }
 
@@ -115,7 +124,7 @@ void report_identity(const service::client_identity::ClientIdentity& parsed) noe
         std::snprintf(line.data(),
                       line.size(),
                       "ev=activity stage=identity result=ok key=0x%llX field1=%d field2=%d "
-                      "field3=0x%llX acct=0x%llX character=0x%llX field6=0x%llX",
+                      "field3=0x%llX acct=0x%llX field5=0x%llX field6=0x%llX",
                       static_cast<unsigned long long>(parsed.memberKey),
                       static_cast<int>(parsed.field1),
                       static_cast<int>(parsed.field2),
@@ -142,7 +151,8 @@ bool prepare_identity(state::activity::ActivityInstanceKey key,
         return false;
     }
     report_identity(parsed);
-    if (!membership_state::prepare_identity(key, make_identity(parsed), plan.membershipMutation)) {
+    if (!membership_state::prepare_client_identity(key, make_raw_identity(parsed),
+            make_identity(parsed), plan.membershipMutation)) {
         core::log::write(core::log::Channel::server,
                          core::log::Level::warn,
                          "ev=activity stage=identity result=refused");

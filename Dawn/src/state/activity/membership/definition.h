@@ -47,6 +47,14 @@ struct Identity final {
     friend constexpr bool operator==(const Identity&,const Identity&) noexcept = default;
 };
 
+/** Actual type-23 values, before any local-only fallback. Zero revision means absent. */
+struct ClientIdentityReceipt final {
+    Identity raw{};
+    /** Root State revision that committed this publication; unchanged duplicates retain it. */
+    std::uint64_t revision{};
+    friend constexpr bool operator==(const ClientIdentityReceipt&, const ClientIdentityReceipt&) noexcept = default;
+};
+
 /** Spawn state kept for the current activity host, in no wire form. */
 struct SpawnState final {
     std::int8_t state{};
@@ -141,6 +149,8 @@ struct MembershipState final {
     RegionLeg currentLeg{},pendingLeg{};
     /** Actual held region, distinct from region's roster prefetch destination. */
     RegionState currentRegion{};
+    /** Runtime provenance only. Seeds and reflected identity never manufacture this receipt. */
+    ClientIdentityReceipt clientIdentityReceipt{};
     friend constexpr bool operator==(const MembershipState&,const MembershipState&) noexcept = default;
 };
 
@@ -152,6 +162,7 @@ enum class MutationKind : std::uint8_t {
     refresh,
     republish,
     acknowledgement,
+    clientIdentity,
 };
 
 } // namespace dawn::state::activity::membership

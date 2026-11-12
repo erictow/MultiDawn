@@ -28,32 +28,52 @@ namespace {
         || !transactions::valid_identity(prepared.snapshot.identity, record.memberKey)) {
         return false;
     }
+    const bool clientPublication = prepared.kind == MutationKind::clientIdentity;
+    if (clientPublication) {
+        if (!transactions::equal(prepared.clientIdentityInput, prepared.clientIdentityGuard)
+            || !transactions::valid_client_identity(prepared.clientIdentityInput,
+                prepared.snapshot.identity, record.memberKey)) {
+            return false;
+        }
+    } else if (prepared.changesReceipt || prepared.clientIdentityInput != Identity{}
+        || prepared.clientIdentityGuard != Identity{}) {
+        return false;
+    }
     // Current State decides the outcome. Comparing it against the prepared plan and refusing on a
     // difference would drop the identity whenever State moved between prepare and commit, so no
     // membership would ever publish.
     const bool changed =
         !record.membership.hasIdentity
         || !transactions::equal(record.membership.identity, prepared.snapshot.identity);
-    if (changed
-        && (state.stateRevision == activity::kMaximumRevision
-            || record.membership.revision == kMaximumMembershipRevision)) {
+    const bool receiptChanged = clientPublication
+        && (record.membership.clientIdentityReceipt.revision == 0
+            || !transactions::equal(record.membership.clientIdentityReceipt.raw,
+                prepared.clientIdentityInput));
+    if (clientPublication && (prepared.changesState != changed || prepared.changesReceipt != receiptChanged)) {
         return false;
     }
-    if (!changed) {
+    if (((changed || receiptChanged) && state.stateRevision == activity::kMaximumRevision)
+        || (changed && record.membership.revision == kMaximumMembershipRevision)) {
+        return false;
+    }
+    if (!changed && !receiptChanged) {
         return true;
     }
-    const std::uint32_t revision =
-        record.membership.hasIdentity ? record.membership.revision + 1U : kInitialRevision;
 
     MembershipState updated = record.membership;
-    if (!updated.hasTransitionToken) {
-        updated.transitionToken = kInitialTransitionToken;
-        updated.hasTransitionToken = true;
+    if (changed) {
+        if (!updated.hasTransitionToken) {
+            updated.transitionToken = kInitialTransitionToken;
+            updated.hasTransitionToken = true;
+        }
+        updated.identity = prepared.snapshot.identity;
+        updated.revision = record.membership.hasIdentity ? record.membership.revision + 1U : kInitialRevision;
+        updated.acknowledgedRevision = kAbsentRevision;
+        updated.hasIdentity = true;
     }
-    updated.identity = prepared.snapshot.identity;
-    updated.revision = revision;
-    updated.acknowledgedRevision = kAbsentRevision;
-    updated.hasIdentity = true;
+    if (receiptChanged) {
+        updated.clientIdentityReceipt = {prepared.clientIdentityInput, state.stateRevision + 1U};
+    }
     record.membership = updated;
     transactions::publish_change(state, record);
     return true;
@@ -202,7 +222,10 @@ bool commit(PendingMutation& mutation) noexcept {
         || prepared.expectedHostRegion.activity != prepared.instanceKey
         || prepared.expectedStateRevision == kInvalidRevision
         || prepared.expectedRecordRevision == kInvalidRevision
-        || prepared.targetSlot >= kSessionCapacity) {
+        || prepared.targetSlot >= kSessionCapacity
+        || (prepared.kind != MutationKind::clientIdentity
+            && (prepared.changesReceipt || prepared.clientIdentityInput != Identity{}
+                || prepared.clientIdentityGuard != Identity{}))) {
         return false;
     }
 
@@ -221,7 +244,7 @@ bool commit(PendingMutation& mutation) noexcept {
                             == prepared.expectedHostRegion
                      && record.recordRevision == prepared.expectedRecordRevision
                      && root.account.primarySoid == prepared.expectedPrimarySoid;
-    if (committed && prepared.kind == MutationKind::identity) {
+    if (committed && (prepared.kind == MutationKind::identity || prepared.kind == MutationKind::clientIdentity)) {
         committed = commit_identity(state, record, prepared);
     } else if (committed && prepared.kind == MutationKind::authoritative) {
         committed = transactions::commit_authoritative(state, record, prepared);

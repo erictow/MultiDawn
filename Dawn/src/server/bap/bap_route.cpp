@@ -11,6 +11,7 @@
 #include "../gameplay/group/group_host_sessions.h"
 #include "../gameplay/resolution/address_resolution_host.h"
 #include "internal.h"
+#include "local_identity_snapshot.h"
 #include "runtime.h"
 
 #if defined(DAWN_ACTIVITY_RETIREMENT_TESTS)
@@ -588,14 +589,14 @@ bool snapshot_hud_region(HudRegionSnapshot& output) noexcept {
 
 namespace {
 
-/** BAP shared lock is held through the State observation and the public value projection. */
-[[nodiscard]] bool snapshot_creator_activity_locked(
-    state::activity::BindingKey requested, CreatorActivitySnapshot& output) noexcept {
+/** Selects only the current committed creator while the BAP shared lock is held. */
+[[nodiscard]] const Session* current_creator_locked(
+    state::activity::BindingKey requested) noexcept {
     const HudRegionAnchor anchor = g_hudRegionAnchor;
     if (!static_cast<bool>(requested) || requested != anchor.ownerBinding
         || !static_cast<bool>(anchor.activity) || !static_cast<bool>(anchor.hostRegion)
         || anchor.hostRegion.activity != anchor.activity) {
-        return false;
+        return nullptr;
     }
     const Session* owner = nullptr;
     for (const Session& candidate : g_sessions) {
@@ -604,15 +605,25 @@ namespace {
             break;
         }
     }
-    state::activity::membership::RegionView view{};
     if (owner == nullptr || owner->id == 0 || !owner->authenticated
         || owner->matchmakingRetirementPending
         || owner->connectionKey.connectionId != owner->id
         || !lifecycle::activity_binding_is_current(*owner)
         || !lifecycle::owns_published_activity(owner->activity)
         || owner->activity.instance != anchor.activity
-        || !owner->activity.lineage.owns(anchor.activity)
-        || !state::activity::membership::snapshot_region_view(
+        || !owner->activity.lineage.owns(anchor.activity)) {
+        return nullptr;
+    }
+    return owner;
+}
+
+/** BAP shared lock is held through the State observation and the public value projection. */
+[[nodiscard]] bool snapshot_creator_activity_locked(
+    state::activity::BindingKey requested, CreatorActivitySnapshot& output) noexcept {
+    const HudRegionAnchor anchor = g_hudRegionAnchor;
+    const Session* owner = current_creator_locked(requested);
+    state::activity::membership::RegionView view{};
+    if (owner == nullptr || !state::activity::membership::snapshot_region_view(
             anchor.activity, anchor.hostRegion, view)
         || view.memberKey == 0 || view.memberKey != owner->activity.memberKey
         || (view.hasIdentity && !view.identityMatchesMemberKey)) {
@@ -653,6 +664,28 @@ bool snapshot_current_creator_activity(CreatorActivitySnapshot& output) noexcept
     output = {};
     AcquireSRWLockShared(&g_lock);
     const bool copied = snapshot_creator_activity_locked(g_hudRegionAnchor.ownerBinding, output);
+    ReleaseSRWLockShared(&g_lock);
+    return copied;
+}
+
+bool snapshot_creator_client_identity(state::activity::BindingKey requested,
+                                       LocalClientIdentitySnapshot& output) noexcept {
+    output = {};
+    AcquireSRWLockShared(&g_lock);
+    const HudRegionAnchor anchor = g_hudRegionAnchor;
+    const Session* owner = current_creator_locked(requested);
+    state::activity::membership::ClientIdentityPublication publication{};
+    const bool copied = owner != nullptr
+        && state::activity::membership::snapshot_client_identity(
+            anchor.activity, anchor.hostRegion, publication)
+        && publication.activity == anchor.activity && publication.hostRegion == anchor.hostRegion
+        && publication.receipt.revision != 0 && publication.receipt.raw.memberKey != 0
+        && publication.receipt.raw.memberKey == owner->activity.memberKey;
+    if (copied) {
+        output.binding = requested;
+        output.lineage = owner->activity.lineage;
+        output.publication = publication;
+    }
     ReleaseSRWLockShared(&g_lock);
     return copied;
 }

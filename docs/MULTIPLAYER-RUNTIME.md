@@ -39,6 +39,11 @@ The source now includes these native components:
   authenticated before pairing is published. Both PCs need the new connection
   protocol; pair codes retain their `MD2-` format. See
   [protected launcher control](PROTECTED-PAIRING-CONTROL.md).
+- Actual type-23 identity receipts remain separate from seeded and locally
+  reflected identities. A local-only creator capture validates the exact BAP
+  binding and current State region without exporting account fields to public
+  snapshots or companion messages. See
+  [identity provenance](CLIENT-IDENTITY-PROVENANCE.md).
 
 These changes have not been installed over the existing game. The approved
 Windows SDK is installed locally. The full DLL and native component tests now
@@ -329,8 +334,15 @@ It does not verify the game's friend roster or a shared activity.
 
 Native build instructions are in
 [`tools/build/PORTABLE-WINDOWS.md`](../tools/build/PORTABLE-WINDOWS.md).
-The native GitHub workflow builds and runs the eighteen component test projects;
+The native GitHub workflow builds and runs the nineteen component test projects;
 preparing the workflow does not mean a remote run has passed.
+
+For experimental commit `abc33b90`, the
+[native checks and interoperability workflow](https://github.com/erictow/MultiDawn/actions/runs/43288105681)
+passed all eighteen then-current component suites, the snapshot tests and both
+companion versions. The
+[launcher and package workflow](https://github.com/erictow/MultiDawn/actions/runs/43288105801)
+also passed. Later identity receipt changes require their own checks.
 
 For production commit `21c2a980`, the remote
 [native component workflow](https://github.com/erictow/MultiDawn/actions/runs/42975247251)

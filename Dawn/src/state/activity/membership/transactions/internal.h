@@ -50,6 +50,7 @@ inline bool equal(const RegionState& first, const RegionState& second) noexcept 
 /** @return True when both complete membership after-images match. */
 inline bool equal(const MembershipState& first, const MembershipState& second) noexcept {
     return equal(first.identity, second.identity) && equal(first.spawn, second.spawn)
+           && first.clientIdentityReceipt == second.clientIdentityReceipt
            && equal(first.teleport, second.teleport) && equal(first.region, second.region)
            && first.revision == second.revision
            && first.acknowledgedRevision == second.acknowledgedRevision
@@ -195,6 +196,17 @@ inline bool equal_authoritative(const MembershipState& first,
  */
 inline bool valid_identity(const Identity& identity, std::uint64_t memberKey) noexcept {
     return identity.memberKey == memberKey;
+}
+
+/** Only the two local-only fallback lanes may differ from an actual client publication. */
+inline bool valid_client_identity(const Identity& raw, const Identity& reflected,
+                                   std::uint64_t memberKey) noexcept {
+    return memberKey != 0 && raw.smallOpaque >= -1 && raw.smallOpaque <= 1022
+        && valid_identity(raw, memberKey) && valid_identity(reflected, memberKey)
+        && raw.smallOpaque == reflected.smallOpaque && raw.signedOpaque == reflected.signedOpaque
+        && raw.joinIdentity == reflected.joinIdentity && raw.secondaryOpaque == reflected.secondaryOpaque
+        && (raw.accountSoid == 0 || raw.accountSoid == reflected.accountSoid)
+        && (raw.opaqueSoid == 0 || raw.opaqueSoid == reflected.opaqueSoid);
 }
 
 /**
