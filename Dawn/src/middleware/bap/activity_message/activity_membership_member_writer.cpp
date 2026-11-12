@@ -2,6 +2,7 @@
 #include <limits>
 
 #include "replicate_membership.h"
+#include "membership_consumer_contract.h"
 
 namespace dawn::middleware::bap::activity_message::replicate_membership {
 namespace {
@@ -9,14 +10,13 @@ namespace {
 /** 8 elements, low byte first, encode a member or host key. */
 constexpr std::size_t kMemberKeyByteCount = 8;
 /** The membership table has 32 fixed member slots. */
-constexpr std::size_t kMemberCount = 32;
+constexpr std::size_t kMemberCount = consumer_contract::kMemberCount;
 /** Each absent member adds 3 clear presence bits. */
 constexpr std::uint8_t kAbsentMemberBitCount = 3;
-/** Member field 1 uses 10 bits with a bias of 1. */
 /**
- * Member field 1 is a skip test, not a value. The client drops the member when the stored value
- * read as unsigned is at or below 0x1FF, so the only usable wire value is the one that stores -1.
- * Wire 1 stores zero, and the member is dropped with nothing reported.
+ * Member field 1 uses 10 bits with bias 1. Native 4DF620 compares its stored unsigned
+ * value with 0x1FF to supply the connection's role argument. The actual skip byte
+ * tested by 4DF600 is separate. Preserve the client's published value verbatim.
  */
 constexpr std::uint32_t kField1Bias = 1;
 /** Member field 2 uses the signed 32-bit midpoint as its bias. */
@@ -27,8 +27,8 @@ constexpr std::uint8_t kLeaveReasonWire = 1;
 constexpr std::size_t kIdentityPresenceFieldCount = 15;
 /** The minimal nested player blob is 18 bytes, including one zero pad bit. */
 constexpr std::uint16_t kPlayerBlobByteCount = 18;
-/** Detail field zero opens the native membership-to-view synchronizer. */
-constexpr std::uint8_t kRemoteViewGate = 0x10;
+/** Native 4DD470 checks bit four before the world-peer connection attempt. */
+constexpr std::uint8_t kRemoteViewGate = consumer_contract::kConnectionGate;
 /** NetAddr is detail field 11 in the 16-field nested player-state block. */
 constexpr std::size_t kRemoteAddressField = 11;
 /** The non-local identity stores -1 in its signed 32-bit opaque field. */

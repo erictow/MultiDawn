@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations"><ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration></ItemGroup>
+  <PropertyGroup Label="Globals"><ProjectGuid>{4A02DE38-4961-4AB3-899F-F945D6740AD5}</ProjectGuid><WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration"><ConfigurationType>Application</ConfigurationType><PlatformToolset>v145</PlatformToolset><UseDebugLibraries>false</UseDebugLibraries></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup><OutDir>$(ProjectDir)..\..\build\unit\membership_consumer_contract\</OutDir><IntDir>$(OutDir)obj\</IntDir><TargetName>membership_consumer_contract_tests</TargetName></PropertyGroup>
+  <ItemDefinitionGroup><ClCompile><LanguageStandard>stdcpp20</LanguageStandard><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><ConformanceMode>true</ConformanceMode><ExceptionHandling>Sync</ExceptionHandling><RuntimeLibrary>MultiThreaded</RuntimeLibrary><Optimization>MaxSpeed</Optimization><AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions><PreprocessorDefinitions>NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile><Link><SubSystem>Console</SubSystem></Link></ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="membership_consumer_contract_tests.cpp" />
+    <ClCompile Include="..\src\middleware\bap\activity_message\activity_replicate_membership_encoder.cpp" />
+    <ClCompile Include="..\src\middleware\bap\activity_message\activity_membership_member_writer.cpp" />
+    <ClCompile Include="..\src\middleware\bap\activity_message\activity_membership_region_writer.cpp" />
+    <ClCompile Include="..\src\middleware\encoding\bit_writer.cpp" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

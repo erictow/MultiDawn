@@ -34,7 +34,7 @@ and the native view state was zero. An independent evaluation of the recovered
 application-level compatibility for that sampled world link, beyond reliable
 fragment acknowledgement. It does not establish remote Guardian replication.
 
-## ID4 packet-loss notices
+## ID4 remote discard notices
 
 The current message registry names ID4 `packets-discarded`. Its decoded native
 structure size is four bytes, but its wire body is only five unsigned bits.
@@ -46,7 +46,32 @@ counter. The value is an increment from zero through 31.
 29-bit message or its 32-bit form with three zero padding bits. Optional bounded
 diagnostics report increments without changing dispatch or reliable queues.
 The codec has 973 strict component checks. The preserved older message-ID logs
-do not contain the increments, so they cannot establish packet-loss values.
+do not contain the increments, so they cannot establish their values.
+
+The next isolated Tower run, PID 4868 at commit `58818c0e`, captured increments
+of 28 and 31. These notices alone do not establish packet loss. The same native
+channel separately reported the following interval counters:
+
+| Native log time (ms) | Read OK | Discard | Discard expected | Corrupt | Outgoing delivered | Outgoing lost |
+| --- | --- | --- | --- | --- | --- | --- |
+| 266796 | 10 | 0 | 797 | 0 | 803 | 0 |
+| 326796 | 0 | 0 | 910 | 0 | 910 | 0 |
+| 386812 | 0 | 0 | 899 | 0 | 899 | 0 |
+| 446812 | 0 | 0 | 898 | 0 | 898 | 0 |
+
+The native outgoing loss fraction was zero in all four intervals. After the
+reliable view exchange, Dawn's control peer sends acknowledgement packets with
+empty reliable queues and an absent filler body. The roughly fifteen expected
+discards per second are consistent with that steady state, but this is an
+inference: the exact native sender predicate connecting those counters to ID4
+has not been established. Bounded inspection reconfirmed ID4's receiving
+consumer and counter update without identifying that sender predicate.
+
+Keep the native `discard`, `discard-expected`, `corrupt`, and delivery-loss
+counters separate when diagnosing this connection. A count of 31 is a bounded
+increment, not 31 percent loss or evidence that the local network failed. These
+observations do not justify changing receive windows or suppressing ID4, and
+they do not establish that a second human's gameplay payload will be accepted.
 
 ## Remaining milestone 1 work
 
@@ -58,6 +83,13 @@ adds no detour and does not enable `unsafeDiagnostics`. The caller functions can
 then be read as code in the exact current process to locate the member-to-view
 synchronizer. A guessed authority-vtable offset is not a substitute for that
 consumer proof.
+
+The PID 4868 capture resolved that synchronizer to `1702580` and established
+its actual selection masks, local-machine exclusion, separate skip byte,
+connection gate and role/activation arguments. The
+[membership consumer contract](native-membership-consumer-86657.md) records
+those exact findings and the remaining schema/appearance gaps. Its independent
+writer checks preserve the current solo/control output and enable no humans.
 
 The world connection and its compatible view are foundations. The guest-local
 profile/activity projection, protected control transport, authorized remote
