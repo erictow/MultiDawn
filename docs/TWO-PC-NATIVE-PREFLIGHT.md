@@ -83,6 +83,14 @@ frozen camera outside the Tower wall even after fast travel. Camera input and
 Dawn's noclip and forward movement controls had no visible effect. Guest world
 entry and controlled Guardian spawn still need confirmation from its log.
 
+The left landing point near Bazaar showed a static view over the exterior
+wall, with mostly sky. Choosing Courtyard fast travel on the right switched
+the Director briefly to its orbit view. A Courtyard arrival notification then
+appeared and the camera showed a closer exterior wall view. Control remained
+unavailable in both locations. The guest's Tower map also displayed one online
+friend. The change in view and arrival notification establish travel feedback,
+while the spawn and control events remain to be checked.
+
 If the camera problem appears again, capture the affected game's log before
 relaunching. Compare the `spawn_hold_loader`, `spawn_gate`, `fly_in_complete`,
 `spawn_arrival`, and `tower_spawn_recovery` events with the host's normal
