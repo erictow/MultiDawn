@@ -68,6 +68,24 @@ static endpoint::RoutedIngressResult other_consumer(const host::AuthenticatedRou
     return endpoint::RoutedIngressResult::rejected;
 }
 
+// A test-owned forwarding binding exercises opaque data through the production
+// receive, route and send APIs. No production gameplay grant is installed here.
+static host::AuthenticatedRoute relayA{}, relayB{};
+static unsigned forwardedCalls{};
+static endpoint::RoutedSendResult forwardedResult = endpoint::RoutedSendResult::failed;
+static endpoint::RoutedIngressResult forwarding_consumer(const host::AuthenticatedRoute& route,
+    std::span<const std::byte> payload, std::uint64_t) noexcept {
+    if (route.purpose == host::RoutePurpose::control) return endpoint::RoutedIngressResult::unhandled;
+    ++forwardedCalls;
+    const host::AuthenticatedRoute* destination = nullptr;
+    if (route.handle == relayA.handle && route.peerAddress == relayA.peerAddress) destination = &relayB;
+    if (route.handle == relayB.handle && route.peerAddress == relayB.peerAddress) destination = &relayA;
+    if (destination == nullptr) return endpoint::RoutedIngressResult::rejected;
+    forwardedResult = endpoint::send_resolved_on_route(*destination, payload);
+    return forwardedResult == endpoint::RoutedSendResult::sent
+        ? endpoint::RoutedIngressResult::handled : endpoint::RoutedIngressResult::rejected;
+}
+
 namespace dawn::core::settings {
 const Settings& get() noexcept { return testSettings; }
 }
@@ -157,10 +175,7 @@ static void initialize_endpoint() {
     CHECK(epoch != 0 && epoch == endpoint::identity().machineId);
 }
 
-static wire::Response resolve(Owner owner) {
-    wire::NetAddr address{};
-    dawn::middleware::gameplay::descriptor::write_net_addr(
-        INADDR_LOOPBACK, testSettings.server.gameplay.port, address);
+static wire::Response resolve_address(Owner owner, const wire::NetAddr& address) {
     std::array<std::byte, wire::kRequestSize> request{};
     request[1] = std::byte{86};
     std::copy(address.begin(), address.end(), request.begin() + 2);
@@ -174,6 +189,13 @@ static wire::Response resolve(Owner owner) {
     CHECK(wire::parse_response(encoded, response));
     CHECK(response.port == endpoint::advertised().port);
     return response;
+}
+
+static wire::Response resolve(Owner owner) {
+    wire::NetAddr address{};
+    dawn::middleware::gameplay::descriptor::write_net_addr(
+        INADDR_LOOPBACK, testSettings.server.gameplay.port, address);
+    return resolve_address(owner, address);
 }
 
 static std::uint64_t counter(const packet::Iv& vector) {
@@ -514,12 +536,146 @@ static void exercise_explicit_routes() {
     host::reset();
 }
 
+static void exercise_human_routes() {
+    initialize_endpoint();
+    const Socket shared, guest;
+    const Owner ownerA{{4, {1}}, {1}}, ownerB{{5, {1}}, {1}};
+    const auto control = resolve(ownerA);
+    wire::NetAddr addressA{}, addressB{};
+    dawn::middleware::gameplay::descriptor::write_net_addr(0x7F000003U,
+        testSettings.server.gameplay.port, addressA);
+    dawn::middleware::gameplay::descriptor::write_net_addr(0x7F000004U,
+        testSettings.server.gameplay.port, addressB);
+    addressA[60] = std::byte{0xA7}; addressB[61] = std::byte{0xB8};
+    host::PeerAddressHandle peerA{}, peerB{};
+    CHECK(host::register_peer_address(ownerA, addressA, peerA));
+    CHECK(host::register_peer_address(ownerB, addressB, peerB));
+    const auto humanA = resolve_address(ownerA, addressA), humanB = resolve_address(ownerB, addressB);
+    const auto inA = counter(humanA.material.b), inB = counter(humanB.material.b);
+    const auto inControl = counter(control.material.b);
+    auto outA = counter(humanA.material.e), outB = counter(humanB.material.e);
+    auto outControl = counter(control.material.e);
+    const Bytes small{std::byte{0xC5}, std::byte{0}, std::byte{0xFF}, std::byte{0x80}};
+    const auto beforePeer = peerCalls, beforeDtls = dtlsCalls, beforeAssociation = associationCalls;
+    automaticReply.clear(); routedReply.clear(); routedCalls = forwardedCalls = 0;
+
+    // Valid human envelopes must not reach the embedded control implementation,
+    // including before a routed consumer exists.
+    auto opened = host::snapshot().opened;
+    send(shared, client_packet(humanA, inA + 1, small));
+    pump_until([&] { return host::snapshot().opened > opened; });
+    opened = host::snapshot().opened;
+    send(guest, client_packet(humanB, inB + 1, small));
+    pump_until([&] { return host::snapshot().opened > opened; });
+    CHECK(peerCalls == beforePeer && dtlsCalls == beforeDtls && associationCalls == beforeAssociation);
+    CHECK(endpoint::send_resolved_to(guest.local, small) == endpoint::RoutedSendResult::failed);
+    CHECK(!endpoint::send_to(guest.local, small));
+    quiet(shared); quiet(guest);
+
+    send(shared, client_packet(control, inControl + 1, small));
+    pump_until([&] { return peerCalls == beforePeer + 1; });
+    CHECK(endpoint::register_routed_consumer(&routed_consumer));
+    routedDecision = endpoint::RoutedIngressResult::handled; routedReply = small;
+    send(shared, client_packet(humanA, inA + 2, small));
+    pump_until([] { return routedCalls == 1; });
+    relayA = lastRouted;
+    CHECK(relayA.purpose == host::RoutePurpose::human && relayA.peerAddress == peerA);
+    verify_reply(shared, humanA, outA++, small);
+    send(guest, client_packet(humanB, inB + 2, small));
+    pump_until([] { return routedCalls == 2; });
+    relayB = lastRouted;
+    CHECK(relayB.purpose == host::RoutePurpose::human && relayB.peerAddress == peerB);
+    verify_reply(guest, humanB, outB++, small);
+
+    host::AuthenticatedRoute selected{};
+    CHECK(host::lookup_authenticated_route(ownerA, selected));
+    CHECK(selected.purpose == host::RoutePurpose::control && !static_cast<bool>(selected.peerAddress));
+    CHECK(!host::lookup_authenticated_route(ownerB, selected) && !static_cast<bool>(selected.handle));
+    CHECK(endpoint::send_resolved_to(shared.local, small) == endpoint::RoutedSendResult::sent);
+    verify_reply(shared, control, outControl++, small);
+
+    // Interleave full-size binary traffic in both directions with control traffic
+    // sharing A's physical socket. The forwarded bytes are never parsed as social
+    // strings or native control messages by this data path.
+    endpoint::unregister_routed_consumer(&routed_consumer);
+    CHECK(endpoint::register_routed_consumer(&forwarding_consumer));
+    Bytes payloadA(1500), payloadB(1500);
+    for (std::size_t index = 0; index < payloadA.size(); ++index) {
+        payloadA[index] = static_cast<std::byte>(index & 0xFFU);
+        payloadB[index] = static_cast<std::byte>((index * 7U + 3U) & 0xFFU);
+    }
+    const auto firstForwarded = client_packet(humanA, inA + 3, payloadA);
+    send(shared, firstForwarded);
+    pump_until([] { return forwardedCalls == 1; });
+    CHECK(forwardedResult == endpoint::RoutedSendResult::sent);
+    verify_reply(guest, humanB, outB++, payloadA);
+    automaticReply = small;
+    send(shared, client_packet(control, inControl + 2, small));
+    pump_until([&] { return peerCalls == beforePeer + 2; });
+    verify_reply(shared, control, outControl++, small);
+    CHECK(forwardedCalls == 1);
+    send(guest, client_packet(humanB, inB + 3, payloadB));
+    pump_until([] { return forwardedCalls == 2; });
+    CHECK(forwardedResult == endpoint::RoutedSendResult::sent);
+    verify_reply(shared, humanA, outA++, payloadB);
+
+    auto forged = client_packet(humanA, inA + 4, payloadA);
+    forged.back() ^= std::byte{1};
+    auto rejected = host::snapshot().rejected;
+    send(shared, forged);
+    pump_until([&] { return host::snapshot().rejected > rejected; });
+    auto replayed = host::snapshot().replayed;
+    send(shared, firstForwarded);
+    pump_until([&] { return host::snapshot().replayed > replayed; });
+    CHECK(forwardedCalls == 2);
+    const Bytes oversized(1501, std::byte{0x5A});
+    rejected = host::snapshot().rejected;
+    send(shared, client_packet(humanA, inA + 4, oversized));
+    pump_until([&] { return host::snapshot().rejected > rejected; });
+    CHECK(forwardedCalls == 2);
+    send(shared, client_packet(humanA, inA + 4, payloadA));
+    pump_until([] { return forwardedCalls == 3; });
+    verify_reply(guest, humanB, outB++, payloadA);
+
+    // Unhandled is permitted for the control route only.
+    endpoint::unregister_routed_consumer(&forwarding_consumer);
+    CHECK(endpoint::register_routed_consumer(&routed_consumer));
+    routedDecision = endpoint::RoutedIngressResult::unhandled; routedReply.clear();
+    send(shared, client_packet(humanA, inA + 5, small));
+    pump_until([] { return routedCalls == 3; });
+    CHECK(peerCalls == beforePeer + 2 && dtlsCalls == beforeDtls && associationCalls == beforeAssociation);
+    quiet(shared); quiet(guest);
+
+    CHECK(host::revoke_peer_address(peerA));
+    CHECK(endpoint::send_resolved_on_route(relayA, small) == endpoint::RoutedSendResult::failed);
+    CHECK(endpoint::send_resolved_on_route(relayB, small) == endpoint::RoutedSendResult::sent);
+    verify_reply(guest, humanB, outB++, small);
+    CHECK(endpoint::send_resolved_to(shared.local, small) == endpoint::RoutedSendResult::sent);
+    verify_reply(shared, control, outControl++, small);
+    host::PeerAddressHandle replacement{};
+    CHECK(host::register_peer_address(ownerA, addressA, replacement));
+    CHECK(replacement.owner == peerA.owner && replacement.generation != peerA.generation);
+    CHECK(!host::revoke_peer_address(peerA));
+    const auto newHumanA = resolve_address(ownerA, addressA);
+    routedDecision = endpoint::RoutedIngressResult::handled; routedReply = small;
+    send(shared, client_packet(newHumanA, counter(newHumanA.material.b) + 1, small));
+    pump_until([] { return routedCalls == 4; });
+    CHECK(lastRouted.peerAddress == replacement && lastRouted.handle.generation != relayA.handle.generation);
+    verify_reply(shared, newHumanA, counter(newHumanA.material.e), small);
+    CHECK(endpoint::send_resolved_on_route(relayA, small) == endpoint::RoutedSendResult::failed);
+    CHECK(dtlsCalls == beforeDtls && associationCalls == beforeAssociation);
+    CHECK(host::revoke_peer_address(replacement) && host::revoke_peer_address(peerB));
+    automaticReply.clear(); routedReply.clear(); relayA = {}; relayB = {};
+    endpoint::shutdown(); host::reset();
+}
+
 int main() {
     CHECK(SetEnvironmentVariableW(L"DAWN_NATIVE_ADDRESS_RESOLUTION", L"1") != 0);
     WSADATA data{};
     CHECK(WSAStartup(MAKEWORD(2, 2), &data) == 0);
     exercise_endpoint();
     exercise_explicit_routes();
+    exercise_human_routes();
     host::reset();
     CHECK(WSACleanup() == 0);
     std::printf("endpoint_resolution_tests: PASS %u checks (real loopback UDP, production routing/crypto)\n", checks);

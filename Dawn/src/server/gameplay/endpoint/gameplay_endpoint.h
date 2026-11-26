@@ -36,6 +36,7 @@ using RoutedConsumer = RoutedIngressResult (*)(const resolution::AuthenticatedRo
  * nothing: the callback must validate its own current peer/route authorization. It runs
  * outside endpoint/resolver locks; payload storage is borrowed until it returns. Callers
  * own module quiescence, and must not unload callback code while service is in flight.
+ * Unhandled registered human routes are discarded and cannot enter the control peer.
  */
 [[nodiscard]] bool register_routed_consumer(RoutedConsumer consumer) noexcept;
 /**

@@ -24,7 +24,14 @@ namespace random = middleware::crypto::random;
 namespace encoding = middleware::encoding;
 
 constexpr std::size_t kCapacity = 16;
+// Use the context store's fixed capacity; registration itself creates no crypto context.
+constexpr std::size_t kPeerAddressCapacity = kCapacity;
 constexpr std::uint64_t kUnboundReplacementAgeMs = 30'000;
+
+struct PeerAddress {
+    PeerAddressHandle handle{};
+    codec::NetAddr address{};
+};
 
 struct Context {
     state::activity::AuthenticationKey owner{};
@@ -35,14 +42,18 @@ struct Context {
     std::uint64_t nextSend{}, heard{}, createdAt{}, generation{};
     std::uint32_t tag{};
     bool occupied{}, bound{}, sendExhausted{};
+    RoutePurpose purpose{RoutePurpose::control};
+    PeerAddressHandle peerAddress{};
 };
 
 SRWLOCK g_lock = SRWLOCK_INIT;
 std::array<Context, kCapacity> g_contexts{};
+std::array<PeerAddress, kPeerAddressCapacity> g_peerAddresses{};
 Statistics g_statistics{};
 std::uint64_t g_heardClock{};
 // Neither reset nor owner release can make an old handle identify a new context.
 std::uint64_t g_routeGeneration{};
+std::uint64_t g_peerAddressGeneration{};
 
 class Lock final {
 public:
@@ -72,6 +83,52 @@ private:
     std::uint32_t result = 0;
     for (const auto byte : bytes) { result = (result << 8U) | byte; }
     return result;
+}
+
+[[nodiscard]] bool embedded_settings(codec::NetAddr& control) noexcept {
+    const auto& settings = core::settings::get().server.gameplay;
+    if (settings.topology != core::settings::server::gameplay::Topology::embedded
+        || settings.port == 0 || ipv4(settings.advertisedAddress) == 0
+        || ipv4(settings.transportAddress) == 0) { return false; }
+    middleware::gameplay::descriptor::write_net_addr(ipv4(settings.advertisedAddress), settings.port, control);
+    return true;
+}
+
+[[nodiscard]] bool same_address_body(const codec::NetAddr& a, const codec::NetAddr& b) noexcept {
+    return std::equal(a.begin(), a.begin() + 41, b.begin());
+}
+
+/** Validate only the recovered direct-method body, preserving the opaque tail verbatim. */
+[[nodiscard]] bool canonical_peer_address(std::span<const std::byte> input, codec::NetAddr& output) noexcept {
+    if (input.size() != output.size() || input.back() != std::byte{0}) { return false; }
+    const auto address = encoding::read_u32_be(std::span<const std::byte, 4>(input.data(), 4));
+    const auto firstOctet = address >> 24U;
+    const auto port = static_cast<std::uint16_t>(std::to_integer<unsigned>(input[4])
+        | (std::to_integer<unsigned>(input[5]) << 8U));
+    if (firstOctet == 0 || firstOctet >= 224 || port == 0 || (port & 1U) != 0) { return false; }
+    codec::NetAddr canonical{};
+    middleware::gameplay::descriptor::write_net_addr(address, port, canonical);
+    if (!std::equal(canonical.begin(), canonical.begin() + 41, input.begin())) { return false; }
+    std::copy(input.begin(), input.end(), output.begin());
+    return true;
+}
+
+[[nodiscard]] const PeerAddress* registered_address(PeerAddressHandle handle) noexcept {
+    if (!static_cast<bool>(handle)) { return nullptr; }
+    for (const auto& entry : g_peerAddresses) {
+        if (entry.handle == handle) { return &entry; }
+    }
+    return nullptr;
+}
+
+[[nodiscard]] const PeerAddress* registered_address(state::activity::AuthenticationKey owner,
+                                                    const codec::NetAddr& address) noexcept {
+    for (const auto& entry : g_peerAddresses) {
+        if (static_cast<bool>(entry.handle) && entry.handle.owner == owner && entry.address == address) {
+            return &entry;
+        }
+    }
+    return nullptr;
 }
 
 [[nodiscard]] std::uint64_t counter(const packet::Iv& bytes) noexcept {
@@ -117,7 +174,8 @@ private:
 [[nodiscard]] Context* selected_for_endpoint(const state::gameplay::Endpoint& endpoint) noexcept {
     Context* selected = nullptr;
     for (auto& context : g_contexts) {
-        if (context.occupied && context.bound && same_endpoint(context.peer, endpoint)
+        if (context.occupied && context.bound && context.purpose == RoutePurpose::control
+            && same_endpoint(context.peer, endpoint)
             && (selected == nullptr || context.heard > selected->heard)) { selected = &context; }
     }
     return selected;
@@ -126,7 +184,7 @@ private:
 [[nodiscard]] Context* selected_for_owner(state::activity::AuthenticationKey owner) noexcept {
     Context* selected = nullptr;
     for (auto& context : g_contexts) {
-        if (context.occupied && context.bound && context.owner == owner
+        if (context.occupied && context.bound && context.purpose == RoutePurpose::control && context.owner == owner
             && (selected == nullptr || context.heard > selected->heard)) { selected = &context; }
     }
     return selected != nullptr && selected_for_endpoint(selected->peer) == selected ? selected : nullptr;
@@ -139,7 +197,9 @@ private:
     }
     for (auto& context : g_contexts) {
         if (context.occupied && context.bound && context.owner == route.handle.owner
-            && context.generation == route.handle.generation && same_endpoint(context.peer, route.source)) {
+            && context.generation == route.handle.generation && same_endpoint(context.peer, route.source)
+            && context.purpose == route.purpose && context.peerAddress == route.peerAddress
+            && (context.purpose == RoutePurpose::control || registered_address(context.peerAddress) != nullptr)) {
             return &context;
         }
     }
@@ -173,6 +233,45 @@ bool enabled() noexcept {
     return value;
 }
 
+bool register_peer_address(state::activity::AuthenticationKey owner,
+                             std::span<const std::byte> exactAddress, PeerAddressHandle& output) noexcept {
+    codec::NetAddr address{}, control{};
+    // Preserve an input address that overlaps the caller's output-handle storage.
+    const bool canonical = canonical_peer_address(exactAddress, address);
+    output = {};
+    if (!enabled() || !static_cast<bool>(owner) || !embedded_settings(control)
+        || !canonical || same_address_body(address, control)) { return false; }
+    const Lock lock;
+    PeerAddress* available = nullptr;
+    for (auto& entry : g_peerAddresses) {
+        if (!static_cast<bool>(entry.handle)) {
+            if (available == nullptr) { available = &entry; }
+        } else if (same_address_body(entry.address, address)) {
+            // Even another opaque tail/owner cannot reuse this native address body.
+            return false;
+        }
+    }
+    if (available == nullptr || g_peerAddressGeneration == (std::numeric_limits<std::uint64_t>::max)()) { return false; }
+    available->address = address;
+    available->handle = {owner, ++g_peerAddressGeneration};
+    output = available->handle;
+    return true;
+}
+
+bool revoke_peer_address(PeerAddressHandle registered) noexcept {
+    if (!enabled() || !static_cast<bool>(registered)) { return false; }
+    const Lock lock;
+    for (auto& entry : g_peerAddresses) {
+        if (entry.handle != registered) { continue; }
+        for (auto& context : g_contexts) {
+            if (context.occupied && context.peerAddress == registered) { SecureZeroMemory(&context, sizeof context); }
+        }
+        SecureZeroMemory(&entry, sizeof entry);
+        return true;
+    }
+    return false;
+}
+
 bool resolve_address(state::activity::AuthenticationKey owner,
                        std::span<const std::byte> request,
                        std::span<std::byte> response, std::size_t& written) noexcept {
@@ -181,15 +280,25 @@ bool resolve_address(state::activity::AuthenticationKey owner,
     codec::Request parsed{};
     if (!codec::parse_request(request, parsed) || parsed.capability != 16 || parsed.kind != 1
         || parsed.address.back() != std::byte{0}) { return false; }
-    const auto& settings = core::settings::get().server.gameplay;
-    if (settings.topology != core::settings::server::gameplay::Topology::embedded
-        || settings.port == 0 || ipv4(settings.advertisedAddress) == 0
-        || ipv4(settings.transportAddress) == 0) { return false; }
     codec::NetAddr expected{};
-    middleware::gameplay::descriptor::write_net_addr(ipv4(settings.advertisedAddress), settings.port, expected);
-    // Only the documented 41-byte direct address body participates. Preserve all
-    // 86 request bytes in the reply so native self/address matching remains exact.
-    if (!std::equal(expected.begin(), expected.begin() + 41, parsed.address.begin())) { return false; }
+    if (!embedded_settings(expected)) { return false; }
+    const auto& settings = core::settings::get().server.gameplay;
+    // The control address matches its documented 41-byte body; a registered human
+    // address requires all 86 bytes below. Both replies preserve the exact request.
+    const bool control = same_address_body(expected, parsed.address);
+    PeerAddressHandle peerAddress{};
+    {
+        const Lock lock;
+        if (control) {
+            for (const auto& entry : g_peerAddresses) {
+                if (static_cast<bool>(entry.handle) && same_address_body(entry.address, expected)) { return false; }
+            }
+        } else {
+            const auto* registered = registered_address(owner, parsed.address);
+            if (registered == nullptr) { return false; }
+            peerAddress = registered->handle;
+        }
+    }
 
     Context candidate{};
     const Wipe wipeCandidate(&candidate, sizeof candidate);
@@ -213,11 +322,17 @@ bool resolve_address(state::activity::AuthenticationKey owner,
     for (std::size_t i = 0; i < 4; ++i) { body.ip[i] = static_cast<std::byte>(settings.transportAddress[i]); }
     candidate.owner = owner;
     candidate.requested = parsed.address;
+    candidate.purpose = control ? RoutePurpose::control : RoutePurpose::human;
+    candidate.peerAddress = peerAddress;
     candidate.replay.floor = counter(body.material.b) + 1;
     candidate.nextSend = counter(body.material.e);
     candidate.createdAt = GetTickCount64();
 
     const Lock lock;
+    if (!control) {
+        const auto* registered = registered_address(peerAddress);
+        if (registered == nullptr || registered->address != parsed.address) { return false; }
+    }
     Context* slot = nullptr;
     for (auto& context : g_contexts) {
         if (!context.occupied) { slot = &context; break; }
@@ -301,7 +416,7 @@ PacketResult unwrap(const state::gameplay::Endpoint& source,
     context->heard = ++g_heardClock;
     std::copy_n(staged.begin(), size, plaintext.begin());
     written = size;
-    matched = {{context->owner, context->generation}, context->peer};
+    matched = {{context->owner, context->generation}, context->peer, context->purpose, context->peerAddress};
     ++g_statistics.opened;
     if (first) {
         report(core::log::Level::info,
@@ -318,7 +433,7 @@ PacketResult wrap(const state::gameplay::Endpoint& destination,
     if (!enabled()) { return PacketResult::notRouted; }
     const Lock lock;
     Context* selected = selected_for_endpoint(destination);
-    if (selected == nullptr) { return PacketResult::notRouted; }
+    if (selected == nullptr) { return bound_source(destination) ? PacketResult::rejected : PacketResult::notRouted; }
     return seal_locked(*selected, plaintext, datagram, written);
 }
 
@@ -346,7 +461,9 @@ bool lookup_authenticated_route(state::activity::AuthenticationKey owner,
 
 bool validate_authenticated_route(const AuthenticatedRoute& observed) noexcept {
     if (!enabled() || !static_cast<bool>(observed.handle)
-        || observed.source.address == 0 || observed.source.port == 0) { return false; }
+        || observed.source.address == 0 || observed.source.port == 0
+        || observed.purpose != RoutePurpose::control || static_cast<bool>(observed.peerAddress)
+        || observed.peerAddress != PeerAddressHandle{}) { return false; }
     const Lock lock;
     const Context* selected = selected_for_owner(observed.handle.owner);
     return selected != nullptr && selected->generation == observed.handle.generation
@@ -371,11 +488,15 @@ void release_owner(state::activity::AuthenticationKey owner) noexcept {
     for (auto& context : g_contexts) {
         if (context.occupied && context.owner == owner) { SecureZeroMemory(&context, sizeof context); }
     }
+    for (auto& entry : g_peerAddresses) {
+        if (entry.handle.owner == owner) { SecureZeroMemory(&entry, sizeof entry); }
+    }
 }
 
 void reset() noexcept {
     const Lock lock;
     SecureZeroMemory(g_contexts.data(), sizeof g_contexts);
+    SecureZeroMemory(g_peerAddresses.data(), sizeof g_peerAddresses);
     g_statistics = {};
     g_heardClock = 0;
 }

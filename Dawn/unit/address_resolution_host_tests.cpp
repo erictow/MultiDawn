@@ -100,8 +100,7 @@ static std::vector<std::byte> payload(std::size_t size = 19) {
     return result;
 }
 
-static wire::Response resolve(Owner who) {
-    const auto input = request();
+static wire::Response resolve(Owner who, const Request& input) {
     std::array<std::byte, wire::kIpv4ResponseSize> output{};
     std::size_t written = 999;
     CHECK(host::resolve_address(who, input, output, written));
@@ -124,6 +123,23 @@ static wire::Response resolve(Owner who) {
         CHECK(decrypted == zero);
     }
     return response;
+}
+
+static wire::Response resolve(Owner who) {
+    return resolve(who, request());
+}
+
+static wire::NetAddr peer_address(std::uint32_t address = 0x0A0C0001, std::uint16_t port = 30976) {
+    wire::NetAddr result{};
+    dawn::middleware::gameplay::descriptor::write_net_addr(address, port, result);
+    for (std::size_t index = 41; index < 85; ++index) { result[index] = static_cast<std::byte>(index + 7U); }
+    return result;
+}
+
+static Request request(const wire::NetAddr& address) {
+    auto result = request();
+    std::copy(address.begin(), address.end(), result.begin() + 2);
+    return result;
 }
 
 static std::vector<std::byte> client_packet(const wire::Response& response,
@@ -368,10 +384,12 @@ static void owner_lifecycle_and_capacity() {
 }
 
 static void unavailable_route(Owner who) {
-    host::AuthenticatedRoute output{{owner(999), 999}, {0x01020304, 12345}};
+    host::AuthenticatedRoute output{{owner(999), 999}, {0x01020304, 12345},
+        host::RoutePurpose::human, {owner(999), 999}};
     CHECK(!host::lookup_authenticated_route(who, output));
     CHECK(!static_cast<bool>(output.handle) && output.handle.owner == Owner{}
-          && output.handle.generation == 0 && output.source.address == 0 && output.source.port == 0);
+          && output.handle.generation == 0 && output.source.address == 0 && output.source.port == 0
+          && output.purpose == host::RoutePurpose::control && output.peerAddress == host::PeerAddressHandle{});
 }
 
 static host::AuthenticatedRoute observed_route(Owner who, Endpoint source) {
@@ -379,6 +397,7 @@ static host::AuthenticatedRoute observed_route(Owner who, Endpoint source) {
     CHECK(host::lookup_authenticated_route(who, output));
     CHECK(output.handle.owner == who && output.handle.generation != 0);
     CHECK(output.source.address == source.address && output.source.port == source.port);
+    CHECK(output.purpose == host::RoutePurpose::control && output.peerAddress == host::PeerAddressHandle{});
     CHECK(host::validate_authenticated_route(output));
     return output;
 }
@@ -386,19 +405,22 @@ static host::AuthenticatedRoute observed_route(Owner who, Endpoint source) {
 static void absent_metadata(const host::AuthenticatedRoute& matched) {
     CHECK(matched.handle.owner == Owner{} && matched.handle.generation == 0);
     CHECK(matched.source.address == 0 && matched.source.port == 0);
+    CHECK(matched.purpose == host::RoutePurpose::control && matched.peerAddress == host::PeerAddressHandle{});
 }
 
 static host::AuthenticatedRoute accepted_with_metadata(
     Endpoint source, const std::vector<std::byte>& encoded,
-    std::span<const std::byte> expected, Owner who) {
+    std::span<const std::byte> expected, Owner who,
+    host::RoutePurpose purpose = host::RoutePurpose::control, host::PeerAddressHandle registered = {}) {
     std::vector<std::byte> output(packet::kMaximumPayload, std::byte{0xA5});
     std::size_t written = 999;
-    host::AuthenticatedRoute matched{{owner(999), 999}, {1, 2}};
+    host::AuthenticatedRoute matched{{owner(999), 999}, {1, 2}, host::RoutePurpose::human, {owner(999), 999}};
     CHECK(host::unwrap(source, encoded, output, written, matched) == host::PacketResult::complete);
     CHECK(written == expected.size() && std::equal(expected.begin(), expected.end(), output.begin()));
     CHECK(std::all_of(output.begin() + written, output.end(), [](auto b) { return b == std::byte{0xA5}; }));
     CHECK(matched.handle.owner == who && matched.handle.generation != 0);
     CHECK(matched.source.address == source.address && matched.source.port == source.port);
+    CHECK(matched.purpose == purpose && matched.peerAddress == registered);
     return matched;
 }
 
@@ -409,7 +431,7 @@ static void rejected_with_metadata(
     std::vector<std::byte> output(capacity, std::byte{0xA5});
     const auto before = output;
     std::size_t written = 999;
-    host::AuthenticatedRoute matched{{owner(999), 999}, {1, 2}};
+    host::AuthenticatedRoute matched{{owner(999), 999}, {1, 2}, host::RoutePurpose::human, {owner(999), 999}};
     CHECK(host::unwrap(source, encoded, output, written, matched) == expected);
     CHECK(written == 0 && output == before);
     absent_metadata(matched);
@@ -734,6 +756,209 @@ static void authenticated_route_observation() {
     CHECK(!host::validate_authenticated_route(afterRelease));
 }
 
+static void rejects_registration(Owner who, std::span<const std::byte> address) {
+    host::PeerAddressHandle output{owner(999), 999};
+    const auto before = host::snapshot();
+    CHECK(!host::register_peer_address(who, address, output));
+    CHECK(output == host::PeerAddressHandle{});
+    CHECK(host::snapshot().live == before.live && host::snapshot().created == before.created);
+}
+
+static host::PeerAddressHandle register_address(Owner who, const wire::NetAddr& address) {
+    host::PeerAddressHandle result{};
+    CHECK(host::register_peer_address(who, address, result));
+    CHECK(static_cast<bool>(result) && result.owner == who && result.generation != 0);
+    return result;
+}
+
+static void peer_registration_policy() {
+    configure();
+    const auto a = owner(200), b = owner(201);
+    const auto address = peer_address();
+    rejects_registration({}, address);
+    rejects_registration(owner(200, 0), address);
+    rejects_registration(owner(200, 1, 0), address);
+    for (std::size_t length = 0; length < address.size(); ++length) {
+        rejects_registration(a, std::span(address).first(length));
+    }
+    std::vector<std::byte> oversized(address.begin(), address.end()); oversized.push_back(std::byte{0});
+    rejects_registration(a, oversized);
+    for (const auto method : {1U, 5U, 6U, 7U, 8U, 255U}) {
+        auto invalid = address; invalid.back() = static_cast<std::byte>(method);
+        rejects_registration(a, invalid);
+    }
+    for (std::size_t index = 0; index < 41; ++index) {
+        auto invalid = address; invalid[index] ^= std::byte{1};
+        rejects_registration(a, invalid);
+    }
+    for (const auto invalid : {0x00000000U, 0x00000001U, 0xE0000001U, 0xFFFFFFFFU}) {
+        rejects_registration(a, peer_address(invalid));
+    }
+    rejects_registration(a, peer_address(0x0A0C0001, 0));
+    rejects_registration(a, peer_address(0x0A0C0001, 30977));
+    rejects_registration(a, peer_address(0xC0A8017C)); // Cannot reinterpret the control's opaque tail.
+    using Topology = dawn::core::settings::server::gameplay::Topology;
+    for (const auto topology : {Topology::disabled, Topology::external}) {
+        testSettings.server.gameplay.topology = topology;
+        rejects_registration(a, address);
+    }
+    testSettings.server.gameplay.topology = Topology::embedded;
+    const auto registered = register_address(a, address);
+    rejects_registration(a, address);
+    rejects_registration(b, address);
+    auto sameBody = address; sameBody[72] ^= std::byte{1};
+    rejects_registration(a, sameBody);
+    rejects_registration(b, sameBody); // No ambiguous native body, even with another opaque tail.
+    struct AliasedRegistration { host::PeerAddressHandle handle{}; std::array<std::byte, 86> tail{}; } aliased;
+    auto aliasedBytes = std::as_writable_bytes(std::span(&aliased, 1)).first<86>();
+    const auto aliasAddress = peer_address(0x0A0C00FE);
+    std::copy(aliasAddress.begin(), aliasAddress.end(), aliasedBytes.begin());
+    CHECK(host::register_peer_address(a, aliasedBytes, aliased.handle));
+    CHECK(aliased.handle.owner == a && static_cast<bool>(aliased.handle));
+    CHECK(host::revoke_peer_address(aliased.handle));
+    CHECK(host::snapshot().live == 0); // An address permission creates no crypto context.
+    rejects_resolution(b, request(address));
+    rejects_resolution(owner(200, 2), request(address));
+    rejects_resolution(owner(200, 1, 2), request(address));
+    for (std::size_t index = 0; index < address.size(); ++index) {
+        auto mismatch = address; mismatch[index] ^= std::byte{1};
+        rejects_resolution(a, request(mismatch));
+    }
+    static_cast<void>(resolve(a, request(address)));
+    auto wrong = registered; wrong.owner = b;
+    CHECK(!host::revoke_peer_address(wrong));
+    wrong = registered; ++wrong.generation;
+    CHECK(!host::revoke_peer_address(wrong));
+    CHECK(!host::revoke_peer_address({}));
+    CHECK(host::revoke_peer_address(registered) && host::snapshot().live == 0);
+    CHECK(!host::revoke_peer_address(registered));
+    rejects_resolution(a, request(address));
+
+    // Permission and context slots remain bounded independently; neither evicts live state.
+    std::array<host::PeerAddressHandle, 16> registeredSlots{};
+    for (std::size_t index = 0; index < registeredSlots.size(); ++index) {
+        registeredSlots[index] = register_address(a, peer_address(0x0A0D0001U + static_cast<std::uint32_t>(index)));
+    }
+    rejects_registration(b, peer_address(0x0A0E0001));
+    host::release_owner(owner(200, 2));
+    rejects_registration(b, peer_address(0x0A0E0001));
+    CHECK(host::revoke_peer_address(registeredSlots[7]));
+    const auto reused = register_address(b, peer_address(0x0A0E0001));
+    CHECK(reused.generation > registeredSlots.back().generation);
+    CHECK(!host::revoke_peer_address(registeredSlots[7]));
+    host::release_owner(a);
+    CHECK(host::revoke_peer_address(reused));
+    const auto beforeReset = register_address(owner(0), address); // Connection ID zero remains valid.
+    host::reset();
+    CHECK(!host::revoke_peer_address(beforeReset));
+    const auto afterReset = register_address(owner(0), address);
+    CHECK(afterReset.generation > beforeReset.generation);
+    CHECK(host::revoke_peer_address(afterReset));
+
+    // If configuration moves onto an already registered body, refuse ambiguous resolution.
+    const auto collision = register_address(a, address);
+    testSettings.server.gameplay.advertisedAddress = {10, 12, 0, 1};
+    rejects_resolution(a, request(address));
+    CHECK(host::revoke_peer_address(collision));
+    static_cast<void>(resolve(a, request(address))); // The ordinary configured control is now unambiguous.
+}
+
+static void human_context_isolation_and_retirement() {
+    configure();
+    const auto a = owner(220, 3, 4), b = owner(221, 3, 4);
+    const auto addressA = peer_address(), addressB = peer_address(0x0A0C0002);
+    const auto registeredA = register_address(a, addressA), registeredB = register_address(a, addressB);
+    const auto control = resolve(a), humanA = resolve(a, request(addressA));
+    const auto humanA2 = resolve(a, request(addressA)), humanB = resolve(a, request(addressB));
+    const Endpoint source{0x7F000001, 45700};
+    const auto plain = payload(317);
+    const auto routeControl = accepted_with_metadata(source,
+        client_packet(control, counter(control.material.b) + 1, plain), plain, a);
+    const auto routeA = accepted_with_metadata(source,
+        client_packet(humanA, counter(humanA.material.b) + 1, plain), plain, a,
+        host::RoutePurpose::human, registeredA);
+    const auto routeA2 = accepted_with_metadata(source,
+        client_packet(humanA2, counter(humanA2.material.b) + 1, plain), plain, a,
+        host::RoutePurpose::human, registeredA);
+    const auto routeB = accepted_with_metadata(source,
+        client_packet(humanB, counter(humanB.material.b) + 1, plain), plain, a,
+        host::RoutePurpose::human, registeredB);
+    CHECK(host::snapshot().live == 4);
+    CHECK(host::validate_authenticated_route(routeControl));
+    CHECK(!host::validate_authenticated_route(routeA) && !host::validate_authenticated_route(routeB));
+    const auto observed = observed_route(a, source);
+    CHECK(observed.handle == routeControl.handle);
+    const auto controlBytes = wrapped(source, control, counter(control.material.e), plain);
+    rejects_other_context(humanB, controlBytes);
+    const auto humanBytes = wrapped_explicit(routeA, humanA, counter(humanA.material.e), plain);
+    rejects_other_context(control, humanBytes);
+    static_cast<void>(wrapped_explicit(routeA2, humanA2, counter(humanA2.material.e), plain));
+    static_cast<void>(wrapped_explicit(routeB, humanB, counter(humanB.material.e), plain));
+    for (unsigned variant = 0; variant < 7; ++variant) {
+        auto forged = routeA;
+        if (variant == 0) forged.purpose = host::RoutePurpose::control;
+        if (variant == 1) forged.purpose = static_cast<host::RoutePurpose>(255);
+        if (variant == 2) forged.peerAddress = {};
+        if (variant == 3) forged.peerAddress = registeredB;
+        if (variant == 4) forged.peerAddress.owner = b;
+        if (variant == 5) ++forged.peerAddress.generation;
+        if (variant == 6) ++forged.peerAddress.owner.generation.value;
+        rejected_explicit(forged);
+    }
+    auto forgedControl = routeControl; forgedControl.peerAddress = registeredA;
+    rejected_explicit(forgedControl);
+    CHECK(!host::validate_authenticated_route(forgedControl));
+    forgedControl = routeControl; forgedControl.purpose = host::RoutePurpose::human;
+    rejected_explicit(forgedControl);
+    CHECK(!host::validate_authenticated_route(forgedControl));
+    static_cast<void>(wrapped_explicit(routeA, humanA, counter(humanA.material.e) + 1, plain));
+    CHECK(!host::revoke_peer_address({b, registeredA.generation}));
+    CHECK(host::snapshot().live == 4);
+    CHECK(host::revoke_peer_address(registeredA) && host::snapshot().live == 2);
+    rejected_explicit(routeA); rejected_explicit(routeA2);
+    rejected_with_metadata(source, client_packet(humanA, counter(humanA.material.b) + 2, plain));
+    rejects_resolution(a, request(addressA));
+    CHECK(host::validate_authenticated_route(routeControl));
+    static_cast<void>(wrapped(source, control, counter(control.material.e) + 1, plain));
+    static_cast<void>(wrapped_explicit(routeB, humanB, counter(humanB.material.e) + 1, plain));
+
+    const auto reused = register_address(a, addressA);
+    CHECK(reused.generation > registeredB.generation);
+    const auto newResponse = resolve(a, request(addressA));
+    const auto newRoute = accepted_with_metadata(source,
+        client_packet(newResponse, counter(newResponse.material.b) + 1, plain), plain, a,
+        host::RoutePurpose::human, reused);
+    CHECK(newRoute.handle.generation > routeB.handle.generation);
+    CHECK(!host::revoke_peer_address(registeredA));
+    rejected_explicit(routeA);
+    static_cast<void>(wrapped_explicit(newRoute, newResponse, counter(newResponse.material.e), plain));
+    CHECK(host::release_route(newRoute.handle)); // Does not revoke the registered address.
+    rejected_explicit(newRoute);
+    static_cast<void>(resolve(a, request(addressA)));
+    host::release_owner(a);
+    rejected_explicit(routeControl); rejected_explicit(routeB);
+    CHECK(!host::revoke_peer_address(reused) && !host::revoke_peer_address(registeredB));
+    rejects_resolution(a, request(addressA));
+    rejects_resolution(a, request(addressB));
+
+    // A human-only source cannot reach legacy wrapping or owner observation.
+    const auto onlyHuman = register_address(b, addressB);
+    const auto response = resolve(b, request(addressB));
+    const auto route = accepted_with_metadata(source,
+        client_packet(response, counter(response.material.b) + 1, plain), plain, b,
+        host::RoutePurpose::human, onlyHuman);
+    unavailable_route(b);
+    std::array<std::byte, packet::kMaximumDatagram> bytes{}; bytes.fill(std::byte{0xA5});
+    const auto before = bytes; std::size_t written = 999;
+    CHECK(host::wrap(source, plain, bytes, written) == host::PacketResult::rejected);
+    CHECK(written == 0 && bytes == before);
+    static_cast<void>(wrapped_explicit(route, response, counter(response.material.e), plain));
+    host::reset();
+    rejected_explicit(route);
+    CHECK(!host::revoke_peer_address(onlyHuman));
+    rejects_resolution(b, request(addressB));
+}
+
 static void disabled_mode() {
     CHECK(SetEnvironmentVariableW(L"DAWN_NATIVE_ADDRESS_RESOLUTION", nullptr) != 0);
     CHECK(!host::enabled());
@@ -751,6 +976,8 @@ static void disabled_mode() {
     rejected_with_metadata({0x7F000001, 45000}, payload(), host::PacketResult::notRouted);
     rejected_explicit({{owner(1), 1}, {0x7F000001, 45000}}, host::PacketResult::notRouted);
     CHECK(!host::release_route({owner(1), 1}));
+    rejects_registration(owner(1), peer_address());
+    CHECK(!host::revoke_peer_address({owner(1), 1}));
     CHECK(SetEnvironmentVariableW(L"DAWN_NATIVE_ADDRESS_RESOLUTION", L"1") != 0);
     CHECK(!host::enabled()); // This DLL/process lifetime keeps its initial policy.
 }
@@ -769,6 +996,8 @@ int main(int argc, char** argv) {
         authenticated_route_observation();
         exact_ingress_and_reply_routes();
         exact_route_retirement();
+        peer_registration_policy();
+        human_context_isolation_and_retirement();
     }
     host::reset();
     std::printf("address_resolution_host_tests: PASS %u checks\n", checks);

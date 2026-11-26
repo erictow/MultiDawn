@@ -292,6 +292,10 @@ void service(std::uint64_t now) noexcept {
                 // Rejected, handled and unknown decisions never leak into the control peer.
                 if (decision != RoutedIngressResult::unhandled) { continue; }
             }
+            // Only the embedded control context belongs to the legacy peer handler.
+            // A registered human route requires an explicit consumer, even when a
+            // module returns unhandled or no module is installed yet.
+            if (route.purpose != resolution::RoutePurpose::control) { continue; }
             if (g_resolvedPayloadReported.fetch_add(1, std::memory_order_relaxed) < 8) {
                 const unsigned first = payload.empty() ? 0U : std::to_integer<unsigned>(payload[0]);
                 const bool container = (first & 0x80U) != 0;

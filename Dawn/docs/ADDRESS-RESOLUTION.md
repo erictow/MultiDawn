@@ -129,9 +129,12 @@ unverified. See [the world connection evidence](../../docs/NATIVE-WORLD-CONNECTI
 
 `src/server/gameplay/resolution/address_resolution_host.{h,cpp}` accepts only a
 current authenticated BAP owner, capability 16, request kind 1, and method 0.
-The direct address's first 41 bytes must exactly match the configured embedded
-descriptor. The response preserves all 86 requested NetAddr bytes and resolves
-only to the configured IPv4 transport address and gameplay port. The backend
+The control address's first 41 bytes must exactly match the configured embedded
+descriptor. An internal peer registration additionally permits an exact 86-byte
+method-0 address for its BAP authentication owner. Control-prefix collisions,
+duplicate peer bodies and partial matches are refused. Both preserve the full
+requested NetAddr and resolve only to the configured embedded transport address
+and gameplay port. No production caller activates human registrations; this
 does not resolve arbitrary LAN endpoints or Steam-format peer addresses.
 
 Each of the 16 bounded contexts owns fresh random directional DES keys, a shared
@@ -160,8 +163,11 @@ The new `unwrap` overload also returns the exact authenticated route for its
 packet. `wrap_authenticated_route` replies through that context even when
 another context is newer for the same UDP endpoint, and `release_route` retires
 one exact context without removing its siblings. Legacy endpoint-based
-selection is unchanged. The endpoint retains metadata for an optional internal
-routed consumer and provides an explicit protected send, with no raw fallback.
+selection now chooses control contexts only; an active human-only destination
+is rejected instead of falling back to raw UDP. Authenticated metadata carries
+the context's control/human purpose and local peer registration handle, with no
+keys or opaque address bytes. The endpoint requires a consumer to claim human
+traffic and provides an explicit protected send, with no raw fallback.
 See [the explicit route contract](../../docs/EXPLICIT-NATIVE-ROUTES.md).
 
 ## Routed UDP envelope
@@ -220,7 +226,7 @@ includes these isolated suites. Current local results are:
 | `des_cbc_tests.vcxproj` | 53 |
 | `routed_datagram_tests.vcxproj` | 535 |
 | `resolution_replay_tests.vcxproj` | 16,554 |
-| `address_resolution_host_tests.vcxproj` | 1,721 enabled; 22 with `--disabled` |
+| `address_resolution_host_tests.vcxproj` | 2,851 enabled; 27 with `--disabled` |
 | `endpoint_resolution_tests.vcxproj` | 260+ in the recorded loopback runs |
 | `peer_view_echo_tests.vcxproj` | 2,006 |
 
