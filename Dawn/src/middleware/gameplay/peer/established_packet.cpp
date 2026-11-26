@@ -4,6 +4,7 @@
 
 #include "../../encoding/bit_raw.h"
 #include "peer_container.h"
+#include "reliable_message_plan.h"
 
 namespace dawn::middleware::gameplay::peer {
 
@@ -347,6 +348,29 @@ bool acknowledgement_covers(const AckState& ack, std::uint16_t sentSequence) noe
     return true;
 }
 
+std::size_t retire_acknowledged_prefix(state::gameplay::OutboundQueue& queue,
+                                       const AckState& ack) noexcept {
+    if (!queue.awaitingAcknowledgement || queue.count > queue.fragments.size()
+        || ack.reportedCount > ack.received.size()
+        || !acknowledgement_covers(ack, queue.sentInPacket)) {
+        return 0;
+    }
+    const std::size_t retired = queue.sentCount;
+    if (retired == 0 || retired > queue.count) return 0;
+
+    const std::size_t remaining = queue.count - retired;
+    for (std::size_t index = 0; index < remaining; ++index) {
+        queue.fragments[index] = queue.fragments[index + retired];
+    }
+    for (std::size_t index = remaining; index < queue.count; ++index) {
+        queue.fragments[index] = {};
+    }
+    queue.count = remaining;
+    queue.sentCount = 0;
+    queue.awaitingAcknowledgement = false;
+    return retired;
+}
+
 /** Writes the packet head and the acknowledgement handler payload. */
 bool write_head_and_ack(bits::Writer& writer,
                         std::uint8_t connectionSequenceLow2,
@@ -434,18 +458,17 @@ bool write_queue(bits::Writer& writer,
     return writer.write(kSelectorEnd, kSelectorWidth);
 }
 
-/** Splits one reliable message into fragments and appends them to a send queue. */
-bool enqueue_message(state::gameplay::OutboundQueue& queue,
-                     std::uint8_t id,
-                     std::uint32_t declaredSize,
-                     std::span<const std::byte> body,
-                     std::size_t bodyBits) noexcept {
+bool detail::plan_reliable_message(std::uint8_t id, std::uint32_t declaredSize,
+                                  std::span<const std::byte> body, std::size_t bodyBits,
+                                  std::span<std::byte> staging,
+                                  std::span<state::gameplay::OutboundFragment> fragments,
+                                  std::size_t& count) noexcept {
+    count = 0;
     if (id > kMaximumMessageId) {
         return false;
     }
     // The inner header precedes the body, so the message is staged once and then split.
-    std::array<std::byte, state::gameplay::kReassemblyCapacity> staged{};
-    bits::Writer writer(staged);
+    bits::Writer writer(staging);
     if (!writer.write(id, kMessageIdWidth) || !writer.write(declaredSize, kMessageSizeWidth)) {
         return false;
     }
@@ -465,30 +488,17 @@ bool enqueue_message(state::gameplay::OutboundQueue& queue,
     }
 
     const std::size_t totalBits = writer.bit_count();
-    // Every fragment but the last carries the queue's whole fixed size.
     constexpr std::size_t kFragmentBits = kLargeFragmentBytes * kByteBits;
+    // An exact multiple still needs a one-bit short record to close the run.
+    const std::size_t required = totalBits / kFragmentBits + 1;
+    if (required > fragments.size()) return false;
+
     std::size_t consumed = 0;
-    bits::Reader source({staged.data(), stagedBytes});
-    // A half-enqueued message can never be reassembled, so any failure below restores the queue.
-    const std::size_t entryCount = queue.count;
-    const std::uint16_t entrySequence = queue.nextSequence;
-    const auto restore = [&queue, entryCount, entrySequence]() noexcept {
-        for (std::size_t index = entryCount; index < queue.count; ++index) {
-            queue.fragments[index] = {};
-        }
-        queue.count = entryCount;
-        queue.nextSequence = entrySequence;
-    };
-    while (consumed < totalBits) {
-        if (queue.count >= queue.fragments.size()) {
-            restore();
-            return false;
-        }
+    bits::Reader source(staging.first(stagedBytes));
+    for (std::size_t index = 0; index < required; ++index) {
         const std::size_t take =
             (totalBits - consumed) < kFragmentBits ? totalBits - consumed : kFragmentBits;
-        // Only a short fragment closes a run. A full last fragment still needs one appended.
-        const bool last = consumed + take >= totalBits;
-        state::gameplay::OutboundFragment& fragment = queue.fragments[queue.count];
+        auto& fragment = fragments[index];
         fragment = {};
         bits::Writer chunk(fragment.bytes);
         std::size_t written = 0;
@@ -497,40 +507,41 @@ bool enqueue_message(state::gameplay::OutboundQueue& queue,
             const auto width = static_cast<std::uint8_t>(pending < kByteBits ? pending : kByteBits);
             std::uint64_t value = 0;
             if (!source.read(width, value) || !chunk.write(value, width)) {
-                restore();
                 return false;
             }
             pending -= width;
         }
         if (!chunk.finish(written)) {
-            restore();
             return false;
         }
-        fragment.sequence = queue.nextSequence;
-        fragment.bitCount = static_cast<std::uint16_t>(take);
-        fragment.shortFragment = last && take < kFragmentBits;
+        fragment.bitCount = static_cast<std::uint16_t>(take == 0 ? 1 : take);
+        fragment.shortFragment = take < kFragmentBits;
         fragment.occupied = true;
-        queue.nextSequence = static_cast<std::uint16_t>((queue.nextSequence + 1)
-                                                        % state::gameplay::kMessageSequenceModulus);
-        ++queue.count;
         consumed += take;
-        if (last && !fragment.shortFragment) {
-            // An exact multiple of the fragment size still needs a closing short fragment.
-            if (queue.count >= queue.fragments.size()) {
-                restore();
-                return false;
-            }
-            state::gameplay::OutboundFragment& terminator = queue.fragments[queue.count];
-            terminator = {};
-            terminator.sequence = queue.nextSequence;
-            terminator.bitCount = 1;
-            terminator.shortFragment = true;
-            terminator.occupied = true;
-            queue.nextSequence = static_cast<std::uint16_t>(
-                (queue.nextSequence + 1) % state::gameplay::kMessageSequenceModulus);
-            ++queue.count;
-        }
     }
+    count = required;
+    return true;
+}
+
+void detail::append_planned_fragment(state::gameplay::OutboundQueue& queue,
+                                     state::gameplay::OutboundFragment fragment) noexcept {
+    fragment.sequence = queue.nextSequence;
+    queue.fragments[queue.count++] = fragment;
+    queue.nextSequence = static_cast<std::uint16_t>((queue.nextSequence + 1)
+        % state::gameplay::kMessageSequenceModulus);
+}
+
+/** Splits one reliable message into fragments and appends them to a send queue. */
+bool enqueue_message(state::gameplay::OutboundQueue& queue, std::uint8_t id,
+                     std::uint32_t declaredSize, std::span<const std::byte> body,
+                     std::size_t bodyBits) noexcept {
+    if (queue.count > queue.fragments.size()) return false;
+    std::array<std::byte, state::gameplay::kReassemblyCapacity> staging{};
+    std::array<state::gameplay::OutboundFragment, state::gameplay::kOutboundSlots> fragments{};
+    const auto free = std::span(fragments).first(queue.fragments.size() - queue.count);
+    std::size_t count{};
+    if (!detail::plan_reliable_message(id, declaredSize, body, bodyBits, staging, free, count)) return false;
+    for (const auto& fragment : free.first(count)) detail::append_planned_fragment(queue, fragment);
     return true;
 }
 

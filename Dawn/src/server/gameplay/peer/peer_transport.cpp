@@ -635,28 +635,10 @@ void apply_message(state::gameplay::PeerLink& peer,
  */
 std::size_t apply_acknowledgement(state::gameplay::PeerLink& peer,
                                   const wire::AckState& ack) noexcept {
-    if (!peer.outbound.awaitingAcknowledgement
-        || !wire::acknowledgement_covers(ack, peer.outbound.sentInPacket)) {
-        return 0;
-    }
-    const std::size_t retired = peer.outbound.sentCount;
-    if (retired == 0 || retired > peer.outbound.count) {
-        return 0;
-    }
     // The peer has this packet, so retire only the prefix it carried. Fragments which did not fit
     // remain in sequence order for later packets, matching the retail queue's per-fragment flight
     // tracking.
-    const std::size_t remaining = peer.outbound.count - retired;
-    for (std::size_t index = 0; index < remaining; ++index) {
-        peer.outbound.fragments[index] = peer.outbound.fragments[index + retired];
-    }
-    for (std::size_t index = remaining; index < peer.outbound.count; ++index) {
-        peer.outbound.fragments[index] = {};
-    }
-    peer.outbound.count = remaining;
-    peer.outbound.sentCount = 0;
-    peer.outbound.awaitingAcknowledgement = false;
-    return retired;
+    return wire::retire_acknowledged_prefix(peer.outbound, ack);
 }
 
 /**

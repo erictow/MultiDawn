@@ -26,11 +26,36 @@ Three maximum-width human gameplay membership rows fit the current tested queue;
 six require further transport work. The current association table holds four
 endpoints, and the reliable outbound queue holds 24 fragments of 32 bytes. A
 maximum-width six-human membership body measures 1,048 bytes and is refused by
-the current writer/queue. Those limits remain unchanged until their native
-protocol behavior is recovered and tested.
+the current writer and queue. An offline sender now stages that body and feeds
+its 33 fragments into the existing 24-entry send queue as acknowledgements
+retire the prefix. This uses the same framing and acknowledgement code as the
+live transport. The current local receiver still cannot assemble all 33
+fragments, and archived-game receiver support needs a live check before this
+sender can be used for gameplay.
 
 Launcher pairing, native social presence and invitation controls also currently
 have one-partner assumptions. They must gain per-player connections and state
 before milestone 2. The [activity handoff design](LOCAL-PROFILE-ACTIVITY-HANDOFF.md)
 and [identity correspondence notes](IDENTITY-ACTIVITY-CORRELATION.md) describe the
 current runtime boundary.
+
+For milestone 1, first confirm each game can spawn and control its own Guardian.
+Then correlate the live invitation and guest publication with the host's exact
+world instance and install the recipient-specific membership and routes. Use
+the existing local profile service for each player and validate bidirectional
+movement before extending combat or activity authority.
+
+For milestone 2, give each guest their own authenticated launcher connection,
+invite and grant lifetime, route, and reliable queues. Keep surviving players'
+slots stable across departure, and test disconnect and rejoin in a real
+three-player activity. The current one-partner launcher remains the ceiling.
+
+For milestone 3, verify whether the archived game accepts the longer reliable
+message. If its receiver cannot assemble that run, recover a native update
+sequence that splits the roster into smaller valid publications. Confirm
+capacity for five guests on their own routes before bringing up all six clients.
+Use one authority for each shared encounter, with client movement and combat
+inputs tied to the exact player and activity. A raid test must cover encounter
+transitions, combat, death and revive, a wipe, and a player leaving or returning
+while each PC's save stays local. This is the implementation direction, pending
+native gameplay evidence.

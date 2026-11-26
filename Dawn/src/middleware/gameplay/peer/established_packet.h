@@ -104,6 +104,10 @@ struct EstablishedPacket {
  */
 [[nodiscard]] bool acknowledgement_covers(const AckState& ack, std::uint16_t sentSequence) noexcept;
 
+/** Retires exactly the sent prefix covered by this link's acknowledgement. */
+std::size_t retire_acknowledged_prefix(state::gameplay::OutboundQueue& queue,
+                                       const AckState& ack) noexcept;
+
 /**
  * Writes one reliable queue that carries no records.
  * @param writer Writer positioned at that queue's payload.

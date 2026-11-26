@@ -186,6 +186,14 @@ controller still needs the exact current BAP binding and actual identity
 receipt, activity/region, world lineage, remote player publication and human
 route. No runtime handoff controller currently calls these APIs.
 
+When `DAWN_ACTIVITY_BINDING_TRACE=1`, the inviter's version-three companion
+also checks a newly received accepted ticket using the existing preflight
+protocol. Its result is kept separately from the controller mailbox. The trace
+reports `request_sent` and `accepted_ticket_verified` without printing IDs,
+tickets, nonces or epochs. A duplicate acceptance sends no new trace query.
+A revocation processed in the same batch suppresses the query. This confirms
+live invitation relay only and does not authorize party joining.
+
 ## Verification
 
 `tools/launcher/Build-Launcher.ps1 -RunTests` compiles with warnings treated as

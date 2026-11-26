@@ -354,6 +354,10 @@ The native test projects are:
 - `Dawn/unit/remote_human_membership_tests.vcxproj`: independent decoding of
   two-, three- and six-human BAP bodies, stable gaps, per-human region lanes,
   optional D4/opaque fields, maximum size, rejection and unchanged solo goldens.
+- `Dawn/unit/reliable_outbox_tests.vcxproj`: offline staging of the maximum-width
+  six-human membership message and ordered transfer through the existing send
+  queue. Covers the exact wire stream, acknowledged prefix, sequence wrap,
+  backpressure and the current receiver limit.
 
 `companion_bridge_harness.vcxproj` builds a small native test worker that links
 the production companion client with test social/log sinks. The launcher's
@@ -365,7 +369,7 @@ It does not verify the game's friend roster or a shared activity.
 
 Native build instructions are in
 [`tools/build/PORTABLE-WINDOWS.md`](../tools/build/PORTABLE-WINDOWS.md).
-The native GitHub workflow builds and runs the twenty component test projects;
+The native GitHub workflow builds and runs twenty-one component test projects;
 preparing the workflow does not mean a remote run has passed.
 
 For experimental commit `f60ac62b`, the
