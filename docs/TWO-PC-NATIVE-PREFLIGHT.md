@@ -79,15 +79,19 @@ On November 26, 2026, the `bc41f378` kit paired two PCs on the same LAN. Both
 launchers saved their partner and reported both native game companions connected.
 Each game loaded its own Tower. The host snapshot verified the pinned runtime,
 normal spawn completion, and zero remote gameplay peers. The guest reported a
-camera outside the Tower wall even after fast travel. The cause remains open.
+frozen camera outside the Tower wall even after fast travel. Camera input and
+Dawn's noclip and forward movement controls had no visible effect. Guest world
+entry and controlled Guardian spawn still need confirmation from its log.
 
 If the camera problem appears again, capture the affected game's log before
 relaunching. Compare the `spawn_hold_loader`, `spawn_gate`, `fly_in_complete`,
 `spawn_arrival`, and `tower_spawn_recovery` events with the host's normal
 `spawn_gate result=native_allowed` and `fly_in_complete`. Check whether the
-Guardian is visible and responds to movement. A comparison using Solo Play
-from the same isolated folder, character, and landing zone can help narrow down
-whether the symptom is specific to the paired test launch.
+Guardian is visible and responds to movement with the game focused and the Dawn
+menu closed. An `ev=noclip stage=toggle` line indicates that Dawn handled the
+key, while actual movement also requires a character physics body. A comparison
+using Solo Play from the same isolated folder, character, and landing zone can
+help narrow down whether the symptom is specific to the paired test launch.
 
 ## Build a kit from source
 
