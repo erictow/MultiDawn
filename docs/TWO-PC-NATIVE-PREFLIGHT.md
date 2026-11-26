@@ -11,10 +11,11 @@ two-player milestone, for the three-player fireteam work.
 ## Prepare each PC
 
 1. Use the same native LAN test ZIP on both PCs. Extract it on the same drive
-   as that PC's separate Dawn game installation. Each PC needs the complete
-   archived game build `86657.20.08.23.1800.d2_rc`; the ZIP contains no game files.
+   as that PC's separate game installation. Each PC needs the complete archived
+   game build `86657.20.08.23.1800.d2_rc`. The kit supplies the matching Dawn
+   runtime, so there is no separate Dawn or Sunrise installation step.
 2. Close Destiny on that PC. Run `Prepare-Test-Game.cmd` and enter the existing
-   local Dawn game folder when prompted. The helper creates a new isolated
+   local archived game folder when prompted. The helper creates a new isolated
    installation under the extracted kit's `build/gameplay-tests/` directory.
    It installs the kit's DLL and runtime content in that new directory only.
 3. When available, the helper copies that PC's own closed local player database
@@ -28,9 +29,9 @@ two-player milestone, for the three-player fireteam work.
    PC generate its own `%LOCALAPPDATA%/MultiDawn` identities. Do not copy
    `peer-id.txt` or `steam-id.txt` between PCs.
 
-The preparation helper supports the existing `bin/x64` Dawn layout. A root Steam
-DLL or a game on another drive is refused by the isolated-install helper. Move
-the extracted kit to the game's drive rather than moving the game.
+The preparation helper supports both the legacy `bin/x64` layout and an archived
+installation with a root Steam DLL. Extract the kit on the game's drive so the
+helper can share packages through hard links.
 
 ## Pair and launch
 
@@ -40,7 +41,8 @@ the extracted kit to the game's drive rather than moving the game.
 3. On the host, enable Multiplayer, select its LAN IPv4 address and choose Host.
    On the other PC, enable Multiplayer, enter the host's current pair code and
    choose Join. Share pair codes privately.
-4. Once paired, choose **Launch native test** on each PC. This starts each game
+4. Once paired, choose **Launch native test** near the bottom of each launcher.
+   Scroll down if needed. This starts each game
    with its local profile service and the exact current companion connection.
    The launcher verifies the fixture marker and pinned DLL before starting.
 5. Leave the launchers open. Watch the test status for the local game connection
@@ -62,8 +64,9 @@ this test does not expose it or change router settings.
 Record both PCs' LAN IPv4 addresses, the kit's `sourceCommit`, whether each
 launcher reports its native game connected, whether each game sees the paired
 friend, and any error code. Keep pair codes, pipe nonces and account databases
-out of reports. The isolated game's log is under `bin/x64/Dawn/logs/`; preparation
-enables client/server information logging in the new test settings only.
+out of reports. Look for the log under `bin/x64/Dawn/logs/` or `Dawn/logs/`, next
+to the loaded runtime. Preparation enables core, client and server information
+logging in the test settings.
 
 The launcher enables the existing bounded native session, identity and activity
 traces in this explicit test launch. It does not enable the legacy unsafe probe
@@ -72,11 +75,11 @@ two Guardians seeing and moving together remains milestone 1's acceptance test.
 
 ## Build a kit from source
 
-Cloning is optional on the test PCs when using the compiled ZIP. Developers
-should select the experimental branch explicitly:
+The compiled ZIP works without a clone on the test PCs. To build from source,
+clone `production`:
 
 ```powershell
-git clone --branch main --single-branch https://github.com/erictow/MultiDawn.git MultiDawn
+git clone --branch production --single-branch https://github.com/erictow/MultiDawn.git MultiDawn
 ```
 
 Build the Release DLL and launcher from the same committed source, then run:

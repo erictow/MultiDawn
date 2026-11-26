@@ -24,8 +24,8 @@ presets together. The game itself is not included.
 
 ## MultiDawn launcher preview
 
-`production` is this fork's default branch and published preview baseline.
-Ongoing multiplayer experiments live on `main` and are verified before promotion.
+`production` is this fork's default branch and contains the launcher and native
+connection test tools.
 
 The [multiplayer milestones](docs/MULTIPLAYER-MILESTONES.md) are two players in
 one shared activity first, then a three-player fireteam, then six-player raid
@@ -60,11 +60,14 @@ Pairing requires reachable IPv4 addresses on a LAN or VPN. Codes do not provide
 NAT traversal or an internet relay. See the [launcher guide](tools/launcher/README.md)
 and the [runtime implementation requirements](docs/MULTIPLAYER-RUNTIME.md).
 
-Experimental `main` adds versioned invitation acceptance between the launcher
+The experimental runtime adds versioned invitation acceptance between the launcher
 and native runtime. Accepting an invitation waits for host authorization;
 it does not yet join a shared activity. Each PC will retain its own save and
 local profile service. The host will own the shared activity. The
 [invitation protocol](docs/INVITATION-CONTROL-V2.md) describes this control step.
+
+To test two running game clients on separate LAN PCs, use the matched DLL and
+launcher bundle described in the [two-PC test guide](docs/TWO-PC-NATIVE-PREFLIGHT.md).
 
 The experimental runtime also separates human packet routes from the control
 connection and can encode additional humans in stable native membership slots.

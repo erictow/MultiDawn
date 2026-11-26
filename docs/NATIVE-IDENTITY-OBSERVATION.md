@@ -1,6 +1,6 @@
 # Native identity observations
 
-Experimental `main` includes an opt-in, read-only observer for the pinned Destiny 2
+The experimental runtime includes an opt-in, read-only observer for the pinned Destiny 2
 build `86657.20.08.23.1800.d2_rc`. Set
 `DAWN_NATIVE_IDENTITY_OBSERVATION=1` before launching an isolated test process to
 request it. The flag is cached for the DLL lifetime. Three native layout signatures

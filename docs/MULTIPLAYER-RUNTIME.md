@@ -116,7 +116,7 @@ handler before group membership exists and is refused as `unresolved_group`.
 No view token is treated as authorization or guessed to be a group ID. Remote
 human admission, shared membership and two-Guardian gameplay remain unverified.
 
-Experimental `main` now handles that pre-join view as a link-level exchange on
+The experimental runtime handles that pre-join view as a link-level exchange on
 the exact authenticated native channel. It requires connected/application-ready
 state and empty group slots, checks both channel incarnation values, and queues
 the reply and binds its signature atomically. It grants no group membership and

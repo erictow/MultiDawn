@@ -60,10 +60,14 @@ $source = Get-Item -LiteralPath $SourceGame
 if (-not $source.PSIsContainer) { throw 'SourceGame must identify the game directory.' }
 $helper = Join-Path $PSScriptRoot 'New-IsolatedDawnTestInstall.ps1'
 
+# Each DLL loads its own adjacent Dawn folder. Keep the stores independent.
+$placements = @('bin/x64')
+$hasRootDll = Test-Path -LiteralPath (Join-Path $source.FullName 'steam_api64.dll') -PathType Leaf
+if ($hasRootDll) { $placements += '.' }
+
 # These handles stay open across creation, copying, metadata and final publication.
 $dllStream = $null
-$databaseStream = $null
-$walStream = $null
+$profiles = @()
 try {
     $dllStream = [IO.File]::Open($dll.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
     $sha = [Security.Cryptography.SHA256]::Create()
@@ -71,21 +75,30 @@ try {
     finally { $sha.Dispose() }
     if ($actualHash -cne $expectedHash) { throw 'Runtime SHA-256 does not match the expected test build. No fixture was created.' }
 
-    $databasePath = Join-Path $source.FullName 'bin/x64/Dawn/player-state.db'
-    $walPath = $databasePath + '-wal'
-    $copyProgress = -not $FreshProfile -and (Test-Path -LiteralPath $databasePath -PathType Leaf)
-    if ($copyProgress) {
-        Assert-GameClosed
-        foreach ($path in @((Split-Path -Parent $databasePath), $databasePath)) { Assert-PlainItem (Get-Item -LiteralPath $path) }
-        try {
-            $databaseStream = [IO.File]::Open($databasePath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
-            if (Test-Path -LiteralPath $walPath) {
-                Assert-PlainItem (Get-Item -LiteralPath $walPath)
-                $walStream = [IO.File]::Open($walPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    if (-not $FreshProfile) {
+        foreach ($placement in $placements) {
+            $relative = Join-Path $placement 'Dawn'
+            $runtime = Join-Path $source.FullName $relative
+            $databasePath = Join-Path $runtime 'player-state.db'
+            if (-not (Test-Path -LiteralPath $databasePath -PathType Leaf)) { continue }
+            Assert-GameClosed
+            foreach ($path in @($source.FullName, (Join-Path $source.FullName $placement), $runtime, $databasePath)) {
+                Assert-PlainItem (Get-Item -LiteralPath $path)
             }
-        } catch { throw ('Local progress is busy or cannot be locked for an offline copy. Close Destiny 2 and other save tools, then retry. ' + $_.Exception.Message) }
-        Assert-GameClosed
+            if ($placement -eq 'bin/x64') { Assert-PlainItem (Get-Item -LiteralPath (Join-Path $source.FullName 'bin')) }
+            $profile = [pscustomobject]@{ Relative = $relative; Database = $null; WalPath = $databasePath + '-wal'; Wal = $null }
+            $profiles += $profile
+            try {
+                $profile.Database = [IO.File]::Open($databasePath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+                if (Test-Path -LiteralPath $profile.WalPath) {
+                    Assert-PlainItem (Get-Item -LiteralPath $profile.WalPath)
+                    $profile.Wal = [IO.File]::Open($profile.WalPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+                }
+            } catch { throw ('Local progress is busy or cannot be locked for an offline copy. Close Destiny 2 and other save tools, then retry. ' + $_.Exception.Message) }
+        }
     }
+    $copyProgress = $profiles.Count -gt 0
+    if ($copyProgress) { Assert-GameClosed }
 
     $created = @(& $helper -SourceGame $source.FullName -DllPath $dll.FullName)
     if ($created.Count -ne 1) { throw 'The isolated-install helper did not return one fixture path.' }
@@ -93,22 +106,34 @@ try {
     $testRoot = [IO.Path]::GetFullPath((Join-Path $repo 'build/gameplay-tests')) + [IO.Path]::DirectorySeparatorChar
     if (-not $output.StartsWith($testRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'The isolated-install helper returned an unexpected fixture path.' }
     foreach ($relative in @('', 'bin', 'bin/x64', 'bin/x64/Dawn')) { Assert-PlainItem (Get-Item -LiteralPath (Join-Path $output $relative)) }
-    $runtime = Join-Path $output 'bin/x64/Dawn'
-    $installedHash = (Get-FileHash -LiteralPath (Join-Path $output 'bin/x64/steam_api64.dll') -Algorithm SHA256).Hash
-    if ($installedHash -cne $expectedHash) { throw 'The isolated runtime does not match the verified test build.' }
+    if ($hasRootDll -ne (Test-Path -LiteralPath (Join-Path $output 'steam_api64.dll') -PathType Leaf)) {
+        throw 'The game layout changed during test preparation. Retry with the game closed.'
+    }
+    foreach ($placement in $placements) {
+        $bin = Join-Path $output $placement
+        $runtime = Join-Path $bin 'Dawn'
+        Assert-PlainItem (Get-Item -LiteralPath $runtime)
+        $installedDll = Get-Item -LiteralPath (Join-Path $bin 'steam_api64.dll')
+        Assert-PlainItem $installedDll
+        $installedHash = (Get-FileHash -LiteralPath $installedDll.FullName -Algorithm SHA256).Hash
+        if ($installedHash -cne $expectedHash) { throw 'The isolated runtime does not match the verified test build.' }
+
+        $settingsPath = Join-Path $runtime 'settings.json'
+        $settings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+        $settings.core.logging.file_sink = $true
+        foreach ($channel in @('core', 'client', 'server')) { $settings.core.logging.levels.$channel = 'info' }
+        [IO.File]::WriteAllText($settingsPath, ($settings | ConvertTo-Json -Depth 100), $utf8)
+    }
 
     if ($copyProgress) {
         Assert-GameClosed
-        if (($null -ne $walStream) -ne (Test-Path -LiteralPath $walPath -PathType Leaf)) { throw 'The source save WAL changed during offline preparation. Retry after closing save tools.' }
-        Copy-LockedSave $databaseStream (Join-Path $runtime 'player-state.db')
-        if ($null -ne $walStream) { Copy-LockedSave $walStream (Join-Path $runtime 'player-state.db-wal') }
+        foreach ($profile in $profiles) {
+            if (($null -ne $profile.Wal) -ne (Test-Path -LiteralPath $profile.WalPath -PathType Leaf)) { throw 'The source save WAL changed during offline preparation. Retry after closing save tools.' }
+            $runtime = Join-Path $output $profile.Relative
+            Copy-LockedSave $profile.Database (Join-Path $runtime 'player-state.db')
+            if ($null -ne $profile.Wal) { Copy-LockedSave $profile.Wal (Join-Path $runtime 'player-state.db-wal') }
+        }
     }
-    $settingsPath = Join-Path $runtime 'settings.json'
-    $settings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
-    $settings.core.logging.file_sink = $true
-    $settings.core.logging.levels.client = 'info'
-    $settings.core.logging.levels.server = 'info'
-    [IO.File]::WriteAllText($settingsPath, ($settings | ConvertTo-Json -Depth 100), $utf8)
 
     $recordPath = Join-Path $output 'native-test-install.json'
     $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json
@@ -130,7 +155,9 @@ try {
     Move-Item -LiteralPath $pendingReady -Destination $ready -Force
     Write-Output $output
 } finally {
-    if ($null -ne $walStream) { $walStream.Dispose() }
-    if ($null -ne $databaseStream) { $databaseStream.Dispose() }
+    foreach ($profile in $profiles) {
+        if ($null -ne $profile.Wal) { $profile.Wal.Dispose() }
+        if ($null -ne $profile.Database) { $profile.Database.Dispose() }
+    }
     if ($null -ne $dllStream) { $dllStream.Dispose() }
 }

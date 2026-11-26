@@ -22,16 +22,24 @@ $dll = Get-Item -LiteralPath $DllPath
 $exe = Get-Item -LiteralPath (Join-Path $source 'destiny2.exe')
 if ($exe.VersionInfo.FileVersion -cne '86657.20.08.23.1800.d2_rc') { throw 'Unsupported Destiny executable version.' }
 if ($dll.VersionInfo.ProductName -cne 'Dawn') { throw 'Expected a compiled Dawn DLL.' }
-if (Test-Path -LiteralPath (Join-Path $source 'steam_api64.dll')) { throw 'This test fixture currently supports the bin/x64 Dawn installation layout only.' }
+$sourceRootDllPath = Join-Path $source 'steam_api64.dll'
+$sourceRootDll = $null
+if (Test-Path -LiteralPath $sourceRootDllPath) {
+    $sourceRootDll = Get-Item -LiteralPath $sourceRootDllPath
+    if ($sourceRootDll.PSIsContainer) { throw 'The root Steam DLL path must identify a file.' }
+}
 if ([IO.Path]::GetPathRoot($source) -ine [IO.Path]::GetPathRoot($repo)) { throw 'Package hard links require the same volume.' }
 $assets = @(Get-ChildItem -LiteralPath (Join-Path $source 'packages') -Recurse -File)
 if ($assets.Count -eq 0) { throw 'The game packages folder is empty.' }
 if (@($assets | Where-Object { $_.Extension -ne '.pkg' }).Count -ne 0) { throw 'Only immutable .pkg assets may be shared.' }
 $fonts = @(Get-ChildItem -LiteralPath (Join-Path $source 'fonts') -Recurse -File)
-$binaries = @(Get-ChildItem -LiteralPath $source -File | Where-Object { $_.Name -eq 'destiny2.exe' -or $_.Extension -eq '.dll' -or $_.Name -eq 'sku_config.txt' })
+$binaries = @(Get-ChildItem -LiteralPath $source -File | Where-Object {
+    $_.Name -ne 'steam_api64.dll' -and ($_.Name -eq 'destiny2.exe' -or $_.Extension -eq '.dll' -or $_.Name -eq 'sku_config.txt')
+})
 $binFiles = @(Get-ChildItem -LiteralPath (Join-Path $source 'bin/x64') -File | Where-Object { $_.Extension -eq '.dll' -and $_.Name -ne 'steam_api64.dll' })
 # Refuse redirected sources before creating any output.
 $sourceDirectories = @('', 'packages', 'fonts', 'bin', 'bin/x64') | ForEach-Object { Get-Item -LiteralPath (Join-Path $source $_) }
+if ($null -ne $sourceRootDll) { $sourceDirectories += $sourceRootDll }
 foreach ($item in @($exe, $dll) + $assets + $fonts + $binaries + $binFiles + $sourceDirectories + @(Get-ChildItem -LiteralPath (Join-Path $source 'packages') -Directory -Recurse) + @(Get-ChildItem -LiteralPath (Join-Path $source 'fonts') -Directory -Recurse)) {
     if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw ('Redirected source is unsupported: ' + $item.FullName) }
 }
@@ -60,6 +68,11 @@ foreach ($folder in @('scripts', 'event_presets')) {
 }
 foreach ($item in Get-ChildItem -LiteralPath (Join-Path $repo 'Dawn/resources/vendor_rules') -File -Filter '*.txt') {
     Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $runtime $item.Name)
+}
+if ($null -ne $sourceRootDll) {
+    # Each DLL location uses the adjacent Dawn directory. Copy only these freshly seeded defaults.
+    Copy-Item -LiteralPath $runtime -Destination (Join-Path $output 'Dawn') -Recurse
+    Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $output 'steam_api64.dll')
 }
 $record = [ordered]@{
     schema = 1; gameVersion = $exe.VersionInfo.FileVersion

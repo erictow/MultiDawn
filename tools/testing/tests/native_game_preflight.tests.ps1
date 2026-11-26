@@ -63,14 +63,16 @@ $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $calls = Join-Path $root 'helper-calls.txt'
 [IO.File]::WriteAllText($calls, ([int]([IO.File]::ReadAllText($calls)) + 1).ToString())
 if (Test-Path -LiteralPath (Join-Path $root 'expect-save-locks.txt')) {
-    foreach ($name in @('player-state.db', 'player-state.db-wal')) {
-        $path = Join-Path $SourceGame ('bin/x64/Dawn/' + $name)
-        if (-not (Test-Path -LiteralPath $path)) { continue }
-        $blocked = $false; $writer = $null
-        try { $writer = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::ReadWrite) }
-        catch [IO.IOException] { $blocked = $true }
-        finally { if ($null -ne $writer) { $writer.Dispose() } }
-        if (-not $blocked) { throw ('Save was not locked during fixture preparation: ' + $name) }
+    foreach ($folder in @('bin/x64/Dawn', 'Dawn')) {
+        foreach ($name in @('player-state.db', 'player-state.db-wal')) {
+            $path = Join-Path $SourceGame ($folder + '/' + $name)
+            if (-not (Test-Path -LiteralPath $path)) { continue }
+            $blocked = $false; $writer = $null
+            try { $writer = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::ReadWrite) }
+            catch [IO.IOException] { $blocked = $true }
+            finally { if ($null -ne $writer) { $writer.Dispose() } }
+            if (-not $blocked) { throw ('Save was not locked during fixture preparation: ' + $path) }
+        }
     }
 }
 if (Test-Path -LiteralPath (Join-Path $root 'fail-isolation.txt')) { throw 'Simulated isolation refusal.' }
@@ -79,6 +81,10 @@ $runtime = Join-Path $output 'bin/x64/Dawn'
 [IO.Directory]::CreateDirectory($runtime) | Out-Null
 Copy-Item -LiteralPath $DllPath -Destination (Join-Path $output 'bin/x64/steam_api64.dll')
 [IO.File]::WriteAllText((Join-Path $runtime 'settings.json'), '{"core":{"logging":{"file_sink":false,"levels":{"core":"warn","client":"warn","state":"warn","server":"warn","middleware":"warn"}}},"keep":"unchanged"}')
+if (Test-Path -LiteralPath (Join-Path $SourceGame 'steam_api64.dll') -PathType Leaf) {
+    Copy-Item -LiteralPath $runtime -Destination (Join-Path $output 'Dawn') -Recurse
+    Copy-Item -LiteralPath $DllPath -Destination (Join-Path $output 'steam_api64.dll')
+}
 $record = [ordered]@{ schema=1; gameVersion='fixture-version'; executableSha256=('A' * 64); runtimeSha256=(Get-FileHash -LiteralPath $DllPath -Algorithm SHA256).Hash; sharedPackageCount=7; playerState='fresh'; packages='hard-linked; do not update'; extra='preserved' }
 [IO.File]::WriteAllText((Join-Path $output 'native-test-install.json'), ($record | ConvertTo-Json))
 Write-Output $output
@@ -110,7 +116,7 @@ Assert ($record.playerState -ceq 'copied-local-offline' -and $record.sourceCommi
     $record.gameVersion -ceq 'fixture-version' -and $record.sharedPackageCount -eq 7 -and $record.runtimeSha256 -ceq $hash) 'Install metadata was not preserved'
 $settings = Get-Content -LiteralPath (Join-Path $runtime 'settings.json') -Raw | ConvertFrom-Json
 Assert ($settings.core.logging.file_sink -and $settings.core.logging.levels.client -ceq 'info' -and $settings.core.logging.levels.server -ceq 'info' -and
-    $settings.core.logging.levels.core -ceq 'warn' -and $settings.core.logging.levels.state -ceq 'warn' -and $settings.keep -ceq 'unchanged') 'Logging changed unrelated settings'
+    $settings.core.logging.levels.core -ceq 'info' -and $settings.core.logging.levels.state -ceq 'warn' -and $settings.keep -ceq 'unchanged') 'Logging changed unrelated settings'
 $ready = Join-Path $kit 'build/latest-native-test-path.txt'
 Assert ([IO.File]::ReadAllText($ready).Trim() -ceq $output) 'Ready path does not identify the completed fixture'
 Pass 'Fixture logging, provenance, existing metadata and latest-ready path are correct'
@@ -150,6 +156,36 @@ $onlyOutput = & $prepare -SourceGame $databaseOnly
 Assert (Test-Path -LiteralPath (Join-Path $onlyOutput 'bin/x64/Dawn/player-state.db')) 'Database-only progress was omitted'
 Assert (-not (Test-Path -LiteralPath (Join-Path $onlyOutput 'bin/x64/Dawn/player-state.db-wal'))) 'An absent WAL was invented'
 Pass 'A database without WAL is preserved'
+$dual = New-Source 'dual DLL layout' -NoWal
+Write-File (Join-Path $dual 'steam_api64.dll') 'old root Steam DLL'
+Write-File (Join-Path $dual 'bin/x64/steam_api64.dll') 'old bin Steam DLL'
+Write-File (Join-Path $dual 'Dawn/player-state.db') 'local root progress'
+Write-File (Join-Path $dual 'Dawn/player-state.db-wal') 'pending root progress'
+Write-File (Join-Path $dual 'Dawn/player-state.db-shm') 'omit transient root memory'
+$dualBefore = Snapshot $dual
+$dualOutput = & $prepare -SourceGame $dual
+Assert ([IO.File]::ReadAllText((Join-Path $dualOutput 'Dawn/player-state.db')) -ceq 'local root progress') 'Root save was lost or moved'
+Assert ([IO.File]::ReadAllText((Join-Path $dualOutput 'Dawn/player-state.db-wal')) -ceq 'pending root progress') 'Root WAL was lost or moved'
+Assert ([IO.File]::ReadAllText((Join-Path $dualOutput 'bin/x64/Dawn/player-state.db')) -ceq 'local progress: dual DLL layout') 'Bin profile was overwritten by root profile'
+Assert (-not (Test-Path -LiteralPath (Join-Path $dualOutput 'bin/x64/Dawn/player-state.db-wal'))) 'Root WAL was copied to the bin profile'
+Assert (-not (Test-Path -LiteralPath (Join-Path $dualOutput 'Dawn/player-state.db-shm'))) 'Root SHM was copied'
+foreach ($placement in @('.', 'bin/x64')) {
+    $location = Join-Path $dualOutput $placement
+    Assert ((Get-FileHash -LiteralPath (Join-Path $location 'steam_api64.dll') -Algorithm SHA256).Hash -ceq $hash) 'A fixture Steam DLL did not match the kit'
+    $settings = Get-Content -LiteralPath (Join-Path $location 'Dawn/settings.json') -Raw | ConvertFrom-Json
+    Assert ($settings.core.logging.levels.core -ceq 'info' -and $settings.core.logging.levels.client -ceq 'info' -and $settings.core.logging.levels.server -ceq 'info') 'A DLL placement is missing diagnostic logging'
+}
+Assert ((Snapshot $dual) -ceq $dualBefore) 'Preparing both runtimes changed the source'
+Pass 'Dual layout keeps root and bin progress independent and enables companion logging beside both pinned DLLs'
+$calls = Calls
+$busy = [IO.File]::Open((Join-Path $dual 'Dawn/player-state.db-wal'), [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::ReadWrite)
+try { Refuses { & $prepare -SourceGame $dual } '*progress is busy or cannot be locked*' }
+finally { $busy.Dispose() }
+Assert ((Calls) -ceq $calls) 'A busy root WAL allowed preparation'
+Assert-Writable (Join-Path $dual 'bin/x64/Dawn/player-state.db')
+Assert-Writable (Join-Path $dual 'Dawn/player-state.db')
+Assert-Writable (Join-Path $dual 'Dawn/player-state.db-wal')
+Pass 'A busy root WAL releases the already held bin and root database handles'
 Remove-Item -LiteralPath $lockMarker
 $busy = [IO.File]::Open((Join-Path $source 'bin/x64/Dawn/player-state.db'), [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::ReadWrite)
 $global:NativePreflightPretendRunning = $true
@@ -158,6 +194,13 @@ finally { $busy.Dispose(); $global:NativePreflightPretendRunning = $false }
 $freshRecord = Get-Content -LiteralPath (Join-Path $freshOutput 'native-test-install.json') -Raw | ConvertFrom-Json
 Assert ($freshRecord.playerState -ceq 'fresh' -and -not (Test-Path -LiteralPath (Join-Path $freshOutput 'bin/x64/Dawn/player-state.db'))) 'FreshProfile copied progress'
 Pass 'FreshProfile ignores busy source progress and does not require a stopped game for save copying'
+$bareArchive = New-Source 'bare archived game' -NoDatabase
+Write-File (Join-Path $bareArchive 'steam_api64.dll') 'archived root Steam DLL'
+$bareOutput = & $prepare -SourceGame $bareArchive
+$bareRecord = Get-Content -LiteralPath (Join-Path $bareOutput 'native-test-install.json') -Raw | ConvertFrom-Json
+Assert ($bareRecord.playerState -ceq 'fresh' -and -not (Test-Path -LiteralPath (Join-Path $bareOutput 'Dawn/player-state.db'))) 'A bare archived source should start a fresh profile'
+Assert ((Get-FileHash -LiteralPath (Join-Path $bareOutput 'steam_api64.dll') -Algorithm SHA256).Hash -ceq $hash) 'The bare archive did not receive the pinned root DLL'
+Pass 'A bare archived source with a root Steam DLL receives the fresh Dawn runtime'
 $noDatabase = New-Source 'no database' -NoDatabase
 $emptyOutput = & $prepare -SourceGame $noDatabase
 $emptyRecord = Get-Content -LiteralPath (Join-Path $emptyOutput 'native-test-install.json') -Raw | ConvertFrom-Json
