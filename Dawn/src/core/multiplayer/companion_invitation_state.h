@@ -31,7 +31,9 @@ public:
 
     /** Duplicates do not extend the deadline or recreate an already consumed intent. */
     [[nodiscard]] bool accepted(std::uint64_t peer, std::string_view ticket,
-                                std::uint64_t ttl, std::uint64_t now) noexcept {
+                                std::uint64_t ttl, std::uint64_t now,
+                                bool* fresh = nullptr) noexcept {
+        if (fresh != nullptr) *fresh = false;
         if (!ready() || !protocol::steam_identity(peer) || !protocol::ticket(ticket)
             || ttl == 0 || ttl > 60'000 || now > UINT64_MAX - ttl) return false;
         if (ticket == lastTicket_.data()) return true;
@@ -42,7 +44,14 @@ public:
         current_.ticket = lastTicket_;
         current_.deadline = now + ttl;
         available_ = true;
+        if (fresh != nullptr) *fresh = true;
         return true;
+    }
+
+    /** The current ticket's lifetime is independent of whether the mailbox was taken. */
+    [[nodiscard]] bool current(std::uint64_t peer, std::string_view ticket,
+                               std::uint64_t now) const noexcept {
+        return current_.deadline > now && current_.peerSteamId == peer && ticket == current_.ticket.data();
     }
 
     void revoke(std::string_view ticket) noexcept {

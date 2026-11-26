@@ -77,8 +77,9 @@ two Guardians seeing and moving together remains milestone 1's acceptance test.
 
 On November 26, 2026, the `bc41f378` kit paired two PCs on the same LAN. Both
 launchers saved their partner and reported both native game companions connected.
-Each game loaded its own Tower. The host snapshot verified the pinned runtime,
-normal spawn completion, and zero remote gameplay peers. The guest reported a
+Each game loaded its own Tower. The host snapshot verified the pinned runtime
+and zero remote gameplay peers. The host log recorded the initial spawn gate
+allowing arrival. The guest reported a
 frozen camera outside the Tower wall even after fast travel. Camera input and
 Dawn's noclip and forward movement controls had no visible effect. The same
 Courtyard wall view was later reported on the host.
@@ -123,6 +124,44 @@ whether the local game has a controlled entity, whether the runtime slot is
 present, and whether the game reported readiness. It samples at most four
 times per second and reports changes or a sustained missing entity, with at
 most 64 records per DLL lifetime. It adds no native reads or recovery actions.
+
+### Follow-up with the control trace
+
+The `3447a492` kit displayed saved nicknames in the game roster. Invitations
+produced Dawn's in-game accept and decline popup. Accepting reached the waiting
+state in either direction. This build has no live activity handoff controller
+to grant a shared fireteam. Dawn's `In game` label reflects a running game and
+does not change when its player leaves the Tower. Destiny's roster still
+received no live location.
+
+Both logs show that the Tower loader finished and the engine reported an
+allowed spawn gate and world state 3. On each PC the frame trace recorded
+`controlled=0` and a present runtime slot with the loader idle and local
+readiness set. The host also recorded noclip key toggles. The fly-in marker
+therefore accompanies a completed world load on these runs, while the camera
+frame still has no controlled Guardian.
+
+The supplied solo log reached the same Tower spawn gate without authenticating
+a companion. It contained no `tower_control` samples, so it cannot establish
+whether the Guardian became controllable. The other supplied file was the
+previous paired run and reproduced `controlled=0`. No further live run has been
+requested while offline work proceeds.
+
+For a controlled solo comparison, close the game and launcher on one PC after
+saving its log. Run these commands in PowerShell from its extracted kit:
+
+```powershell
+$env:DAWN_ACTIVITY_BINDING_TRACE = '1'
+$env:DAWN_NATIVE_ADDRESS_RESOLUTION = '1'
+$env:DAWN_NATIVE_SESSION_TRACE = '1'
+$env:DAWN_NATIVE_IDENTITY_OBSERVATION = '1'
+Start-Process .\MultiDawn.Launcher.exe
+```
+
+Choose the same prepared folder and use **Play solo** with the same character
+and landing point. This keeps the tracing settings and DLL matched while the
+launcher omits the companion connection. Record whether control returns and
+compare the `stage=tower_control` lines.
 
 ## Build a kit from source
 

@@ -20,6 +20,7 @@ constexpr wchar_t pipeId[] = L"0123456789abcdef0123456789abcdef";
 constexpr char nonce[] = "fedcba9876543210fedcba9876543210";
 std::atomic<unsigned> checks{0};
 std::atomic<unsigned> localPublications{0}, peerPublications{0};
+std::atomic<unsigned> tracedRequests{0}, tracedResults{0};
 dawn::steam::social::PeerProfile peer{};
 dawn::steam::social::InviteSender sender{};
 void* senderContext{};
@@ -56,7 +57,12 @@ std::string receive(HANDLE pipe) {
 }
 }
 
-namespace dawn::core::log { void write(Channel, Level, std::string_view) noexcept {} }
+namespace dawn::core::log {
+void write(Channel, Level, std::string_view line) noexcept {
+    if (line == "ev=multiplayer_companion stage=invitation_preflight result=request_sent") ++fixture::tracedRequests;
+    if (line == "ev=multiplayer_companion stage=invitation_preflight result=accepted_ticket_verified") ++fixture::tracedResults;
+}
+}
 namespace dawn::steam::social {
 bool set_local_identity(std::uint64_t id, std::string_view) noexcept {
     ++fixture::localPublications; return id == fixture::localId;
@@ -332,6 +338,64 @@ static void v3_case(unsigned variant) {
     CloseHandle(advance); CloseHandle(ready); CloseHandle(pipe);
 }
 
+static void traced_acceptance_case(bool revoked) {
+    namespace client = dawn::core::multiplayer;
+    const std::string ticket = "0123456789ABCDEF0123456789ABCDEF";
+    SetEnvironmentVariableW(L"DAWN_COMPANION_PROTOCOL", L"3");
+    SetEnvironmentVariableW(L"DAWN_ACTIVITY_BINDING_TRACE", L"1");
+    const HANDLE pipe = CreateNamedPipeW(L"\\\\.\\pipe\\MultiDawn-0123456789abcdef0123456789abcdef",
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+        1, 4096, 4096, 1000, nullptr);
+    const HANDLE ready = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    const HANDLE drained = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    CHECK(pipe != INVALID_HANDLE_VALUE && ready != nullptr && drained != nullptr);
+    const auto requestsBefore = fixture::tracedRequests.load(), resultsBefore = fixture::tracedResults.load();
+    std::thread server([&] {
+        CHECK(ConnectNamedPipe(pipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED);
+        CHECK(fixture::receive(pipe) == std::string("HELLO 3 ") + fixture::nonce);
+        fixture::send(pipe, "WELCOME 3 76561197960265729 76561197960265730 50656572 1 11111111111111111111111111111111 9");
+        fixture::send(pipe, "RUNTIME 76561197960265730 22222222222222222222222222222222 2");
+        fixture::send(pipe, "ACCEPTED 76561197960265730 " + ticket + " 60000");
+        fixture::send(pipe, "ACCEPTED 76561197960265730 " + ticket + " 60000");
+        if (revoked) fixture::send(pipe, "REVOKED " + ticket);
+        SetEvent(ready);
+        CHECK(WaitForSingleObject(drained, 5000) == WAIT_OBJECT_0);
+        DWORD queued{};
+        CHECK(PeekNamedPipe(pipe, nullptr, 0, nullptr, &queued, nullptr) && (queued != 0) == !revoked);
+        if (!revoked) {
+            const auto request = fixture::receive(pipe);
+            client::protocol::Fields fields;
+            CHECK(client::protocol::split(request, fields) && fields.count == 4
+                && fields.values[0] == "PREFLIGHT" && client::protocol::ticket(fields.values[1])
+                && fields.values[2] == "76561197960265730" && fields.values[3] == ticket);
+            CHECK(PeekNamedPipe(pipe, nullptr, 0, nullptr, &queued, nullptr) && queued == 0);
+            fixture::send(pipe, "PREFLIGHT_OK " + std::string(fields.values[1]) + " 76561197960265730 "
+                + ticket + " 9 11111111111111111111111111111111 22222222222222222222222222222222 59000");
+        }
+        SetEvent(ready);
+        char ignored{}; DWORD got{};
+        (void)ReadFile(pipe, &ignored, 1, &got, nullptr);
+    });
+    CHECK(client::initialize());
+    CHECK(WaitForSingleObject(ready, 5000) == WAIT_OBJECT_0);
+    client::service(GetTickCount64());
+    client::AcceptedInvitationIntent intent{};
+    CHECK(client::take_accepted_invitation(intent) == !revoked);
+    if (!revoked) CHECK(intent.ticket.data() == ticket && intent.peerSteamId == fixture::remoteId);
+    SetEvent(drained);
+    CHECK(WaitForSingleObject(ready, 5000) == WAIT_OBJECT_0);
+    client::service(GetTickCount64());
+    CHECK(client::connected());
+    CHECK(fixture::tracedRequests == requestsBefore + (revoked ? 0U : 1U));
+    CHECK(fixture::tracedResults == resultsBefore + (revoked ? 0U : 1U));
+    client::InvitationPreflightObservation publicResult{};
+    CHECK(!client::take_invitation_preflight(publicResult));
+    client::shutdown();
+    server.join();
+    CloseHandle(drained); CloseHandle(ready); CloseHandle(pipe);
+    SetEnvironmentVariableW(L"DAWN_ACTIVITY_BINDING_TRACE", nullptr);
+}
+
 static void pinned_handshake_case(const wchar_t* pairGeneration, const wchar_t* peerId, bool expected) {
     namespace client = dawn::core::multiplayer;
     SetEnvironmentVariableW(L"DAWN_COMPANION_PROTOCOL", L"3");
@@ -399,6 +463,7 @@ static void malformed_pin_cases() {
 
 int main() {
     namespace client = dawn::core::multiplayer;
+    SetEnvironmentVariableW(L"DAWN_ACTIVITY_BINDING_TRACE", nullptr);
     SetEnvironmentVariableW(L"DAWN_COMPANION_ID", nullptr);
     SetEnvironmentVariableW(L"DAWN_COMPANION_NONCE", nullptr);
     SetEnvironmentVariableW(L"DAWN_COMPANION_PID", nullptr);
@@ -476,6 +541,8 @@ int main() {
     }
     for (unsigned variant = 0; variant <= 15; ++variant) v3_case(variant);
     for (unsigned variant = 20; variant <= 26; ++variant) v3_case(variant);
+    traced_acceptance_case(false);
+    traced_acceptance_case(true);
     pinned_handshake_case(L"9", L"76561197960265730", true);
     pinned_handshake_case(L"8", L"76561197960265730", false);
     pinned_handshake_case(L"9", L"76561197960265729", false);

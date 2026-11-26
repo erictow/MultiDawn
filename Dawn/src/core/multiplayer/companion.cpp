@@ -23,6 +23,8 @@ std::uint32_t g_version{protocol::kVersion};
 steam::social::PeerProfile g_profile{};
 InvitationIntentState g_invitations{};
 InvitationPreflightState g_preflight{};
+InvitationPreflightState g_tracePreflight{};
+bool g_tracePreflightEnabled{};
 std::array<char, 33> g_localEpoch{};
 std::uint64_t g_pairGeneration{}, g_companionGeneration{};
 // These counters survive teardown; stale copied observations cannot revive after slot reuse.
@@ -96,6 +98,8 @@ void close_locked() noexcept {
     g_profile = {};
     g_invitations = {};
     g_preflight = {};
+    g_tracePreflight = {};
+    g_tracePreflightEnabled = false;
     g_localEpoch = {};
     g_pairGeneration = g_companionGeneration = 0;
 }
@@ -149,6 +153,7 @@ void close_locked() noexcept {
     if (!profile.gameRunning) {
         g_invitations = {};
         g_preflight = {};
+        g_tracePreflight = {};
         clear_ticketed_invitation();
     }
     return true;
@@ -160,6 +165,41 @@ void report(const char* result) noexcept {
     const int count = std::snprintf(line.data(), line.size(), "ev=multiplayer_companion result=%s", result);
     if (count > 0 && static_cast<std::size_t>(count) < line.size())
         log::write(log::Channel::core, log::Level::info, {line.data(), static_cast<std::size_t>(count)});
+}
+
+/** Builds the request before either mailbox is changed. */
+[[nodiscard]] bool make_preflight_request(std::uint64_t peer, std::string_view ticket,
+                                           std::array<char, 33>& nonce,
+                                           protocol::Message& request) noexcept {
+    if (!protocol::steam_identity(peer) || !protocol::ticket(ticket)) return false;
+    std::array<unsigned char, 16> random{};
+    if (BCryptGenRandom(nullptr, random.data(), static_cast<ULONG>(random.size()), BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) return false;
+    constexpr char digits[] = "0123456789ABCDEF";
+    for (std::size_t index = 0; index < random.size(); ++index) {
+        nonce[index * 2] = digits[random[index] >> 4U];
+        nonce[index * 2 + 1] = digits[random[index] & 15U];
+    }
+    std::array<char, 32> peerText{};
+    const int count = std::snprintf(peerText.data(), peerText.size(), "%llu", static_cast<unsigned long long>(peer));
+    return count > 0 && static_cast<std::size_t>(count) < peerText.size()
+        && protocol::append(request, "PREFLIGHT ") && protocol::append(request, nonce.data())
+        && protocol::append(request, " ") && protocol::append(request, {peerText.data(), static_cast<std::size_t>(count)})
+        && protocol::append(request, " ") && protocol::append(request, ticket);
+}
+
+/** Caller holds g_lock. Trace and controller requests retain separate results. */
+[[nodiscard]] bool begin_preflight_locked(InvitationPreflightState& state, std::uint64_t peer,
+                                          std::string_view ticket, std::string_view nonce,
+                                          const protocol::Message& request, DWORD timeout) noexcept {
+    if (g_pipe == INVALID_HANDLE_VALUE || g_version != protocol::kPreflightVersion
+        || !g_peerGameRunning || peer != g_peer || !g_invitations.ready()
+        || g_requestGenerationClock == UINT64_MAX
+        || !state.begin(nonce, peer, ticket, g_localEpoch.data(), g_invitations.epoch(),
+                        g_pairGeneration, g_companionGeneration, g_requestGenerationClock + 1, GetTickCount64())) return false;
+    ++g_requestGenerationClock;
+    if (send_locked(request, timeout)) return true;
+    state = {};
+    return false;
 }
 
 /** Optional child-process pins use bounded positive decimal fields; empty is not absent. */
@@ -264,7 +304,13 @@ bool initialize() noexcept {
         if (accepted) g_companionGeneration = ++g_companionGenerationClock;
     }
     if (accepted) accepted = steam::social::set_local_identity(local, steam::social::local_persona_name()) && apply_peer(fields, true);
-    if (accepted) g_lastReceived = GetTickCount64();
+    if (accepted) {
+        g_lastReceived = GetTickCount64();
+        std::array<wchar_t, 4> trace{};
+        g_tracePreflightEnabled = selectedVersion == protocol::kPreflightVersion
+            && GetEnvironmentVariableW(L"DAWN_ACTIVITY_BINDING_TRACE", trace.data(), static_cast<DWORD>(trace.size())) == 1
+            && trace[0] == L'1';
+    }
     else close_locked();
     ReleaseSRWLockExclusive(&g_lock);
     if (accepted) {
@@ -279,6 +325,7 @@ bool initialize() noexcept {
 void service(std::uint64_t now) noexcept {
     if (!TryAcquireSRWLockExclusive(&g_lock)) return;
     bool failed = false;
+    std::array<char, 33> traceTicket{};
     for (unsigned budget = 0; g_pipe != INVALID_HANDLE_VALUE && budget < 8; ++budget) {
         std::array<unsigned char, 4> peek{};
         DWORD copied = 0, available = 0;
@@ -305,7 +352,7 @@ void service(std::uint64_t now) noexcept {
                 || !protocol::decimal(fields.values[3], version)
                 || version > (g_version == protocol::kPreflightVersion ? 3U : 2U)
                 || !g_invitations.runtime(fields.values[2], version > 2 ? 2 : version, changed)) { failed = true; break; }
-            if (changed) { clear_ticketed_invitation(); g_preflight = {}; }
+            if (changed) { clear_ticketed_invitation(); g_preflight = {}; g_tracePreflight = {}; }
             g_peerGameRunning = version != 0;
             g_profile.gameRunning = g_peerGameRunning;
             if (!steam::social::set_peer(g_profile)) { failed = true; break; }
@@ -319,26 +366,34 @@ void service(std::uint64_t now) noexcept {
                 || !protocol::ticket(fields.values[2]) || !protocol::decode_text(fields.values[3], connect)
                 || !steam::social::receive_invitation(sender, connect.data(), fields.values[2])) { failed = true; break; }
             g_preflight.replace(fields.values[2]);
+            g_tracePreflight.replace(fields.values[2]);
             continue;
         }
         if (g_version >= protocol::kIntentVersion && fields.values[0] == "ACCEPTED") {
             std::uint64_t peer{}, ttl{};
+            bool fresh = false;
             if (fields.count != 4 || !g_peerGameRunning || !protocol::decimal(fields.values[1], peer)
                 || peer != g_peer || !protocol::decimal(fields.values[3], ttl)
-                || !g_invitations.accepted(peer, fields.values[2], ttl, now)) { failed = true; break; }
+                || !g_invitations.accepted(peer, fields.values[2], ttl, now, &fresh)) { failed = true; break; }
             g_preflight.replace(fields.values[2]);
+            g_tracePreflight.replace(fields.values[2]);
+            if (g_tracePreflightEnabled && fresh) {
+                std::memcpy(traceTicket.data(), fields.values[2].data(), fields.values[2].size());
+            }
             continue;
         }
         if (g_version >= protocol::kIntentVersion && fields.values[0] == "REVOKED") {
             if (fields.count != 2 || !protocol::ticket(fields.values[1])) { failed = true; break; }
             g_invitations.revoke(fields.values[1]);
             g_preflight.revoke(fields.values[1]);
+            g_tracePreflight.revoke(fields.values[1]);
             (void)steam::social::revoke_invitation(fields.values[1]);
             continue;
         }
         if (g_version == protocol::kPreflightVersion
             && (fields.values[0] == "PREFLIGHT_OK" || fields.values[0] == "PREFLIGHT_NO")) {
-            if (!g_preflight.response(fields, now)) { failed = true; break; }
+            if (!g_preflight.response(fields, now)
+                || (g_tracePreflightEnabled && !g_tracePreflight.response(fields, now))) { failed = true; break; }
             continue;
         }
         if (g_version == protocol::kVersion && fields.values[0] == "INVITEFROM" && fields.count == 3) {
@@ -354,9 +409,26 @@ void service(std::uint64_t now) noexcept {
     }
     g_invitations.expire(now);
     g_preflight.expire(now);
+    g_tracePreflight.expire(now);
     if (g_pipe != INVALID_HANDLE_VALUE && now > g_lastReceived && now - g_lastReceived > 15000) failed = true;
+    InvitationPreflightObservation traceObservation{};
+    const bool traceVerified = !failed && g_tracePreflightEnabled
+        && g_tracePreflight.take(now, traceObservation)
+        && g_invitations.current(g_peer, traceObservation.ticket.data(), now);
+    bool traceSent = false;
+    if (!failed && g_tracePreflightEnabled && traceTicket[0] != '\0'
+        && g_invitations.current(g_peer, traceTicket.data(), GetTickCount64())) {
+        std::array<char, 33> nonce{};
+        protocol::Message request;
+        traceSent = make_preflight_request(g_peer, traceTicket.data(), nonce, request)
+            && begin_preflight_locked(g_tracePreflight, g_peer, traceTicket.data(), nonce.data(), request, 50);
+    }
     if (failed) close_locked();
     ReleaseSRWLockExclusive(&g_lock);
+    if (traceSent) log::write(log::Channel::core, log::Level::info,
+                             "ev=multiplayer_companion stage=invitation_preflight result=request_sent");
+    if (traceVerified) log::write(log::Channel::core, log::Level::info,
+                                 "ev=multiplayer_companion stage=invitation_preflight result=accepted_ticket_verified");
     if (failed) {
         steam::social::set_invite_sender(nullptr, nullptr);
         steam::social::set_invite_accepted_sender(nullptr, nullptr);
@@ -397,32 +469,11 @@ bool invitation_intents_ready() noexcept {
 }
 
 bool request_invitation_preflight(std::uint64_t peer, std::string_view ticket) noexcept {
-    if (!protocol::steam_identity(peer) || !protocol::ticket(ticket)) return false;
-    std::array<unsigned char, 16> random{};
-    if (BCryptGenRandom(nullptr, random.data(), static_cast<ULONG>(random.size()), BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) return false;
-    constexpr char digits[] = "0123456789ABCDEF";
     std::array<char, 33> nonce{};
-    for (std::size_t index = 0; index < random.size(); ++index) {
-        nonce[index * 2] = digits[random[index] >> 4U];
-        nonce[index * 2 + 1] = digits[random[index] & 15U];
-    }
     protocol::Message request;
-    std::array<char, 32> peerText{};
-    const int count = std::snprintf(peerText.data(), peerText.size(), "%llu", static_cast<unsigned long long>(peer));
-    if (count <= 0 || static_cast<std::size_t>(count) >= peerText.size()
-        || !protocol::append(request, "PREFLIGHT ") || !protocol::append(request, nonce.data())
-        || !protocol::append(request, " ") || !protocol::append(request, {peerText.data(), static_cast<std::size_t>(count)})
-        || !protocol::append(request, " ") || !protocol::append(request, ticket)) return false;
+    if (!make_preflight_request(peer, ticket, nonce, request)) return false;
     AcquireSRWLockExclusive(&g_lock);
-    bool started = g_pipe != INVALID_HANDLE_VALUE && g_version == protocol::kPreflightVersion
-        && g_peerGameRunning && peer == g_peer && g_invitations.ready()
-        && g_requestGenerationClock != UINT64_MAX
-        && g_preflight.begin(nonce.data(), peer, ticket, g_localEpoch.data(), g_invitations.epoch(),
-                             g_pairGeneration, g_companionGeneration, g_requestGenerationClock + 1, GetTickCount64());
-    if (started) {
-        ++g_requestGenerationClock;
-        if (!send_locked(request)) { g_preflight = {}; started = false; }
-    }
+    const bool started = begin_preflight_locked(g_preflight, peer, ticket, nonce.data(), request, 250);
     ReleaseSRWLockExclusive(&g_lock);
     return started;
 }
