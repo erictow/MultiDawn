@@ -6,6 +6,7 @@
 
 #include "../../../state/gameplay/definition.h"
 #include "established_packet.h"
+#include "rolling_reliable_limits.h"
 
 namespace dawn::middleware::gameplay::peer {
 
@@ -42,5 +43,34 @@ std::size_t accept_records(const QueueRecords& records,
  */
 [[nodiscard]] bool drain_message(state::gameplay::ReliableQueue& queue,
                                  AssembledMessage& output) noexcept;
+
+struct RollingAssembledMessage {
+    std::array<std::byte, kRollingFramedCapacity> bytes{};
+    std::size_t bitCount{};
+    std::uint8_t id{};
+    std::uint32_t declaredSize{};
+    std::size_t bodyBitOffset{};
+};
+
+enum class RollingDrainResult : std::uint8_t { pending, complete, refused };
+
+/**
+ * Offline large-queue receiver. Moves a contiguous prefix out of the existing
+ * reorder window before the terminal record arrives. Caller owns the exact link
+ * lifetime and packet acknowledgement. The dropped count includes both past
+ * retransmits and records beyond the reorder window. An oversized or malformed
+ * assembled run fences this receiver until reset. No live receive path uses it.
+ */
+class RollingReliableInbox final {
+public:
+    [[nodiscard]] bool reset(std::uint16_t firstSequence = state::gameplay::kFirstMessageSequence) noexcept;
+    [[nodiscard]] bool accept(const QueueRecords& records, std::size_t& dropped) noexcept;
+    [[nodiscard]] RollingDrainResult drain(RollingAssembledMessage& output) noexcept;
+
+private:
+    state::gameplay::ReliableQueue queue_{{}, state::gameplay::kFirstMessageSequence, true};
+    RollingAssembledMessage pending_{};
+    bool refused_{};
+};
 
 } // namespace dawn::middleware::gameplay::peer

@@ -1529,6 +1529,9 @@
     <ClInclude Include="src\server\gameplay\gameplay_advertisement.h" />
     <ClInclude Include="src\middleware\web_service\messages\opcode901\opcode901_codec.h" />
     <ClInclude Include="src\middleware\gameplay\peer\reliable_assembly.h" />
+    <ClInclude Include="src\middleware\gameplay\peer\reliable_message_plan.h" />
+    <ClInclude Include="src\middleware\gameplay\peer\reliable_outbox.h" />
+    <ClInclude Include="src\middleware\gameplay\peer\rolling_reliable_limits.h" />
     <ClInclude Include="src\middleware\gameplay\peer\join_messages.h" />
     <ClInclude Include="src\middleware\gameplay\group\session_messages.h" />
     <ClInclude Include="src\middleware\gameplay\group\session_state.h" />

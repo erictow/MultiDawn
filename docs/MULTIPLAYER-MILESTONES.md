@@ -29,9 +29,12 @@ maximum-width six-human membership body measures 1,048 bytes and is refused by
 the current writer and queue. An offline sender now stages that body and feeds
 its 33 fragments into the existing 24-entry send queue as acknowledgements
 retire the prefix. This uses the same framing and acknowledgement code as the
-live transport. The current local receiver still cannot assemble all 33
-fragments, and archived-game receiver support needs a live check before this
-sender can be used for gameplay.
+live transport. An offline receiver assembles all 33 by draining contiguous
+fragments from the existing 32-slot reorder window while awaiting the final
+fragment. The existing live receiver still stops at 32. Integrating the new
+assembler requires a per-link lifetime and acknowledgement policy for duplicates
+and out-of-window fragments. Archived-game receiver support still needs a live
+check before the longer message can be used for gameplay.
 
 Launcher pairing, native social presence and invitation controls also currently
 have one-partner assumptions. They must gain per-player connections and state

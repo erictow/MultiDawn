@@ -6,13 +6,9 @@
 #include <span>
 
 #include "established_packet.h"
+#include "rolling_reliable_limits.h"
 
 namespace dawn::middleware::gameplay::peer {
-
-/** Covers the measured six-human membership update without changing live transport limits. */
-inline constexpr std::size_t kRollingBodyCapacity = 1'048;
-inline constexpr std::size_t kRollingFramedCapacity = kRollingBodyCapacity + 3;
-inline constexpr std::size_t kRollingFragmentCapacity = kRollingFramedCapacity / kLargeFragmentBytes + 1;
 
 /**
  * Stages one whole reliable message and feeds the existing prefix flight queue as ACKs retire it.

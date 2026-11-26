@@ -354,10 +354,10 @@ The native test projects are:
 - `Dawn/unit/remote_human_membership_tests.vcxproj`: independent decoding of
   two-, three- and six-human BAP bodies, stable gaps, per-human region lanes,
   optional D4/opaque fields, maximum size, rejection and unchanged solo goldens.
-- `Dawn/unit/reliable_outbox_tests.vcxproj`: offline staging of the maximum-width
-  six-human membership message and ordered transfer through the existing send
-  queue. Covers the exact wire stream, acknowledged prefix, sequence wrap,
-  backpressure and the current receiver limit.
+- `Dawn/unit/reliable_outbox_tests.vcxproj`: offline staging and reassembly of a
+  maximum-width six-human membership message using the existing queue sizes.
+  Covers the exact wire stream, acknowledged prefix, sequence wrap, reordered
+  fragments, backpressure, and the existing live receiver's 32-fragment limit.
 
 `companion_bridge_harness.vcxproj` builds a small native test worker that links
 the production companion client with test social/log sinks. The launcher's

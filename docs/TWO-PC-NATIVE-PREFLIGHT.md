@@ -110,13 +110,13 @@ is no matching nickname, the game sees the peer's advertised persona.
 
 If the camera problem appears again, capture the affected game's log before
 relaunching. Compare the `spawn_hold_loader`, `spawn_gate`, `fly_in_complete`,
-`spawn_arrival`, and `tower_spawn_recovery` events with the host's normal
-`spawn_gate result=native_allowed` and `fly_in_complete`. Check whether the
-Guardian is visible and responds to movement with the game focused and the Dawn
-menu closed. An `ev=noclip stage=toggle` line indicates that Dawn handled the
-key, while actual movement also requires a character physics body. A comparison
-using Solo Play from the same isolated folder, character, and landing zone can
-help narrow down whether the symptom is specific to the paired test launch.
+`spawn_arrival`, and `tower_spawn_recovery` events on both PCs. The host's
+`spawn_gate result=native_allowed` and `fly_in_complete` mark loader progress.
+Check whether the Guardian is visible and responds to movement with the game
+focused and the Dawn menu closed. An `ev=noclip stage=toggle` line indicates
+that Dawn handled the key, while movement also requires a character physics
+body. A comparison using Solo Play from the same isolated folder, character,
+and landing zone can identify whether the symptom depends on pairing.
 
 A development runtime running with `DAWN_ACTIVITY_BINDING_TRACE=1` also emits
 `stage=tower_control` from existing Tower camera frame observations. This shows
