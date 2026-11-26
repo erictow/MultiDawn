@@ -41,7 +41,8 @@ public:
             auto& actor=actors_[i][n];if(actor.receipt!=receipt || actor.dead) { continue; }
             // Retain readiness through later damage and intentional scene holds.
             actor.readiness=readiness;actor.ready|=matches(policies_[i],readiness);return true;
-        }return false;
+        }
+        return false;
     }
     template<class Visit> void pending(Visit visit) const noexcept {
         for(std::size_t i=0;i<Groups;++i) for(std::uint8_t n=0;n<counts_[i];++n) {

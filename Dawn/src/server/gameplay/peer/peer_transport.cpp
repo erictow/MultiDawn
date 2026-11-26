@@ -1,6 +1,7 @@
 #include "peer_transport.h"
 #include "traffic_log_repetition.h"
 #include "peer_link_lookup.h"
+#include "peer_view_echo.h"
 
 #include <Windows.h>
 
@@ -16,6 +17,7 @@
 #include "../../../middleware/gameplay/peer/established_packet.h"
 #include "../../../middleware/gameplay/peer/join_messages.h"
 #include "../../../middleware/gameplay/peer/peer_container.h"
+#include "../../../middleware/gameplay/peer/packets_discarded.h"
 #include "../../../middleware/gameplay/peer/reliable_assembly.h"
 #include "../association/association_host.h"
 #include "../dtls/dtls_host.h"
@@ -53,8 +55,6 @@ constexpr std::size_t kReplyCapacity = 1024;
 constexpr unsigned kMarkerShift = 7;
 /** Bits in one byte. */
 constexpr unsigned kByteBits = 8;
-/** Mask of one byte. */
-constexpr std::uint32_t kByteMask = 0xFF;
 /** The connection guard is the sequence modulo four. */
 constexpr std::uint32_t kSequenceGuardBase = 4;
 /** Delay sentinel used until a round trip has been measured. */
@@ -84,13 +84,41 @@ constexpr std::uint8_t kPlayerPropertiesId = 37;
 constexpr std::size_t kSessionPublicationDumpCapacity = 128;
 std::atomic<std::uint64_t> g_publicationCaptureId{0};
 
-SRWLOCK g_lock{SRWLOCK_INIT};
+SRWLOCK g_lock = SRWLOCK_INIT;
 std::array<state::gameplay::PeerLink, state::gameplay::kAssociationCapacity> g_peers;
 /** Channel ids this host hands out. The peer refuses one that does not increase. */
 std::uint32_t g_channelId{0};
 /** Reporting state is independent of transport state and uses its own short-held lock. */
-SRWLOCK g_trafficReportLock{SRWLOCK_INIT};
+SRWLOCK g_trafficReportLock = SRWLOCK_INIT;
 TrafficLogRepetition g_trafficReports{};
+/** Diagnostic state is separate from all native counters and reliable queues. */
+struct DiscardReportState { std::uint32_t count{}; bool seen{}; };
+core::log::ObservationTable<TrafficLogKey, DiscardReportState, 32> g_discardReports{};
+unsigned g_discardEvents{};
+
+/** Observe ID4 only; do not consume it or synthesize any protocol reply. */
+void report_packets_discarded(const TrafficLogKey& key, const wire::AssembledMessage& message) noexcept {
+    static const bool enabled = []() noexcept {
+        std::array<wchar_t, 2> value{};
+        return GetEnvironmentVariableW(L"DAWN_ACTIVITY_BINDING_TRACE", value.data(),
+            static_cast<DWORD>(value.size())) == 1 && value[0] == L'1';
+    }();
+    if (!enabled || message.id != wire::packets_discarded::kMessageId) return;
+    std::uint32_t increment{};
+    if (!wire::packets_discarded::decode(message, increment)) return;
+    bool emit{};
+    AcquireSRWLockExclusive(&g_trafficReportLock);
+    if (g_discardEvents < 128) {
+        auto* state = g_discardReports.find_or_insert(key);
+        if (state != nullptr && (!state->seen || state->count != increment)) {
+            state->seen = true; state->count = increment; ++g_discardEvents; emit = true;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_trafficReportLock);
+    if (emit) report(core::log::Level::info,
+        "ev=gameplay stage=packets_discarded pid=%lu count=%u semantics=increment",
+        GetCurrentProcessId(), static_cast<unsigned>(increment));
+}
 
 [[nodiscard]] core::log::RepetitionReport observe_traffic(const TrafficLogKey& key,
                                                          std::uint16_t sequence,
@@ -639,7 +667,8 @@ std::size_t apply_acknowledgement(state::gameplay::PeerLink& peer,
  */
 void consume_established(const state::gameplay::Endpoint& from,
                          std::span<const std::byte> payload,
-                         std::uint64_t now) noexcept {
+                         std::uint64_t now,
+                         bool resolvedNative) noexcept {
     wire::EstablishedPacket packet{};
     if (!wire::decode_established(payload, false, packet)) {
         report(core::log::Level::warn, "ev=gameplay stage=packet result=drop reason=grammar");
@@ -652,6 +681,7 @@ void consume_established(const state::gameplay::Endpoint& from,
     std::size_t queueRemaining = 0;
     std::uint16_t clearedPacket = 0;
     std::uint64_t sessionId = 0;
+    std::size_t viewsQueued = 0, viewsRejected = 0;
     TrafficLogKey logKey{};
     // The reliable window never resynchronises, so a stalled queue is only visible as a refused
     // record against the sequence it is still waiting for.
@@ -665,6 +695,9 @@ void consume_established(const state::gameplay::Endpoint& from,
     std::array<wire::AssembledMessage, kMessageReportCapacity> bodies{};
     if (peer != nullptr) {
         const bool wasConnected = peer->stage == state::gameplay::PeerStage::connected;
+        // Preserve the establishment gate: only a subsequent connected packet
+        // may publish application replies, including the native view echo.
+        if (wasConnected) { peer->applicationReady = true; }
         sessionId = sole_session_locked(*peer);
         if (packet.ack.outboundHeadPresent) {
             record_sequence(*peer, packet.ack.outboundHead);
@@ -678,27 +711,29 @@ void consume_established(const state::gameplay::Endpoint& from,
         largeNext = peer->large.nextSequence;
         largeFirst = packet.large.count == 0 ? 0 : packet.large.records[0].sequence;
         wire::accept_records(packet.small, peer->small);
-        wire::AssembledMessage message{};
-        while (wire::drain_message(peer->large, message)) {
+        wire::AssembledMessage assembled{};
+        const auto acceptMessage = [&](const wire::AssembledMessage& message) noexcept {
             apply_message(*peer, message);
+            if (resolvedNative && message.id == middleware::gameplay::group::kViewMessageId
+                && view_echo::unaffiliated(*peer)) {
+                const auto result = view_echo::queue(*peer, view_echo::key_for(*peer), message);
+                if (result == view_echo::Result::queued) { ++viewsQueued; }
+                else { ++viewsRejected; }
+                // This authenticated link-level exchange never grants a group
+                // membership, even when a malformed view carries a valid token.
+                return;
+            }
             if (deliveredCount < delivered.size()) {
                 delivered[deliveredCount] = message.id;
                 bodies[deliveredCount] = message;
                 ++deliveredCount;
             }
+        };
+        while (wire::drain_message(peer->large, assembled)) {
+            acceptMessage(assembled);
         }
-        while (wire::drain_message(peer->small, message)) {
-            apply_message(*peer, message);
-            if (deliveredCount < delivered.size()) {
-                delivered[deliveredCount] = message.id;
-                bodies[deliveredCount] = message;
-                ++deliveredCount;
-            }
-        }
-        // Do not release application traffic on the packet that changes the stage. Its
-        // acknowledgement completes the remote side's establishment only after this exchange.
-        if (wasConnected) {
-            peer->applicationReady = true;
+        while (wire::drain_message(peer->small, assembled)) {
+            acceptMessage(assembled);
         }
         stage = static_cast<unsigned>(peer->stage);
         logKey = traffic_log_key(*peer, false);
@@ -706,6 +741,14 @@ void consume_established(const state::gameplay::Endpoint& from,
     ReleaseSRWLockExclusive(&g_lock);
     if (peer == nullptr) {
         return;
+    }
+    if (viewsQueued != 0) {
+        report(core::log::Level::info,
+               "ev=gameplay stage=view_echo result=queued native=1 count=%zu", viewsQueued);
+    }
+    if (viewsRejected != 0) {
+        report(core::log::Level::warn,
+               "ev=gameplay stage=view_echo result=rejected native=1 count=%zu", viewsRejected);
     }
     for (std::size_t index = 0; index < deliveredCount; ++index) {
         report(core::log::Level::info,
@@ -718,6 +761,7 @@ void consume_established(const state::gameplay::Endpoint& from,
         if (body.id == static_cast<std::uint8_t>(wire::ConnectId::establish)) {
             continue;
         }
+        report_packets_discarded(logKey, body);
         report_session_publication_message(from, body);
         // Group handling runs outside the lock because answering takes it again.
         bits::Reader reader({body.bytes.data(), state::gameplay::kReassemblyCapacity});
@@ -838,7 +882,19 @@ void deliver(const state::gameplay::Endpoint& from,
         consume_container(from, payload, now);
         return;
     }
-    consume_established(from, payload, now);
+    consume_established(from, payload, now, false);
+}
+
+/** Authenticated native routes may establish a link view before a group join. */
+void deliver_resolved(const state::gameplay::Endpoint& from,
+                      std::span<const std::byte> payload,
+                      std::uint64_t now) noexcept {
+    if (payload.empty()) { return; }
+    if ((std::to_integer<unsigned>(payload[0]) >> kMarkerShift) != 0) {
+        consume_container(from, payload, now);
+        return;
+    }
+    consume_established(from, payload, now, true);
 }
 
 /** Sends one already-encoded out-of-band body in its own container. */
@@ -1079,6 +1135,8 @@ void reset() noexcept {
     ReleaseSRWLockExclusive(&g_lock);
     AcquireSRWLockExclusive(&g_trafficReportLock);
     g_trafficReports.clear();
+    // No links survive reset. Keep the per-DLL event budget monotonic.
+    g_discardReports.clear();
     ReleaseSRWLockExclusive(&g_trafficReportLock);
 }
 

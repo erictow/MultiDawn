@@ -230,11 +230,14 @@ AdvertisementReadiness request_advertisement_host(
     return claimed ? AdvertisementReadiness::pending : AdvertisementReadiness::absent;
 }
 
-/** Acquires a complete exact advertisement snapshot without provisioning or State selection. */
-bool acquire_advertisement_snapshot(state::activity::ActivityInstanceKey source,
-                                    std::int32_t region,
-                                    AdvertisementSnapshot& output,
-                                    group::HostActivityLineageLease& lease) noexcept {
+namespace {
+
+/** Shared exact acquisition; diagnostic observation deliberately skips publication hooks. */
+[[nodiscard]] bool acquire_snapshot(state::activity::ActivityInstanceKey source,
+                                     std::int32_t region,
+                                     AdvertisementSnapshot& output,
+                                     group::HostActivityLineageLease& lease,
+                                     bool publish) noexcept {
     output = {};
     group::release_host_activity_lineage(lease);
     middleware::gameplay::descriptor::JoinEndpoint join{};
@@ -269,19 +272,48 @@ bool acquire_advertisement_snapshot(state::activity::ActivityInstanceKey source,
     citizen.regionIndex = region;
     citizen.ambassadorSlot = ambassador_slot(kQueriedMemberSlot);
     citizen.present = true;
-    state::gameplay::replication::Address roleAddress{};
-    for(std::size_t i=0;i<roleAddress.size();++i)roleAddress[i]=std::to_integer<unsigned char>(citizen.address[i]);
-    (void)state::gameplay::replication::publish_control_host(join.machineId,roleAddress);
-    client::hooks::retail_log::register_gameplay_join_descriptor(citizen.descriptor.data(),
-                                                                 citizen.descriptor.size(),
-                                                                 region,
-                                                                 host.sessionId);
+    if (publish) {
+        state::gameplay::replication::Address roleAddress{};
+        for(std::size_t i=0;i<roleAddress.size();++i)roleAddress[i]=std::to_integer<unsigned char>(citizen.address[i]);
+        (void)state::gameplay::replication::publish_control_host(join.machineId,roleAddress);
+        client::hooks::retail_log::register_gameplay_join_descriptor(citizen.descriptor.data(),
+                                                                     citizen.descriptor.size(),
+                                                                     region,
+                                                                     host.sessionId);
+    }
     output.citizen = citizen;
     output.host = host;
     output.source = source;
     output.regionIndex = region;
     output.readiness = AdvertisementReadiness::ready;
     return true;
+}
+
+} // namespace
+
+/** Acquires a complete exact advertisement snapshot without provisioning or State selection. */
+bool acquire_advertisement_snapshot(state::activity::ActivityInstanceKey source,
+                                    std::int32_t region,
+                                    AdvertisementSnapshot& output,
+                                    group::HostActivityLineageLease& lease) noexcept {
+    return acquire_snapshot(source, region, output, lease, true);
+}
+
+bool acquire_advertisement_observation(state::activity::ActivityInstanceKey source,
+                                       std::int32_t region,
+                                       AdvertisedActivityObservation& output,
+                                       group::HostActivityLineageLease& lease) noexcept {
+    output = {};
+    AdvertisementSnapshot snapshot{};
+    const bool acquired = acquire_snapshot(source, region, snapshot, lease, false);
+    output.readiness = snapshot.readiness;
+    if (acquired && snapshot.readiness == AdvertisementReadiness::ready) {
+        output.groupMachineId = snapshot.citizen.memberKey;
+        output.host = snapshot.host;
+        output.source = snapshot.source;
+        output.regionIndex = snapshot.regionIndex;
+    }
+    return acquired;
 }
 
 /** Builds the citizen advertisement for one region record. */

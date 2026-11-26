@@ -108,7 +108,57 @@ def trace_addresses(text: str, pid: int) -> tuple[list[int], list[int]]:
         definition for _, definition in initialized if definition))
 
 
-def session_snapshot(read, session: int) -> dict:
+def native_players_snapshot(read, session: int, members: list[dict]) -> dict:
+    # Build-86657 replica layout: session_state.cpp, player count/mask at
+    # 15184/15188 and 32 rows of 424 bytes starting at 15192. Read only the
+    # 25-byte identity/ownership prefix, never the remaining player config.
+    base = session + 0x868
+    header = stable(read, base + 15184, 8)
+    count, mask = struct.unpack("<II", header)
+    slots = [member["player_slot"] for member in members if member["player_slot"] is not None]
+    if (count > 32 or count != mask.bit_count() or len(set(slots)) != len(slots)
+            or any(not 0 <= slot < 32 for slot in slots)
+            or mask != sum(1 << slot for slot in slots)):
+        raise ValueError("Native player counts/mask do not match member ownership")
+    owners = {member["index"]: member for member in members}
+    players, identities = [], set()
+    for slot in range(32):
+        if not mask & (1 << slot):
+            continue
+        row = stable(read, base + 15192 + slot * 424, 25)
+        identity, owner, owned_index, sequence = struct.unpack_from("<QIII", row, 4)
+        if (identity == 0 or identity in identities or owner not in owners
+                or owners[owner]["player_slot"] != slot or owned_index != 0):
+            raise ValueError("Native player identity/ownership is inconsistent")
+        identities.add(identity)
+        players.append({"slot": slot, "player_id": f"0x{identity:016X}",
+                        "member_index": owner, "owned_index": owned_index, "sequence": sequence})
+    return {"player_mask": f"0x{mask:08X}", "players": players,
+            "player_header_stable": read(base + 15184, 8) == header}
+
+
+def identity_fingerprint(sample: dict) -> str | None:
+    """Public scalar diagnostic comparison, never an authentication credential."""
+    role, mode = sample["control"]["managed_identity"], sample["control"]["mode"]
+    if (not 0 <= role < 7 or mode < 0 or not sample["members"]
+            or not sample.get("player_header_stable") or not sample.get("membership_header_stable")):
+        return None
+    values = bytearray(struct.pack("<iiII", role, mode, int(sample["member_mask"], 16), int(sample["player_mask"], 16)))
+    players = {player["member_index"]: player for player in sample["players"]}
+    for member in sorted(sample["members"], key=lambda row: row["index"]):
+        owns = member["player_slot"] is not None
+        values += struct.pack("<IQQIB", member["index"], int(member["machine_id"], 16),
+                              int(member["join_id"], 16), member["state"] & 0xFFFFFFFF, owns)
+        if owns:
+            player = players[member["index"]]
+            values += struct.pack("<IQI", player["slot"], int(player["player_id"], 16), player["sequence"])
+    fingerprint = 14695981039346656037
+    for value in values:
+        fingerprint = ((fingerprint ^ value) * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+    return f"0x{fingerprint:016X}"
+
+
+def session_snapshot(read, session: int, include_players: bool = False) -> dict:
     # SessionState replica starts at session+0x868. Its offsets are documented in
     # middleware/gameplay/group/session_state.cpp and the native handoff probe.
     prefix = stable(read, session + 0x868, 56)
@@ -141,9 +191,15 @@ def session_snapshot(read, session: int) -> dict:
                                    "address": net_address(row[16:102]),
                                    "player_slot": unpack(row, 176, "I") if owned_count else None})
     result["migration_cache"] = descriptor(stable(read, session + 0x1AF04, 128))
+    if include_players:
+        result.update(native_players_snapshot(read, session, result["members"]))
     # Detect movement/reallocation while traversing, without suspending a thread.
     result["membership_header_stable"] = read(session + 0x868, 56) == prefix
     result["authority_state_range"] = 6 <= controls["mode"] <= 9
+    if include_players:
+        fingerprint = identity_fingerprint(result)
+        if fingerprint is not None:
+            result["identity_fingerprint"] = fingerprint
     return result
 
 
@@ -303,6 +359,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--fireteam-manager", type=address, help="Verified world manager; selects its primary session at +0x18 + primary*0x1C8A0")
     result.add_argument("--managed-definition", action="append", type=address, default=[], help="Verified managed-session definition address; repeatable")
     result.add_argument("--trace-log", type=Path, help="Read PID-matching opt-in native-session events from a log (maximum 32 MiB)")
+    result.add_argument("--native-players", action="store_true", help="Read public native player IDs and validate their membership ownership; omit player configuration")
     return result
 
 
@@ -312,6 +369,8 @@ def main(argv=None) -> int:
         raise ValueError("Run with 64-bit Python on Windows")
     if not 0 < args.pid <= 0xFFFFFFFF or any(len(values) > 16 for values in (args.group, args.session, args.managed_definition)):
         raise ValueError("PID must be positive and each address list is limited to 16")
+    if args.native_players and not (args.session or args.trace_log or args.fireteam_manager):
+        raise ValueError("--native-players requires a session address, manager, or trace log")
     expected = args.game_exe.resolve(strict=True)
     if expected.name.lower() != "destiny2.exe":
         raise ValueError("--game-exe must name destiny2.exe")
@@ -358,7 +417,7 @@ def main(argv=None) -> int:
                 report["primary_fireteam"] = {"world_manager": hex(args.fireteam_manager), "primary_index": primary,
                     "session": hex(sessions[-1])}
             for values, key, sample in ((args.group, "groups", group_snapshot),
-                                        (sessions, "sessions", session_snapshot),
+                                        (sessions, "sessions", lambda read, pointer: session_snapshot(read, pointer, args.native_players)),
                                         (definitions, "managed_definitions", definition_snapshot)):
                 for pointer in dict.fromkeys(values):
                     try:

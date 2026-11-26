@@ -1,16 +1,21 @@
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 
 #include "../src/server/gameplay/group/shared_membership.h"
 #include "../src/server/gameplay/peer/peer_link_lookup.h"
 #include "../src/middleware/gameplay/group/session_state.h"
+#include "../src/middleware/gameplay/peer/established_packet.h"
+#include "../src/middleware/gameplay/peer/reliable_assembly.h"
 
 namespace group = dawn::server::gameplay::group;
 namespace wire = dawn::middleware::gameplay::group;
 namespace descriptor = dawn::middleware::gameplay::descriptor;
 namespace bits = dawn::middleware::encoding::bits;
 namespace gameplay = dawn::state::gameplay;
+namespace peer_wire = dawn::middleware::gameplay::peer;
 static unsigned checks{};
 #define CHECK(value) do { ++checks; if (!(value)) { std::fprintf(stderr, "FAIL:%d %s\n", __LINE__, #value); std::abort(); } } while (false)
 
@@ -22,6 +27,157 @@ static std::uint64_t little(const wire::SessionState& state, std::size_t offset,
     return value;
 }
 
+static std::size_t verify_native_snapshot(const group::SharedMembershipSnapshot& snapshot,
+                                          std::span<const group::SharedHuman> humans) {
+    const auto update = snapshot.update();
+    CHECK(update.members.size() == humans.size() + 1 && update.players.size() == humans.size());
+    static wire::SessionState state{};
+    wire::build_session_state(update, state);
+    CHECK(little(state, 28, 4) == humans.size() + 1);
+    CHECK(little(state, 40, 8) == (std::uint64_t{1} << (humans.size() + 1)) - 1);
+    CHECK(little(state, 15184, 4) == humans.size());
+    CHECK(little(state, 15188, 4) == (std::uint64_t{1} << humans.size()) - 1);
+    for (const auto& human : humans) {
+        const auto member = static_cast<std::size_t>(human.slot) + 1;
+        CHECK(update.members[member].machineId == human.machineId);
+        CHECK(update.members[member].address == human.address);
+        CHECK(update.members[member].playerSlot == human.slot);
+        CHECK(little(state, 56 + 184 * member + 120, 8) == human.machineId);
+        CHECK(little(state, 56 + 184 * member + 136, 8) == human.joinId);
+        CHECK(little(state, 15192 + 424 * human.slot + 4, 8) == human.playerId);
+        CHECK(little(state, 15192 + 424 * human.slot + 12, 4) == member);
+        CHECK(little(state, 15192 + 424 * human.slot + 16, 4) == 0);
+        CHECK(little(state, 15192 + 424 * human.slot + 20, 4) == human.addSequence);
+    }
+    // This larger test buffer measures the schema. It does not enlarge the
+    // production reliable queue or imply that a six-human update can be sent.
+    std::array<std::byte, 2048> body{};
+    bits::Writer writer(body);
+    std::size_t size{};
+    CHECK(wire::write_membership_update(writer, update));
+    CHECK(writer.finish(size));
+    bits::Reader reader(std::span(body).first(size));
+    CHECK(reader.skip(writer.bit_count() - 32));
+    std::uint64_t hash{};
+    CHECK(reader.read(32, hash) && hash == wire::session_state_hash(update));
+    gameplay::OutboundQueue outgoing{};
+    const auto initialSequence = outgoing.nextSequence;
+    const bool queued = peer_wire::enqueue_message(outgoing,
+        static_cast<std::uint8_t>(wire::SessionMessageId::membershipUpdate),
+        wire::kMembershipUpdateSize, std::span(body).first(size), writer.bit_count());
+    if (humans.size() == 3) {
+        CHECK(queued && outgoing.count == 20 && outgoing.count <= gameplay::kOutboundSlots);
+        std::array<std::byte, 1500> datagram{};
+        bits::Writer transport(datagram);
+        CHECK(peer_wire::write_head_and_ack(transport, 0, {}));
+        CHECK(peer_wire::write_queue(transport, outgoing, outgoing.count));
+        CHECK(peer_wire::write_empty_queue(transport) && peer_wire::write_absent_filler(transport));
+        std::size_t datagramSize{};
+        CHECK(transport.finish(datagramSize));
+        peer_wire::EstablishedPacket decoded{};
+        CHECK(peer_wire::decode_established(std::span(datagram).first(datagramSize), false, decoded));
+        gameplay::ReliableQueue incoming{};
+        CHECK(peer_wire::accept_records(decoded.large, incoming) == 0);
+        peer_wire::AssembledMessage assembled{};
+        CHECK(peer_wire::drain_message(incoming, assembled));
+        CHECK(assembled.id == static_cast<std::uint8_t>(wire::SessionMessageId::membershipUpdate)
+              && assembled.declaredSize == wire::kMembershipUpdateSize);
+        CHECK(assembled.bitCount == writer.bit_count() + assembled.bodyBitOffset);
+        bits::Reader actual(assembled.bytes), expected(std::span(body).first(size));
+        CHECK(actual.skip(assembled.bodyBitOffset));
+        for (std::size_t offset = 0; offset < writer.bit_count();) {
+            const auto width = static_cast<std::uint8_t>((std::min)(std::size_t{64}, writer.bit_count() - offset));
+            std::uint64_t first{}, second{};
+            CHECK(actual.read(width, first) && expected.read(width, second) && first == second);
+            offset += width;
+        }
+    } else {
+        CHECK(!queued && outgoing.count == 0 && outgoing.nextSequence == initialSequence);
+        CHECK(std::none_of(outgoing.fragments.begin(), outgoing.fragments.end(),
+                          [](const auto& fragment) { return fragment.occupied; }));
+    }
+    return size;
+}
+
+static void fireteam_membership_targets() {
+    static_assert(group::kSharedHumanCapacity == 6);
+    std::array<std::byte, descriptor::kNetAddrSize> hostAddress{};
+    descriptor::write_net_addr(0xC0A8017CU, 30000, hostAddress);
+    std::array<group::SharedHuman, group::kSharedHumanCapacity> humans{};
+    group::SharedSlotAssignments assignments{};
+    for (std::size_t index = 0; index < humans.size(); ++index) {
+        auto& human = humans[index];
+        human.endpoint = {static_cast<std::uint32_t>(0xC0A80180U + index),
+                          static_cast<std::uint16_t>(30002U + index * 2U)};
+        descriptor::write_net_addr(human.endpoint.address, human.endpoint.port, human.address);
+        // Preserve full native long-form addresses and full-width join IDs.
+        // Small synthetic IDs would hide the current reliable transport limit.
+        human.address.back() = std::byte{6};
+        human.address[64] = static_cast<std::byte>(0xA0U + index);
+        human.machineId = 0x4000000000000000ULL + index;
+        human.joinId = (std::numeric_limits<std::uint64_t>::max)() - index;
+        human.playerId = 0x6000000000000000ULL + index;
+        human.addSequence = 0xFFFFFU - static_cast<std::uint32_t>(index);
+        human.hasPlayer = true;
+        human.established = true;
+        CHECK(assignments.reserve(human.machineId, human.playerId, human.slot));
+        CHECK(human.slot == index);
+    }
+    for (const std::size_t count : {std::size_t{3}, std::size_t{6}}) {
+        const auto active = std::span(humans).first(count);
+        group::SharedMembershipSnapshot snapshot{};
+        CHECK(group::build_shared_membership(10, hostAddress, active.back().joinId,
+              (std::numeric_limits<std::uint32_t>::max)(), active, snapshot));
+        const auto encodedSize = verify_native_snapshot(snapshot, active);
+        auto reversed = humans;
+        std::reverse(reversed.begin(), reversed.begin() + count);
+        group::SharedMembershipSnapshot reordered{};
+        CHECK(group::build_shared_membership(10, hostAddress, active.back().joinId,
+              snapshot.revision, std::span(reversed).first(count), reordered));
+        CHECK(wire::session_state_hash(snapshot.update()) == wire::session_state_hash(reordered.update()));
+        // Highest-slot disconnect leaves the remaining native slots unchanged.
+        group::SharedMembershipSnapshot disconnected{};
+        CHECK(group::build_shared_membership(10, hostAddress, active.front().joinId,
+              20, active.first(count - 1), disconnected));
+        CHECK(disconnected.members[count - 1].machineId == active[count - 2].machineId);
+        std::uint32_t rejoined = group::kInvalidSharedHumanSlot;
+        CHECK(assignments.reserve(active.back().machineId, active.back().playerId, rejoined));
+        CHECK(rejoined == active.back().slot);
+        CHECK(group::build_shared_membership(10, hostAddress, active.back().joinId,
+              snapshot.revision, active, reordered));
+        CHECK(wire::session_state_hash(snapshot.update()) == wire::session_state_hash(reordered.update()));
+        const auto unchanged = reordered;
+        // A missing lower member pauses publication rather than renumbering survivors.
+        CHECK(!group::build_shared_membership(10, hostAddress, active.back().joinId,
+               21, active.subspan(1), reordered));
+        CHECK(reordered.revision == unchanged.revision && reordered.members[1].machineId == active[0].machineId);
+        std::array<std::byte, gameplay::kReassemblyCapacity> bounded{};
+        bits::Writer boundedWriter(bounded);
+        const bool fits = wire::write_membership_update(boundedWriter, snapshot.update());
+        if (count == 3) { CHECK(fits && encodedSize <= bounded.size()); }
+        else { CHECK(!fits && encodedSize > bounded.size()); }
+        std::printf("Native membership target %zu humans: %zu encoded bytes; current reliable capacity %zu.\n",
+                    count, encodedSize, bounded.size());
+    }
+    std::uint32_t slot = group::kInvalidSharedHumanSlot;
+    CHECK(!assignments.reserve(0x7000000000000000ULL, 0x7000000000000001ULL, slot));
+    CHECK(slot == group::kInvalidSharedHumanSlot);
+    CHECK(!assignments.reserve(humans[5].machineId, humans[0].playerId, slot));
+    std::array<group::SharedHuman, group::kSharedHumanCapacity + 1> seventh{};
+    std::copy(humans.begin(), humans.end(), seventh.begin());
+    seventh.back() = humans.back();
+    seventh.back().machineId += 1; seventh.back().playerId += 1;
+    seventh.back().joinId -= 1;
+    seventh.back().endpoint.address += 1; seventh.back().endpoint.port += 2;
+    descriptor::write_net_addr(seventh.back().endpoint.address, seventh.back().endpoint.port,
+                               seventh.back().address);
+    seventh.back().slot = group::kSharedHumanCapacity;
+    group::SharedMembershipSnapshot rejected{};
+    rejected.revision = 123;
+    CHECK(!group::build_shared_membership(10, hostAddress, humans[0].joinId, 22, seventh, rejected));
+    CHECK(rejected.revision == 123);
+}
+
 int main() {
     group::SharedSlotAssignments assignments{};
     std::uint32_t localSlot = group::kInvalidSharedHumanSlot;
@@ -31,7 +187,11 @@ int main() {
     // Disconnect drops endpoint authorization, not the native identity reservation.
     std::uint32_t rejoinedSlot = group::kInvalidSharedHumanSlot;
     CHECK(assignments.reserve(101, 301, rejoinedSlot) && rejoinedSlot == remoteSlot);
-    CHECK(!assignments.reserve(102, 302, rejoinedSlot) && rejoinedSlot == remoteSlot);
+    for (std::uint32_t index = 2; index < group::kSharedHumanCapacity; ++index) {
+        CHECK(assignments.reserve(100 + index, 300 + index, rejoinedSlot) && rejoinedSlot == index);
+    }
+    CHECK(!assignments.reserve(100 + group::kSharedHumanCapacity,
+           300 + group::kSharedHumanCapacity, rejoinedSlot) && rejoinedSlot == group::kSharedHumanCapacity - 1);
     CHECK(!assignments.reserve(101, 302, rejoinedSlot));
     CHECK(!assignments.reserve(102, 301, rejoinedSlot));
     CHECK(!assignments.reserve(0, 301, rejoinedSlot) && !assignments.reserve(101, 0, rejoinedSlot));
@@ -158,5 +318,6 @@ int main() {
     CHECK(lookup::find(links, 11, &humans[1].endpoint) == nullptr);
     links[0].sessions[1] = 12;
     CHECK(lookup::find(links, 12, &humans[0].endpoint) == &links[0]);
+    fireteam_membership_targets();
     std::printf("PASS: %u native membership and scoped-link checks. No game simulation was run.\n", checks);
 }

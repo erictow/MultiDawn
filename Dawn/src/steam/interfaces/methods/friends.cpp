@@ -1,5 +1,6 @@
 #include <array>
 #include <cstring>
+#include <limits>
 #include <string_view>
 
 #include "../../../core/settings/settings.h"
@@ -38,10 +39,27 @@ PendingInvitation g_invitation{};
 std::uint64_t g_nextInvitation{};
 InviteSender g_sender{};
 void* g_senderContext{};
+InviteAcceptedSender g_acceptSender{};
+void* g_acceptSenderContext{};
+std::uint64_t g_acceptClock{}, g_acceptInFlight{};
 std::array<PresenceEntry, kPresenceCapacity> g_localPresence{};
 std::uint64_t g_notifyId{};
 int g_notifyFlags{};
 bool g_presenceDirty{};
+
+/** Caller holds the social lock. Generations survive resets to reject old completions. */
+void clear_invitation_locked() noexcept {
+    SecureZeroMemory(&g_invitation, sizeof g_invitation);
+    g_acceptInFlight = 0;
+}
+
+[[nodiscard]] bool valid_ticket(std::string_view ticket) noexcept {
+    if (ticket.size() != 32) { return false; }
+    for (const char c : ticket) {
+        if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F'))) { return false; }
+    }
+    return true;
+}
 
 [[nodiscard]] bool valid_id(std::uint64_t id) noexcept {
     return (id & 0xFFFFFFFF00000000ULL) == kIndividualPrefix && (id & 0xFFFFFFFFULL) != 0;
@@ -136,7 +154,7 @@ bool set_peer(const PeerProfile& profile) noexcept {
         if (g_peer.lobbyId != profile.lobbyId || g_peer.ipv4 != profile.ipv4 || g_peer.gamePort != profile.gamePort
             || g_peer.sameGameServer != profile.sameGameServer) { changed |= 0x0020; }
         if (presenceChanged) { changed |= 0x4000; }
-    } else { g_invitation = {}; }
+    } else { clear_invitation_locked(); }
     g_peer = profile;
     assign(g_peer.name, name); assign(g_peer.connect, connect); assign(g_peer.status, status);
     g_notifyId = profile.steamId;
@@ -152,11 +170,18 @@ bool peer_profile(PeerProfile& profile) noexcept {
 void clear_peer() noexcept {
     AcquireSRWLockExclusive(&g_socialLock);
     if (g_peer.steamId != 0) { g_notifyId = g_peer.steamId; g_notifyFlags = 0x0002 | 0x0008 | 0x0010 | 0x0200 | 0x4000; }
-    g_peer = {}; g_invitation = {}; g_presenceDirty = false;
+    g_peer = {}; clear_invitation_locked(); g_presenceDirty = false;
+    g_acceptSender = nullptr; g_acceptSenderContext = nullptr;
     ReleaseSRWLockExclusive(&g_socialLock);
 }
 void set_invite_sender(InviteSender sender, void* context) noexcept {
     AcquireSRWLockExclusive(&g_socialLock); g_sender = sender; g_senderContext = context; ReleaseSRWLockExclusive(&g_socialLock);
+}
+void set_invite_accepted_sender(InviteAcceptedSender sender, void* context) noexcept {
+    AcquireSRWLockExclusive(&g_socialLock);
+    g_acceptSender = sender; g_acceptSenderContext = context;
+    g_acceptInFlight = 0;
+    ReleaseSRWLockExclusive(&g_socialLock);
 }
 bool send_invitation(std::uint64_t recipient, std::string_view connect) noexcept {
     if (!valid_text(connect, kConnectCapacity)) { return false; }
@@ -166,17 +191,34 @@ bool send_invitation(std::uint64_t recipient, std::string_view connect) noexcept
     ReleaseSRWLockShared(&g_socialLock);
     return target && sender != nullptr && sender(context, recipient, connect);
 }
-bool receive_invitation(std::uint64_t from, std::string_view connect) noexcept {
+namespace {
+bool store_invitation(std::uint64_t from, std::string_view connect, std::string_view ticket) noexcept {
     if (!valid_text(connect, kConnectCapacity)) { return false; }
     AcquireSRWLockExclusive(&g_socialLock);
     const bool accepted = from != 0 && from == g_peer.steamId;
     if (accepted) {
         if (++g_nextInvitation == 0) { ++g_nextInvitation; }
-        g_invitation = {}; g_invitation.id = g_nextInvitation; g_invitation.from = from;
+        clear_invitation_locked(); g_invitation.id = g_nextInvitation; g_invitation.from = from;
         assign(g_invitation.connect, connect);
+        assign(g_invitation.ticket, ticket);
     }
     ReleaseSRWLockExclusive(&g_socialLock);
     return accepted;
+}
+} // namespace
+bool receive_invitation(std::uint64_t from, std::string_view connect) noexcept {
+    return store_invitation(from, connect, {});
+}
+bool receive_invitation(std::uint64_t from, std::string_view connect, std::string_view ticket) noexcept {
+    return valid_ticket(ticket) && store_invitation(from, connect, ticket);
+}
+bool revoke_invitation(std::string_view ticket) noexcept {
+    if (!valid_ticket(ticket)) { return false; }
+    AcquireSRWLockExclusive(&g_socialLock);
+    const bool revoked = g_invitation.id != 0 && text_of(g_invitation.ticket) == ticket;
+    if (revoked) { clear_invitation_locked(); }
+    ReleaseSRWLockExclusive(&g_socialLock);
+    return revoked;
 }
 bool pending_invitation(PendingInvitation& invitation) noexcept {
     AcquireSRWLockShared(&g_socialLock); invitation = g_invitation; ReleaseSRWLockShared(&g_socialLock);
@@ -186,9 +228,34 @@ bool accept_invitation(std::uint64_t id) noexcept {
     AcquireSRWLockExclusive(&g_socialLock);
     bool accepted = false;
     if (id != 0 && id == g_invitation.id && g_invitation.from == g_peer.steamId) {
+        if (g_invitation.ticket[0] != '\0') {
+            if (g_invitation.waitingForAuthorization || g_acceptInFlight != 0
+                || g_acceptSender == nullptr
+                || g_acceptClock == (std::numeric_limits<std::uint64_t>::max)()) {
+                ReleaseSRWLockExclusive(&g_socialLock);
+                return false;
+            }
+            PendingInvitation invitation = g_invitation;
+            const auto sender = g_acceptSender;
+            void* const context = g_acceptSenderContext;
+            const auto attempt = ++g_acceptClock;
+            g_acceptInFlight = attempt;
+            ReleaseSRWLockExclusive(&g_socialLock);
+            const bool sent = sender(context, invitation.from, text_of(invitation.ticket));
+            AcquireSRWLockExclusive(&g_socialLock);
+            const bool current = g_acceptInFlight == attempt
+                && g_invitation.id == invitation.id && g_invitation.from == invitation.from
+                && g_invitation.ticket == invitation.ticket && g_peer.steamId == invitation.from;
+            if (g_acceptInFlight == attempt) { g_acceptInFlight = 0; }
+            accepted = sent && current;
+            if (accepted) { g_invitation.waitingForAuthorization = true; }
+            ReleaseSRWLockExclusive(&g_socialLock);
+            SecureZeroMemory(&invitation, sizeof invitation);
+            return accepted;
+        }
         const JoinRequested event{g_invitation.from, g_invitation.connect};
         accepted = queue_callback(kGameRichPresenceJoinRequested, 0, &event, sizeof event);
-        if (accepted) { g_invitation = {}; }
+        if (accepted) { clear_invitation_locked(); }
     }
     ReleaseSRWLockExclusive(&g_socialLock);
     return accepted;
@@ -196,7 +263,7 @@ bool accept_invitation(std::uint64_t id) noexcept {
 bool dismiss_invitation(std::uint64_t id) noexcept {
     AcquireSRWLockExclusive(&g_socialLock);
     const bool dismissed = id != 0 && id == g_invitation.id;
-    if (dismissed) { g_invitation = {}; }
+    if (dismissed) { clear_invitation_locked(); }
     ReleaseSRWLockExclusive(&g_socialLock);
     return dismissed;
 }
@@ -224,7 +291,8 @@ void service() noexcept {
 }
 void reset() noexcept {
     AcquireSRWLockExclusive(&g_socialLock);
-    g_localId = kLocalSteamId; g_localName = {}; g_peer = {}; g_invitation = {};
+    g_localId = kLocalSteamId; g_localName = {}; g_peer = {}; clear_invitation_locked();
+    g_acceptSender = nullptr; g_acceptSenderContext = nullptr;
     g_sender = nullptr; g_senderContext = nullptr; g_localPresence = {};
     g_notifyId = 0; g_notifyFlags = 0; g_presenceDirty = false;
     // Do not reuse invitation IDs while an old UI event might still be queued.

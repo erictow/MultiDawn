@@ -108,13 +108,33 @@ is the view exchange, which the group handler currently refuses with
 `unresolved_group` before a group join. It does not establish a remote human or
 working shared gameplay.
 
+The experimental `main` branch now answers a reliable ID40 on its exact
+authenticated native link before any group join. The link must already be
+connected and application-ready, with every group slot empty. Endpoint and both
+channel incarnation values must match. Encoding, queue publication and signature
+binding happen under the peer lock, and a rejected/full queue leaves the old
+state intact. A view token never selects or creates group membership. Existing
+legacy and admitted-group view handling is retained. In the subsequent isolated
+Tower run, the native client acknowledged all eleven queued view replies and
+the corresponding reliable fragments retired with the queue empty. No
+`unresolved_group` or rejected-view event remained in that run. This verifies
+transport delivery of the replies. In the later isolated Tower run at
+`c478247c`, read-only inspection confirmed the accepted world control peer's
+native compatibility flag and independently evaluated native predicate were both
+true. Local and remote view kind five matched. This validates that sampled world
+link's application-level view compatibility. Shared two-player gameplay remains
+unverified. See [the world connection evidence](../../docs/NATIVE-WORLD-CONNECTION.md).
+
 ## Embedded backend policy
 
 `src/server/gameplay/resolution/address_resolution_host.{h,cpp}` accepts only a
 current authenticated BAP owner, capability 16, request kind 1, and method 0.
-The direct address's first 41 bytes must exactly match the configured embedded
-descriptor. The response preserves all 86 requested NetAddr bytes and resolves
-only to the configured IPv4 transport address and gameplay port. The backend
+The control address's first 41 bytes must exactly match the configured embedded
+descriptor. An internal peer registration additionally permits an exact 86-byte
+method-0 address for its BAP authentication owner. Control-prefix collisions,
+duplicate peer bodies and partial matches are refused. Both preserve the full
+requested NetAddr and resolve only to the configured embedded transport address
+and gameplay port. No production caller activates human registrations; this
 does not resolve arbitrary LAN endpoints or Steam-format peer addresses.
 
 Each of the 16 bounded contexts owns fresh random directional DES keys, a shared
@@ -129,6 +149,26 @@ cannot rebind that context. MAC, padding, output-capacity, or replay failures do
 not publish plaintext or commit endpoint/replay state. The server permits each
 counter once within a 128-packet window, with a floor of B + 1. This is a server
 policy, not a claim about the native client's replay-window size.
+
+`lookup_authenticated_route(owner, output)` now exposes the exact authentication
+lifetime, a unique resolver-context generation and the pinned UDP source. An
+unbound context supplies no observation. Lookup and revalidation follow the
+current outbound selection for both the owner and endpoint, so an endpoint
+shared with another current owner cannot alias a route. Release, reset and slot
+reuse invalidate old handles. Snapshots contain no resolver material and are
+observations, not retained leases or gameplay authorization. A later admission
+controller must revalidate them with its exact activity and native identities.
+
+The new `unwrap` overload also returns the exact authenticated route for its
+packet. `wrap_authenticated_route` replies through that context even when
+another context is newer for the same UDP endpoint, and `release_route` retires
+one exact context without removing its siblings. Legacy endpoint-based
+selection now chooses control contexts only; an active human-only destination
+is rejected instead of falling back to raw UDP. Authenticated metadata carries
+the context's control/human purpose and local peer registration handle, with no
+keys or opaque address bytes. The endpoint requires a consumer to claim human
+traffic and provides an explicit protected send, with no raw fallback.
+See [the explicit route contract](../../docs/EXPLICIT-NATIVE-ROUTES.md).
 
 ## Routed UDP envelope
 
@@ -186,13 +226,14 @@ includes these isolated suites. Current local results are:
 | `des_cbc_tests.vcxproj` | 53 |
 | `routed_datagram_tests.vcxproj` | 535 |
 | `resolution_replay_tests.vcxproj` | 16,554 |
-| `address_resolution_host_tests.vcxproj` | 1,084 enabled; 11 with `--disabled` |
-| `endpoint_resolution_tests.vcxproj` | 136 in the recorded loopback run |
+| `address_resolution_host_tests.vcxproj` | 2,851 enabled; 27 with `--disabled` |
+| `endpoint_resolution_tests.vcxproj` | 260+ in the recorded loopback runs |
+| `peer_view_echo_tests.vcxproj` | 2,006 |
 
 The backend tests link the production store, random generator, packet codec,
 DES and HMAC with test settings/log sinks. They exercise endpoint pinning,
 authenticated malformed padding, replay boundaries, rekey selection, generation
-cleanup and capacity limits. The address codec suite also verifies status-free
+cleanup, route observation lifetimes and capacity limits. The address codec suite also verifies status-free
 301 payloads and complete plaintext frames while retaining status 200 on other
 responses. These tests use no sockets, game processes, or
 player saves. A workflow definition is not evidence of a remote CI pass, and
@@ -206,3 +247,9 @@ server material, tampering/replay/rebinding cannot publish plaintext, and
 legacy traffic retains its prior routing. It also checks explicit unbound sends
 emit nothing and bound send failures do not select another transport. It does
 not load Destiny or exercise the real peer handshake.
+
+The view-echo suite checks exact channel incarnation and endpoint ownership,
+independent links, pre-join views, malformed headers/bodies/padding, complete
+queue rollback, and preservation of all group slots even for arbitrary tokens.
+The endpoint suite passed again after its authenticated delivery entry was made
+explicit (141 checks in that run; socket polling affects the check count).

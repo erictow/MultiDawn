@@ -13,8 +13,8 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("MultiDawn Launcher")]
 [assembly: System.Reflection.AssemblyProduct("MultiDawn Launcher")]
-[assembly: System.Reflection.AssemblyVersion("0.3.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.3.0.0")]
+[assembly: System.Reflection.AssemblyVersion("0.5.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.5.0.0")]
 
 namespace MultiDawn.Launcher
 {
@@ -51,7 +51,9 @@ namespace MultiDawn.Launcher
                     report = PairingSelfTests.Report;
                     if (result == 0) report += LauncherSelfTests.Run();
                     if (result == 0) report += RuntimeBridgeSelfTests.Run();
+                    if (result == 0) report += InvitationV2SelfTests.Run();
                     if (result == 0) report += FriendsSelfTests.Run();
+                    if (result == 0) report += NativeGamePreflightSelfTests.Run();
                     report += result == 0 ? "PASS: launcher validation, UI state, TCP pairing, and native companion protocol tests.\r\n" : "FAIL: " + PairingSelfTests.LastError + "\r\n";
                 }
                 catch (Exception ex) { result = 1; report = "FAIL: " + ex + "\r\n"; }
@@ -61,7 +63,12 @@ namespace MultiDawn.Launcher
             }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            using (LauncherForm form = new LauncherForm())
+            string expectedRuntimeHash = null;
+            if (args.Length > 0 && args[0] == "--native-game-preflight") {
+                if (args.Length != 2 || !NativeGamePreflight.IsSha256(args[1])) return 2;
+                expectedRuntimeHash = args[1].ToUpperInvariant();
+            }
+            using (LauncherForm form = new LauncherForm(expectedRuntimeHash))
             {
                 if (args.Length == 2 && args[0] == "--capture-preview")
                 {
@@ -199,10 +206,10 @@ namespace MultiDawn.Launcher
         private readonly Color accent = Color.FromArgb(89, 199, 200);
         private TextBox gameRoot, pairCode, joinAddress, joinPort, friendNickname;
         private CheckBox multiplayer;
-        private Button browse, play, host, join, disconnect, copy, saveFriend, removeFriend;
+        private Button browse, play, host, join, disconnect, copy, saveFriend, removeFriend, nativeTest;
         private ComboBox address, savedFriends;
         private NumericUpDown port;
-        private Label gameStatus, sessionStatus, peerStatus, modeLabel, friendStatus;
+        private Label gameStatus, sessionStatus, peerStatus, modeLabel, friendStatus, nativeTestStatus;
         private PairSession session;
         private RuntimeBridge runtimeBridge;
         private Process game;
@@ -210,11 +217,17 @@ namespace MultiDawn.Launcher
         private readonly string configPath;
         private readonly FriendStore friendStore;
         private bool friendsAvailable;
+        private readonly string expectedRuntimeHash;
+        private System.Windows.Forms.Timer nativeStatusTimer;
+        private string nativeTestFailure;
 
-        internal LauncherForm()
+        internal LauncherForm() : this(null) { }
+        internal LauncherForm(string expectedHash)
         {
+            if (expectedHash != null && !NativeGamePreflight.IsSha256(expectedHash)) throw new ArgumentException("Invalid native runtime hash.");
+            expectedRuntimeHash = expectedHash;
             Text = "MultiDawn Launcher";
-            ClientSize = new Size(760, 958);
+            ClientSize = new Size(760, expectedRuntimeHash == null ? 958 : 1100);
             MinimumSize = new Size(600, 480);
             StartPosition = FormStartPosition.CenterScreen;
             BackColor = background;
@@ -230,6 +243,12 @@ namespace MultiDawn.Launcher
             LoadFriends(null);
             RefreshState();
             FormClosing += delegate { closing = true; if (runtimeBridge != null) runtimeBridge.Dispose(); if (session != null) session.Dispose(); if (game != null) game.Dispose(); };
+            if (expectedRuntimeHash != null) {
+                nativeStatusTimer = new System.Windows.Forms.Timer { Interval = 500 };
+                nativeStatusTimer.Tick += delegate { RefreshNativeTestState(); };
+                Disposed += delegate { nativeStatusTimer.Dispose(); };
+                nativeStatusTimer.Start();
+            }
         }
 
         protected override void OnShown(EventArgs args)
@@ -269,7 +288,7 @@ namespace MultiDawn.Launcher
             LabelAt("GAME FOLDER", 32, 119, 400, 24, accent, 9);
             gameRoot = TextAt(32, 148, 576);
             gameRoot.AccessibleName = "Dawn game folder";
-            gameRoot.TextChanged += delegate { RefreshState(); };
+            gameRoot.TextChanged += delegate { nativeTestFailure = null; RefreshState(); };
             browse = ButtonAt("Browse...", 620, 143, 108, Browse);
             gameStatus = LabelAt("", 32, 188, 696, 46, muted, 9);
 
@@ -317,8 +336,13 @@ namespace MultiDawn.Launcher
             friendStatus = LabelAt("", 32, 827, 696, 48, muted, 9);
             play = ButtonAt("Play solo", 512, 889, 216, Play);
             play.BackColor = Color.FromArgb(36, 91, 99);
-            LabelAt("Build 86657 required. Pair codes are private: share only with your partner.\r\nPairing uses plain TCP. Use a trusted LAN or an encrypted VPN.", 32, 889, 459, 50, muted, 8.5F);
+            LabelAt("Build 86657 required. Pair codes are private: share only with your partner.\r\nPairing control is encrypted and authenticated.", 32, 889, 459, 50, muted, 8.5F);
             AcceptButton = play;
+            if (expectedRuntimeHash != null) {
+                LabelAt("DEVELOPER NATIVE CONNECTION TEST", 32, 958, 696, 24, accent, 9);
+                nativeTestStatus = LabelAt("Pair with another launcher before starting the isolated game.", 32, 990, 696, 44, muted, 9);
+                nativeTest = ButtonAt("Launch native test", 512, 1045, 216, LaunchNativeTest);
+            }
         }
 
         private static IEnumerable<IPAddress> LocalAddresses()
@@ -391,6 +415,15 @@ namespace MultiDawn.Launcher
                 sessionStatus.Text = mp ? "Choose Host to create a code, or paste your partner's code and choose Join." : "Solo Play starts Dawn with its normal in-process server.";
                 peerStatus.Text = "";
             }
+            RefreshNativeTestState();
+        }
+        private void RefreshNativeTestState()
+        {
+            if (nativeTest == null || closing) return;
+            GamePreflightLaunchContext context;
+            nativeTest.Enabled = multiplayer.Checked && game == null && !busy && runtimeBridge != null
+                && runtimeBridge.TryCaptureGamePreflight(out context);
+            nativeTestStatus.Text = nativeTestFailure ?? (runtimeBridge == null ? "Native test: pair with another launcher. Each game keeps its local save and server." : runtimeBridge.GamePreflightStatus);
         }
         private PairSession CreateSession()
         {
@@ -398,6 +431,7 @@ namespace MultiDawn.Launcher
             value.StatusChanged += delegate(string status) { Dispatch(delegate { if (session == value) sessionStatus.Text = status; }); };
             value.PeerChanged += delegate(bool paired) { Dispatch(delegate {
                 if (session != value) return;
+                nativeTestFailure = null;
                 peerStatus.Text = paired ? "Partner connected. This lobby does not carry gameplay packets." : "Waiting for a partner.";
                 RefreshState();
             }); };
@@ -559,6 +593,39 @@ namespace MultiDawn.Launcher
             }
             catch (Exception ex) { if (game != null) { game.Dispose(); game = null; } gameStatus.Text = "Could not launch Destiny 2: " + ex.Message; }
         }
+        private void LaunchNativeTest(object sender, EventArgs args)
+        {
+            if (expectedRuntimeHash == null || !multiplayer.Checked || busy || game != null) return;
+            nativeTestFailure = null;
+            RuntimeBridge bridge = runtimeBridge;
+            PairSession paired = session;
+            GamePreflightLaunchContext context;
+            if (bridge == null || paired == null || !bridge.TryCaptureGamePreflight(out context)) {
+                nativeTestFailure = "Native test needs a current paired launcher and partner profile."; RefreshNativeTestState(); return;
+            }
+            Process[] existing = Process.GetProcessesByName("destiny2");
+            bool alreadyRunning = existing.Length != 0;
+            foreach (Process process in existing) process.Dispose();
+            if (alreadyRunning) { nativeTestFailure = "Close the running Destiny 2 before launching the isolated native test."; RefreshNativeTestState(); return; }
+            busy = true;
+            RefreshStateKeepingStatus();
+            try {
+                string root = gameRoot.Text.Trim();
+                string error = GameLaunch.Validate(root) ?? NativeGamePreflight.ValidatePins(root, expectedRuntimeHash);
+                if (error != null) { nativeTestFailure = error; return; }
+                ProcessStartInfo info = GameLaunch.CreateStartInfo(root);
+                if (!bridge.ApplyGamePreflightEnvironment(info, context) || runtimeBridge != bridge || session != paired
+                    || !bridge.ValidateGamePreflight(context)) throw new IOException("The pairing changed. Pair again before starting the native test.");
+                Process launched = Process.Start(info);
+                if (launched == null) throw new InvalidOperationException("Destiny 2 did not start.");
+                game = launched;
+                launched.EnableRaisingEvents = true;
+                launched.Exited += delegate { Dispatch(delegate { if (game == launched) { game.Dispose(); game = null; RefreshState(); } }); };
+                if (launched.HasExited) { launched.Dispose(); game = null; }
+            }
+            catch (Exception error) { if (game != null) { game.Dispose(); game = null; } nativeTestFailure = "Native test could not start: " + error.Message; }
+            finally { busy = false; RefreshStateKeepingStatus(); }
+        }
         private void Dispatch(Action action)
         {
             if (closing || IsDisposed || !IsHandleCreated) return;
@@ -585,6 +652,7 @@ namespace MultiDawn.Launcher
                 check(!form.gameRoot.Enabled && !form.browse.Enabled, "Multiplayer locks the game folder");
                 check(form.host.Enabled && form.join.Enabled && form.pairCode.Enabled, "Multiplayer enables Host, Join, and code entry");
                 check(!form.play.Enabled && form.play.Text == "Gameplay unavailable", "Unimplemented MP gameplay cannot be launched");
+                check(form.nativeTest == null, "Ordinary launcher mode exposes no developer native-test launch control");
                 check(!form.disconnect.Enabled && !form.copy.Enabled, "Idle lobby cannot disconnect or copy an empty code");
                 check(form.joinAddress.Enabled && form.joinPort.Enabled && !form.saveFriend.Enabled && !form.friendNickname.Enabled,
                     "Manual endpoint override is available only in MP and saving requires authentication");
@@ -600,6 +668,13 @@ namespace MultiDawn.Launcher
                 check(!form.play.Enabled, "Invalid game installation cannot be launched");
                 check(!form.joinAddress.Enabled && !form.joinPort.Enabled && !form.savedFriends.Enabled && !form.saveFriend.Enabled,
                     "Solo locks saved-friend and endpoint controls");
+            }
+            using (LauncherForm form = new LauncherForm(new string('A', 64))) {
+                form.gameRoot.Text = Path.GetTempPath();
+                check(form.nativeTest != null && !form.nativeTest.Enabled, "Explicit native-test launcher mode requires pairing before native game launch");
+                form.multiplayer.Checked = true;
+                check(!form.nativeTest.Enabled && !form.play.Enabled && form.play.Text == "Gameplay unavailable",
+                    "Developer native testing does not unlock multiplayer Play or bypass partner validation");
             }
         }
     }

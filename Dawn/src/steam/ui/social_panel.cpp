@@ -42,11 +42,14 @@ void draw_page() noexcept {
     if (social::pending_invitation(pending)) {
         ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
         ImGui::Text("Party invitation from %s", peer.name.data());
+        if (pending.waitingForAuthorization) { ImGui::TextDisabled("Waiting for host authorization"); }
+        ImGui::BeginDisabled(pending.waitingForAuthorization);
         if (ImGui::Button("Accept invitation")) {
             g_result = social::accept_invitation(pending.id)
-                           ? "Join request delivered to the game."
-                           : "This invitation is no longer available. Try again.";
+                           ? (pending.ticket[0] != '\0' ? nullptr : "Join request delivered to the game.")
+                           : "The acceptance request could not be sent. Try again.";
         }
+        ImGui::EndDisabled();
         ImGui::SameLine();
         if (ImGui::Button("Decline")) { (void)social::dismiss_invitation(pending.id); g_result = "Invitation declined."; }
     }
@@ -77,7 +80,8 @@ bool draw_invitation_notice() noexcept {
                            | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoMove;
     if (ImGui::Begin("##dawn_party_invitation", nullptr, flags)) {
         ImGui::Text("Party invitation from %s", peer.name.data());
-        ImGui::TextUnformatted("Open Dawn > Friends to accept or decline.");
+        ImGui::TextUnformatted(invitation.waitingForAuthorization
+            ? "Waiting for host authorization" : "Open Dawn > Friends to accept or decline.");
     }
     ImGui::End();
     return true;

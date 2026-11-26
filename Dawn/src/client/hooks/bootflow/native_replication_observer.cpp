@@ -7,6 +7,7 @@
 #include <cstring>
 #include <mutex>
 #include "native_replication_bindings.h"
+#include "../../diagnostics/module_range.h"
 #include "../../../state/gameplay/replication_roles.h"
 #include "../../hooking/call_gate.h"
 #include "../../hooking/detour.h"
@@ -23,6 +24,7 @@ std::atomic<Add> g_add{};
 std::atomic<Remove> g_remove{};
 std::array<hooking::detour::Handle,3> g_handles{};
 std::atomic_uint32_t g_lines{};
+std::atomic_uint32_t g_worldStacks{};
 namespace roles=state::gameplay::replication;
 struct Context {std::uintptr_t group{};std::uint64_t machine{},epoch{};int member{-1};roles::Address address{};};
 thread_local Context g_context;
@@ -53,6 +55,39 @@ template<class... Args> void report(const char* format,Args... args) noexcept {
     if(size>0 && static_cast<std::size_t>(size)<line.size())
         core::log::write(core::log::Channel::client,core::log::Level::info,{line.data(),static_cast<std::size_t>(size)});
 }
+bool binding_trace_requested() noexcept {
+    static const bool requested=[]() noexcept {
+        std::array<wchar_t,2> value{};
+        return GetEnvironmentVariableW(L"DAWN_ACTIVITY_BINDING_TRACE",value.data(),
+            static_cast<DWORD>(value.size()))==1 && value[0]==L'1';
+    }();
+    return requested;
+}
+// Capture only return addresses from the already installed native connection hook.
+// The original arguments, stack contents and opaque identity are never copied to logs.
+void report_world_stack(std::uintptr_t group,int member) noexcept {
+    if(!binding_trace_requested() || g_worldStacks.fetch_add(1,std::memory_order_relaxed)>=8)return;
+    diagnostics::ModuleRange image{};
+    if(!diagnostics::module_range(GetModuleHandleW(nullptr),image))return;
+    std::array<void*,32> frames{};
+    const auto count=CaptureStackBackTrace(0,static_cast<DWORD>(frames.size()),frames.data(),nullptr);
+    std::array<char,768> line{};
+    const int prefix=std::snprintf(line.data(),line.size(),
+        "ev=native_world_stack pid=%lu group=%p member=%d rvas=",
+        GetCurrentProcessId(),reinterpret_cast<void*>(group),member);
+    if(prefix<=0 || static_cast<std::size_t>(prefix)>=line.size())return;
+    auto length=static_cast<std::size_t>(prefix);
+    unsigned emitted{};
+    for(USHORT index=0;index<count && emitted<16;++index) {
+        const auto address=reinterpret_cast<std::uintptr_t>(frames[index]);
+        if(!diagnostics::contains(image,address))continue;
+        const int added=std::snprintf(line.data()+length,line.size()-length,"%s0x%llX",
+            emitted==0?"":",",static_cast<unsigned long long>(address-image.base));
+        if(added<=0 || static_cast<std::size_t>(added)>=line.size()-length)break;
+        length+=static_cast<std::size_t>(added);++emitted;
+    }
+    if(emitted!=0)report("%s",line.data());
+}
 // 1703910 validates the transport, then 16FF3C0 -> 16E8200 installs the peer.
 // Its fourth parameter is the public 86-byte NetAddr. Never log its fifth
 // parameter: that opaque 16-byte identity has not been classified as public.
@@ -70,11 +105,18 @@ __declspec(noinline) bool __fastcall connect_hook(std::uintptr_t owner,int membe
     const auto epoch=g_context.epoch;
     const bool result=original(owner,member,role,address,identity,activate);
     g_context=previous;
-    if(qualified && scope.accepts_side_effects() && changed_connection(group,machine,result))
+    if(qualified && scope.accepts_side_effects() && changed_connection(group,machine,result)) {
         report("ev=native_replication stage=connect thread=%lu group=%p member=%d machine=%016llX role=%u activate=%u address=%u.%u.%u.%u:%u public=%u.%u.%u.%u:%u method=%u control_epoch=%016llX accepted=%u",
         GetCurrentThreadId(),reinterpret_cast<void*>(group),member,static_cast<unsigned long long>(machine),
         static_cast<unsigned>(role),static_cast<unsigned>(activate),net[0],net[1],net[2],net[3],net[4]+256U*net[5],
         net[30],net[31],net[32],net[33],net[34]+256U*net[35],net[85],static_cast<unsigned long long>(epoch),result?1U:0U);
+        if(binding_trace_requested()) {
+            report("ev=native_group_owner pid=%lu owner=%p group=%p member=%d accepted=%u",
+                GetCurrentProcessId(),reinterpret_cast<void*>(owner),reinterpret_cast<void*>(group),
+                member,result?1U:0U);
+            report_world_stack(group,member);
+        }
+    }
     return result;
 }
 __declspec(noinline) void __fastcall add_hook(std::uintptr_t manager,std::uint32_t index,std::uintptr_t view) noexcept {

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations"><ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration></ItemGroup>
+  <PropertyGroup Label="Globals"><ProjectGuid>{439B99D8-FD21-4B82-8D41-8327FA71DE15}</ProjectGuid><WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration"><ConfigurationType>Application</ConfigurationType><PlatformToolset>v145</PlatformToolset><UseDebugLibraries>false</UseDebugLibraries></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup><OutDir>$(ProjectDir)..\..\build\unit\client_identity_receipt\</OutDir><IntDir>$(OutDir)obj\</IntDir><TargetName>client_identity_receipt_tests</TargetName></PropertyGroup>
+  <ItemDefinitionGroup><ClCompile><LanguageStandard>stdcpp20</LanguageStandard><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><ConformanceMode>true</ConformanceMode><ExceptionHandling>Sync</ExceptionHandling><RuntimeLibrary>MultiThreaded</RuntimeLibrary><Optimization>MaxSpeed</Optimization><AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions><AdditionalIncludeDirectories>$(ProjectDir)..\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile><Link><SubSystem>Console</SubSystem></Link></ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="client_identity_receipt_tests.cpp" />
+    <ClCompile Include="..\src\state\activity\membership\activity_membership_query.cpp" />
+    <ClCompile Include="..\src\state\activity\membership\transactions\activity_membership_prepare.cpp" />
+    <ClCompile Include="..\src\state\activity\membership\transactions\activity_membership_prepare_base.cpp" />
+    <ClCompile Include="..\src\state\activity\membership\transactions\activity_membership_commit.cpp" />
+    <ClCompile Include="..\src\state\activity\membership\transactions\activity_membership_authoritative_prepare.cpp" />
+    <ClCompile Include="..\src\state\activity\membership\transactions\activity_membership_authoritative_commit.cpp" />
+    <ClCompile Include="..\src\state\activity\transactions\activity_session_release.cpp" />
+    <ClCompile Include="..\src\state\activity\destination\activity_destination_validation.cpp" />
+    <ClCompile Include="..\src\server\bap\encrypted\activity_message\membership\activity_membership_route.cpp" />
+    <ClCompile Include="..\src\middleware\bap\activity_message\activity_client_identity_parser.cpp" />
+    <ClCompile Include="..\src\middleware\encoding\bit_writer.cpp" />
+    <ClCompile Include="..\src\middleware\encoding\bit_reader.cpp" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

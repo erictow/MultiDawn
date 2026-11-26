@@ -18,6 +18,43 @@ struct HudRegionSnapshot final {
 /** Copies one coherent current creator-owned HUD region view, or fails closed. */
 [[nodiscard]] bool snapshot_hud_region(HudRegionSnapshot& output) noexcept;
 
+/** Known public destination selectors only, without opaque captured descriptor bytes. */
+struct CreatorDestination final {
+    std::array<std::int8_t, state::activity::destination::kPackageNameCapacity> packageName{};
+    std::uint8_t packageNameLength{};
+    std::int16_t activityIndex{state::activity::destination::kAbsentActivityIndex};
+    std::int8_t reason{state::activity::destination::kMinimumReason};
+    friend constexpr bool operator==(const CreatorDestination&, const CreatorDestination&) noexcept = default;
+};
+
+/**
+ * One current creator-owned BAP activity observation. Contains no account identity,
+ * private descriptor, resolver material or native player-ID substitution.
+ */
+struct CreatorActivitySnapshot final {
+    state::activity::BindingKey binding{};
+    RegionLineage lineage{};
+    state::activity::HostRegionKey hostRegion{};
+    CreatorDestination destination{};
+    std::int32_t reportedRegion{state::activity::membership::kAbsentRegionIndex};
+    std::uint64_t memberKey{};
+    /** BAP membership value only. Presence does not prove a native client publication. */
+    std::uint64_t joinIdentity{};
+    bool hasIdentity{};
+    bool identityMatchesMemberKey{};
+    friend constexpr bool operator==(const CreatorActivitySnapshot&, const CreatorActivitySnapshot&) noexcept = default;
+};
+
+/**
+ * Observes the requested binding only if it still owns the exact current committed HUD
+ * creator activity and region. Failure clears output. No lifetime is retained or authorized.
+ */
+[[nodiscard]] bool snapshot_creator_activity(state::activity::BindingKey requested,
+                                             CreatorActivitySnapshot& output) noexcept;
+
+/** Atomically selects and observes that same current creator; never chooses the newest session. */
+[[nodiscard]] bool snapshot_current_creator_activity(CreatorActivitySnapshot& output) noexcept;
+
 /** Applies one connection-scoped BAP lifecycle event. */
 [[nodiscard]] bool consume(const client::network::BapRequest& request,
                            client::network::BapResponse& response) noexcept;

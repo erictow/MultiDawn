@@ -26,6 +26,7 @@ $manifest = $manifestText | ConvertFrom-Json
 Check ($manifest.capabilities.launcherPairing -and -not $manifest.capabilities.gameplayMultiplayer -and
     -not $manifest.capabilities.inGameFriends) 'Manifest distinguishes pairing from gameplay and friends'
 Check ($manifest.capabilities.savedLauncherFriends -and $manifest.capabilities.manualPairingAddress) 'Manifest includes saved launcher friends and manual pairing addresses'
+Check ($manifest.capabilities.protectedPairingControl -and [version]$manifest.launcherVersion -ge [version]'0.5.0.0') 'Protected pairing control requires a compatible launcher version'
 Check ($manifestText -notmatch [regex]::Escape($repo)) 'Manifest contains no local workspace paths'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archive = [IO.Compression.ZipFile]::OpenRead($standalone + '.zip')
@@ -55,11 +56,23 @@ Reject {
 } '*Release MultiDawn Launcher*'
 Check (-not (Test-Path -LiteralPath (Join-Path $fixture 'invalid'))) 'Invalid launcher rejected before output creation'
 
+# A pre-MD3 launcher must not receive a manifest claiming protected controls.
+$compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+if (-not (Test-Path -LiteralPath $compiler)) { $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework/v4.0.30319/csc.exe' }
+$oldSource = Join-Path $fixture 'OldLauncher.cs'
+[IO.File]::WriteAllText($oldSource, '[assembly: System.Reflection.AssemblyProduct("MultiDawn Launcher")] [assembly: System.Reflection.AssemblyFileVersion("0.4.0.0")] public class OldLauncher { public static void Main() {} }')
+$oldLauncher = Join-Path $fixture 'OldLauncher.exe'
+& $compiler /nologo /target:winexe /optimize+ /out:$oldLauncher $oldSource
+if ($LASTEXITCODE -ne 0) { throw 'Could not compile the old-version packaging fixture.' }
+Reject {
+    & (Join-Path $repo 'tools/install/New-MultiDawnLauncherRelease.ps1') `
+        -Release 'old-input' -LauncherPath $oldLauncher -OutputDirectory (Join-Path $fixture 'old-version')
+} '*0.5 or later*'
+Check (-not (Test-Path -LiteralPath (Join-Path $fixture 'old-version'))) 'Old launcher cannot receive protected-control capability metadata'
+
 # A metadata-only DLL isolates packaging tests from any installed game/runtime.
 $fixtureSource = Join-Path $fixture 'FakeDawn.cs'
 [IO.File]::WriteAllText($fixtureSource, '[assembly: System.Reflection.AssemblyProduct("Dawn")] public class FakeDawn {}')
-$compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
-if (-not (Test-Path -LiteralPath $compiler)) { $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework/v4.0.30319/csc.exe' }
 $fakeDll = Join-Path $fixture 'steam_api64.dll'
 & $compiler /nologo /target:library /optimize+ /out:$fakeDll $fixtureSource
 if ($LASTEXITCODE -ne 0) { throw 'Could not compile the metadata-only packaging fixture.' }

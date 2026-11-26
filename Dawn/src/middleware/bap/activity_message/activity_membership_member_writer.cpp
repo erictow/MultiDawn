@@ -1,7 +1,9 @@
+#include <algorithm>
 #include <bit>
 #include <limits>
 
 #include "replicate_membership.h"
+#include "membership_consumer_contract.h"
 
 namespace dawn::middleware::bap::activity_message::replicate_membership {
 namespace {
@@ -9,14 +11,13 @@ namespace {
 /** 8 elements, low byte first, encode a member or host key. */
 constexpr std::size_t kMemberKeyByteCount = 8;
 /** The membership table has 32 fixed member slots. */
-constexpr std::size_t kMemberCount = 32;
+constexpr std::size_t kMemberCount = consumer_contract::kMemberCount;
 /** Each absent member adds 3 clear presence bits. */
 constexpr std::uint8_t kAbsentMemberBitCount = 3;
-/** Member field 1 uses 10 bits with a bias of 1. */
 /**
- * Member field 1 is a skip test, not a value. The client drops the member when the stored value
- * read as unsigned is at or below 0x1FF, so the only usable wire value is the one that stores -1.
- * Wire 1 stores zero, and the member is dropped with nothing reported.
+ * Member field 1 uses 10 bits with bias 1. Native 4DF620 compares its stored unsigned
+ * value with 0x1FF to supply the connection's role argument. The actual skip byte
+ * tested by 4DF600 is separate. Preserve the client's published value verbatim.
  */
 constexpr std::uint32_t kField1Bias = 1;
 /** Member field 2 uses the signed 32-bit midpoint as its bias. */
@@ -27,8 +28,8 @@ constexpr std::uint8_t kLeaveReasonWire = 1;
 constexpr std::size_t kIdentityPresenceFieldCount = 15;
 /** The minimal nested player blob is 18 bytes, including one zero pad bit. */
 constexpr std::uint16_t kPlayerBlobByteCount = 18;
-/** Detail field zero opens the native membership-to-view synchronizer. */
-constexpr std::uint8_t kRemoteViewGate = 0x10;
+/** Native 4DD470 checks bit four before the world-peer connection attempt. */
+constexpr std::uint8_t kRemoteViewGate = consumer_contract::kConnectionGate;
 /** NetAddr is detail field 11 in the 16-field nested player-state block. */
 constexpr std::size_t kRemoteAddressField = 11;
 /** The non-local identity stores -1 in its signed 32-bit opaque field. */
@@ -47,6 +48,16 @@ constexpr std::uint32_t kRemoteField2Wire = 0x7FFFFFFFU;
         }
     }
     return true;
+}
+
+/** Preserves the seven actual client identity scalars without any local fallback. */
+[[nodiscard]] bool write_identity(encoding::bits::Writer& writer,
+                                  const client_identity::ClientIdentity& identity) noexcept {
+    return write_member_key(writer, identity.memberKey)
+        && writer.write(std::bit_cast<std::uint32_t>(identity.field1) + kField1Bias, 10)
+        && writer.write(std::bit_cast<std::uint32_t>(identity.field2) + kField2Bias, 32)
+        && writer.write(identity.field3, 64) && writer.write(identity.accountSoid, 64)
+        && writer.write(identity.field5, 64) && writer.write(identity.field6, 64);
 }
 
 /** Writes raw bytes in the order the activity tag-reflection array consumes them. */
@@ -131,6 +142,30 @@ template <std::size_t Size>
     return writer.write(0, 1);
 }
 
+/** Independent optional B2 fields combine a player identity with its native peer address. */
+[[nodiscard]] bool write_human_player_state(encoding::bits::Writer& writer,
+                                           const RemoteHuman& human) noexcept {
+    for (std::size_t field = 0; field < kIdentityPresenceFieldCount; ++field) {
+        const bool present = field == 0 || field == 3 || field == 5
+            || field == kRemoteAddressField || field == 14
+            || (field == consumer_contract::PlayerState::opaqueConnectionField
+                && human.hasOpaqueConnectIdentity);
+        if (!writer.write(present ? 1U : 0U, 1)) { return false; }
+        if (field == 0 && !writer.write(kRemoteViewGate, 6)) { return false; }
+        if (field == 3 && !writer.write(human.identity.accountSoid, 64)) { return false; }
+        if (field == 5 && !writer.write(human.identity.field5, 64)) { return false; }
+        if (field == kRemoteAddressField && !write_bytes(writer, human.address)) { return false; }
+        if (field == consumer_contract::PlayerState::opaqueConnectionField && present) {
+            for (const auto value : human.opaqueConnectIdentity) {
+                if (!writer.write(consumer_contract::encode_signed_byte(value), 8)) { return false; }
+            }
+        }
+        if (field == 14 && (!writer.write(kPlayerBlobByteCount, consumer_contract::kProfileCountBits)
+            || !write_player_blob(writer, human.identity))) { return false; }
+    }
+    return writer.write(0, 1); // Required B2 field15 is separate from member leave/skip.
+}
+
 /** D6's five scalars are copied from the native client; auxiliary children stay unchanged. */
 [[nodiscard]] bool write_region_leg(encoding::bits::Writer& writer,const RegionLeg& leg) noexcept {
     return writer.write(leg.present?1U:0U,1) && (!leg.present
@@ -168,6 +203,62 @@ template <std::size_t Size>
            && writer.write(1, 1) && writer.write(kLeaveReasonWire, 5);
 }
 
+[[nodiscard]] bool write_human_member(encoding::bits::Writer& writer,
+                                     const RemoteHuman& human) noexcept {
+    return writer.write(1, 1) && write_identity(writer, human.identity)
+        && writer.write(1, 1) && writer.write(1, 1) && write_human_player_state(writer, human)
+        && write_synchronization(writer, human.hasSynchronizationToken, human.synchronizationToken,
+            human.currentLeg, human.pendingLeg)
+        && writer.write(1, 1) && writer.write(kLeaveReasonWire, consumer_contract::kMemberLeaveValueBits);
+}
+
+/** The direct-method address body must agree with the resolver's canonical registration form. */
+[[nodiscard]] bool valid_human_address(const RemoteHuman& human) noexcept {
+    const auto& address = human.address;
+    const auto first = std::to_integer<unsigned>(address[0]);
+    const auto port = std::to_integer<unsigned>(address[4])
+        | (std::to_integer<unsigned>(address[5]) << 8U);
+    if (first == 0 || first >= 224 || port == 0 || (port & 1U) != 0
+        || address.back() != std::byte{0} || address[40] != std::byte{1}
+        || !std::equal(address.begin(), address.begin() + 6, address.begin() + 30)) { return false; }
+    for (std::size_t index = 6; index < 40; ++index) {
+        if (index < 30 || index >= 36) {
+            if (address[index] != std::byte{0}) { return false; }
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool same_address_body(
+    const std::array<std::byte, gameplay::descriptor::kNetAddrSize>& a,
+    const std::array<std::byte, gameplay::descriptor::kNetAddrSize>& b) noexcept {
+    return std::equal(a.begin(), a.begin() + 41, b.begin());
+}
+
+[[nodiscard]] bool valid_humans(const MembershipSnapshot& snapshot) noexcept {
+    if (snapshot.remoteHumanCount > snapshot.remoteHumans.size()
+        || (snapshot.remoteHumanCount != 0 && !snapshot.citizen.present)) { return false; }
+    for (std::size_t index = 0; index < snapshot.remoteHumans.size(); ++index) {
+        const auto& human = snapshot.remoteHumans[index];
+        if (!human.present) { continue; }
+        if (index >= snapshot.remoteHumanCount || snapshot.identity.memberKey == 0
+            || human.identity.memberKey == 0
+            || human.identity.memberKey == snapshot.identity.memberKey
+            || human.identity.memberKey == snapshot.citizen.memberKey
+            || human.identity.accountSoid == 0 || human.identity.field5 == 0
+            || human.identity.field1 < -1 || human.identity.field1 > 1022
+            || !valid_human_address(human)
+            || same_address_body(human.address, snapshot.citizen.address)
+            || !valid_leg(human.currentLeg) || !valid_leg(human.pendingLeg)) { return false; }
+        for (std::size_t prior = 0; prior < index; ++prior) {
+            const auto& other = snapshot.remoteHumans[prior];
+            if (other.present && (other.identity.memberKey == human.identity.memberKey
+                || same_address_body(other.address, human.address))) { return false; }
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 /** Rejects fields that cannot name the exact native member/region records. */
@@ -191,7 +282,11 @@ bool valid(const MembershipSnapshot& snapshot) noexcept {
                            || (snapshot.citizen.memberKey != 0
                                && snapshot.citizen.memberKey != snapshot.identity.memberKey
                                && snapshot.citizen.ambassadorSlot == 1 && citizenRegionValid);
-    return valid_leg(snapshot.currentLeg) && valid_leg(snapshot.pendingLeg) && sliceSetValid && hostValid
+    return snapshot.identity.field1 >= -1 && snapshot.identity.field1 <= 1022
+           && snapshot.spawn.state <= authoritative::kMaximumState
+           && snapshot.teleport.state <= authoritative::kMaximumState
+           && valid_humans(snapshot)
+           && valid_leg(snapshot.currentLeg) && valid_leg(snapshot.pendingLeg) && sliceSetValid && hostValid
            && (!snapshot.hasHostSynchronizationToken || snapshot.citizen.present);
 }
 
@@ -199,13 +294,8 @@ bool valid(const MembershipSnapshot& snapshot) noexcept {
 bool write_member_table(encoding::bits::Writer& writer,
                         const MembershipSnapshot& snapshot) noexcept {
     const client_identity::ClientIdentity& identity = snapshot.identity;
-    const std::uint32_t field1Wire = std::bit_cast<std::uint32_t>(identity.field1) + kField1Bias;
-    const std::uint32_t field2Wire = std::bit_cast<std::uint32_t>(identity.field2) + kField2Bias;
     bool encoded = writer.bit_count() == kMemberStartBit && writer.write(1, 1)
-                   && write_member_key(writer, identity.memberKey) && writer.write(field1Wire, 10)
-                   && writer.write(field2Wire, 32) && writer.write(identity.field3, 64)
-                   && writer.write(identity.accountSoid, 64) && writer.write(identity.field5, 64)
-                   && writer.write(identity.field6, 64) && writer.write(1, 1) && writer.write(1, 1)
+                   && write_identity(writer, identity) && writer.write(1, 1) && writer.write(1, 1)
                    && write_player_identity(writer, identity)
                    && write_synchronization(writer,snapshot.hasSynchronizationToken,snapshot.synchronizationToken,snapshot.currentLeg,snapshot.pendingLeg)
                    && writer.write(1, 1) && writer.write(kLeaveReasonWire, 5);
@@ -219,7 +309,19 @@ bool write_member_table(encoding::bits::Writer& writer,
         firstAbsent = 2;
     }
     for (std::size_t member = firstAbsent; encoded && member < kMemberCount; ++member) {
-        encoded = writer.write(0, kAbsentMemberBitCount);
+        const auto remoteIndex = member >= kFirstRemoteHumanSlot ? member - kFirstRemoteHumanSlot
+                                                                : kMaximumRemoteHumans;
+        if (remoteIndex < snapshot.remoteHumanCount && remoteIndex < snapshot.remoteHumans.size()
+            && snapshot.remoteHumans[remoteIndex].present) {
+            const auto& human = snapshot.remoteHumans[remoteIndex];
+            const auto before = writer.bit_count();
+            encoded = write_human_member(writer, human)
+                && writer.bit_count() - before == kRemoteHumanBitCount + kAbsentMemberBitCount
+                    + remote_synchronization_bits(human)
+                    + (human.hasOpaqueConnectIdentity ? kOpaqueConnectIdentityBitCount : 0U);
+        } else {
+            encoded = writer.write(0, kAbsentMemberBitCount);
+        }
     }
     return encoded && writer.bit_count() + 1 == region_block_start_bit(snapshot);
 }

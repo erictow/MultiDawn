@@ -8,11 +8,11 @@
 #include "internal.h"
 
 namespace dawn::state::activity::membership {
+namespace {
 
-/** Prepares one exact identity for a joined activity session. */
-bool prepare_identity(ActivityInstanceKey key,
-                      const Identity& identity,
-                      PendingMutation& mutation) noexcept {
+/** Shares exact lifetime/revision guards between local reflection and real client receipts. */
+bool prepare_identity_impl(ActivityInstanceKey key, const Identity& identity,
+                           const Identity* raw, PendingMutation& mutation) noexcept {
     mutation = {};
     if (!static_cast<bool>(key)) {
         return false;
@@ -23,13 +23,16 @@ bool prepare_identity(ActivityInstanceKey key,
     PendingMutation prepared{};
     const SessionRecord* record =
         transactions::prepare_base(root.activity, root.account.primarySoid, key, prepared);
-    bool ready = record != nullptr && transactions::valid_identity(identity, record->memberKey);
+    bool ready = record != nullptr && transactions::valid_identity(identity, record->memberKey)
+        && (raw == nullptr || transactions::valid_client_identity(*raw, identity, record->memberKey));
     if (ready) {
         const bool changed = !record->membership.hasIdentity
                              || !transactions::equal(record->membership.identity, identity);
-        if (changed
-            && (root.activity.stateRevision == activity::kMaximumRevision
-                || record->membership.revision == kMaximumMembershipRevision)) {
+        const bool receiptChanged = raw != nullptr
+            && (record->membership.clientIdentityReceipt.revision == 0
+                || !transactions::equal(record->membership.clientIdentityReceipt.raw, *raw));
+        if (((changed || receiptChanged) && root.activity.stateRevision == activity::kMaximumRevision)
+            || (changed && record->membership.revision == kMaximumMembershipRevision)) {
             ready = false;
         } else {
             const std::uint32_t revision =
@@ -38,9 +41,14 @@ bool prepare_identity(ActivityInstanceKey key,
                                                            : kInitialRevision);
             prepared.snapshot = transactions::make_snapshot(record->membership, identity, revision);
             prepared.identityGuard = identity;
-            prepared.kind = MutationKind::identity;
+            if (raw != nullptr) {
+                prepared.clientIdentityInput = *raw;
+                prepared.clientIdentityGuard = *raw;
+            }
+            prepared.kind = raw == nullptr ? MutationKind::identity : MutationKind::clientIdentity;
             prepared.hasSnapshot = true;
             prepared.changesState = changed;
+            prepared.changesReceipt = receiptChanged;
         }
     }
     ReleaseSRWLockShared(&runtime::storage::g_stateLock);
@@ -49,6 +57,20 @@ bool prepare_identity(ActivityInstanceKey key,
     }
     mutation = prepared;
     return true;
+}
+
+} // namespace
+
+/** Prepares local reflected/seeded identity without inventing client provenance. */
+bool prepare_identity(ActivityInstanceKey key, const Identity& identity,
+                      PendingMutation& mutation) noexcept {
+    return prepare_identity_impl(key, identity, nullptr, mutation);
+}
+
+/** Preserves the actual parsed client identity separately from local-only fallback values. */
+bool prepare_client_identity(ActivityInstanceKey key, const Identity& raw,
+                             const Identity& reflected, PendingMutation& mutation) noexcept {
+    return prepare_identity_impl(key, reflected, &raw, mutation);
 }
 
 /** Captures the current membership snapshot without changing stored State. */

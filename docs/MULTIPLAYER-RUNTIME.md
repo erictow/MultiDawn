@@ -3,6 +3,8 @@
 MultiDawn's launcher provides solo launch and a two-person pairing connection.
 Pairing does not yet put two Guardians into the same Destiny activity. Multiplayer
 game launch is blocked until the game runtime supports that behavior.
+The [milestones](MULTIPLAYER-MILESTONES.md) are two visible players first, then
+three-player fireteams, then six-player raid support and project completion.
 
 ## Native implementation added
 
@@ -10,12 +12,14 @@ The source now includes these native components:
 
 - Endpoint-scoped reliable queues, addresses, views, readiness and disconnects.
   Two human peers that name the same group no longer resolve to the first link.
-- A two-human membership builder using the existing native encoder and state
-  hash. `authorize_shared_peer` requires actual group, endpoint, machine and
+- A membership builder with storage for six humans, using the existing native
+  encoder and state hash. Three maximum-width human rows fit the tested current
+  queue; six exceed its present limits. `authorize_shared_peer` requires actual group, endpoint, machine and
   player identities. A launcher pair code does not authorize a game descriptor.
 - SteamFriends017 enumeration, persona, presence, and invitation methods.
-  Incoming invitations stay pending until explicit acceptance queues the
-  native 264-byte `GameRichPresenceJoinRequested_t` callback.
+  Protocol 2 invitations stay pending after explicit acceptance while the host
+  receives an expiring intent. They do not queue the native game-join callback.
+  Legacy protocol 1 retains its callback behavior between legacy runtimes.
 - A Dawn Friends page and an invitation notice in the game overlay.
 - A local named-pipe companion client, bound to the launcher's process ID and
   a per-launch nonce. The launcher restricts the pipe to the current Windows
@@ -24,13 +28,41 @@ The source now includes these native components:
 - An experimental BAP300/301 resolver and authenticated gameplay UDP envelope,
   enabled only with `DAWN_NATIVE_ADDRESS_RESOLUTION=1`. The resolver targets the
   configured embedded endpoint and owns bounded contexts for each BAP
-  authentication lifetime. This path has component tests, not verified native
-  channel establishment or two-player gameplay.
+  authentication lifetime. An isolated native game completed the channel
+  handshake and acknowledged view replies. Two-player gameplay remains unverified.
+- Exact authenticated route identity survives native UDP dispatch. Internal
+  consumers can reply through that specific context when several native peers
+  share a socket. Internal peer-address registrations now distinguish human
+  contexts from control contexts, and unclaimed human packets cannot enter the
+  control handler. No human relay or gameplay grant is installed by these APIs.
+  See [explicit native routes](EXPLICIT-NATIVE-ROUTES.md).
+- Launcher 0.5 protects every post-handshake control frame with encryption,
+  authentication and strict directional sequences. The final welcome is also
+  authenticated before pairing is published. Both PCs need the new connection
+  protocol; pair codes retain their `MD2-` format. See
+  [protected launcher control](PROTECTED-PAIRING-CONTROL.md).
+- Actual type-23 identity receipts remain separate from seeded and locally
+  reflected identities. A local-only creator capture validates the exact BAP
+  binding and current State region without exporting account fields to public
+  snapshots or companion messages. See
+  [identity provenance](CLIENT-IDENTITY-PROVENANCE.md).
+- The BAP type-12 encoder accepts explicit additional humans in stable slots,
+  with independent identity, address and region-token inputs. The recovered
+  build-86657 schema also establishes its leave/skip field and signed opaque
+  byte encoding. Existing solo/control bytes remain unchanged. No live caller
+  supplies these rows; see [additional-human membership](REMOTE-HUMAN-MEMBERSHIP.md).
+- An explicit version-three native companion can recheck a live accepted ticket
+  against the current launcher pair and both runtime epochs. Its expiring result
+  remains an invitation observation, with no account data or gameplay grant.
+  Default companion launch stays on version two; see
+  [invitation preflight](INVITATION-CONTROL-V2.md#opt-in-version-three-preflight).
 
 These changes have not been installed over the existing game. The approved
 Windows SDK is installed locally. The full DLL and native component tests now
-build with Clang 23.1.5. An isolated test game has loaded that DLL and passed the
-read-only executable/signature checks. This is a development build, not a
+build with Clang 23.1.5. An earlier development DLL ran in the isolated test game
+and passed the read-only executable/signature checks. The latest identity reader
+also passed a live Tower comparison. Invitation behavior still needs in-game
+friend-roster testing. This is a development build, not a
 verified multiplayer release. The installed Dawn 1.7.2 DLL does not gain these
 features from a launcher update alone.
 
@@ -84,11 +116,38 @@ handler before group membership exists and is refused as `unresolved_group`.
 No view token is treated as authorization or guessed to be a group ID. Remote
 human admission, shared membership and two-Guardian gameplay remain unverified.
 
-The opt-in trace subsequently located the actual fireteam and activity sessions.
+Experimental `main` now handles that pre-join view as a link-level exchange on
+the exact authenticated native channel. It requires connected/application-ready
+state and empty group slots, checks both channel incarnation values, and queues
+the reply and binds its signature atomically. It grants no group membership and
+does not reinterpret the view token. Existing admitted-group and legacy paths
+are unchanged. Unit checks pass. In the isolated Tower test, the native client
+acknowledged all eleven queued view replies and Dawn retired their reliable
+fragments with the queue empty. The former `unresolved_group` errors were absent.
+The later [world connection capture](NATIVE-WORLD-CONNECTION.md) confirmed the
+accepted control peer's native compatibility flag and recovered predicate were
+both true. Two-player gameplay remains unverified.
+
+The read-only snapshot tool also has an opt-in `--native-players` capture. It
+reports native player IDs only after count/mask and member-slot ownership checks,
+without reading player configuration. The isolated game's populated player rows
+passed those checks with stable membership/player headers. This manual evidence
+is not yet an in-process identity publisher or a gameplay authorization grant.
+
+The new [in-process observation reader](NATIVE-IDENTITY-OBSERVATION.md) captures
+those public routing scalars on the native manager thread. It requires
+`DAWN_NATIVE_IDENTITY_OBSERVATION=1` and pinned build signatures, rejects ambiguous
+roles and inconsistent ownership, and expires samples after one second. Its
+component tests pass. In the isolated Tower run, the fingerprints for both sampled
+roles matched the independent read-only capture exactly, with stable headers.
+The actual loaded DLL and three layout signatures were verified. It neither
+identifies a unique local human nor publishes identities to another PC.
+
+The opt-in trace also located the actual fireteam and activity sessions.
 Both sampled sessions were in native mode 6, with one established local member,
 and both current managed descriptions used Steam-format NetAddr method 6.
 The read-only reporter distinguishes that opaque transport address from a direct
-IPv4 endpoint. This baseline still has no second player or native peer connection.
+IPv4 endpoint. These session observations do not establish a second human peer.
 
 ## Experimental native address resolution
 
@@ -96,11 +155,14 @@ Set `DAWN_NATIVE_ADDRESS_RESOLUTION=1` before an isolated test runtime starts to
 enable service 300/301 and routed UDP handling. The setting is cached for that
 DLL lifetime and defaults off. It does not enable multiplayer Play.
 
-The route requires a current BAP authentication, capability 16, method 0, and an
-exact match to the configured embedded descriptor's 41-byte direct address body.
-It echoes the full native NetAddr and returns the configured IPv4 transport
-endpoint. It does not resolve another player's Steam-format address or expose
-the account backend to the LAN.
+The route requires a current BAP authentication, capability 16 and method 0.
+The control address matches the configured descriptor's 41-byte direct body;
+an internally registered human address must match all 86 bytes and its exact
+authentication owner. Both echo the full requested NetAddr and return the
+configured embedded IPv4 transport endpoint. Human registrations are not exposed
+through companion/social commands and have no active runtime caller. This does
+not resolve another player's Steam-format address or expose the account backend
+to the LAN.
 
 The UDP envelope uses DES-CBC, authenticated by HMAC-SHA1 truncated to ten bytes,
 as required by this game build. Sixteen bounded contexts own random keys,
@@ -111,9 +173,10 @@ duplicates. That window size is server policy, not a recovered native constant.
 Introduction probes remain unwrapped.
 
 Wire layouts, lifecycle policy and component test details are in
-[the address-resolution notes](../Dawn/docs/ADDRESS-RESOLUTION.md). None of these
-component passes verifies a native peer connection, shared activity, or remote
-Guardian replication.
+[the address-resolution notes](../Dawn/docs/ADDRESS-RESOLUTION.md). Component
+passes alone do not verify a shared activity or remote Guardian replication.
+The isolated native connection evidence above covers one client and its embedded
+server.
 
 ## What the launcher connection means
 
@@ -123,8 +186,8 @@ The standalone Windows launcher is built with
 
 Solo Play starts the selected installation with `DAWN_SESSION_MODE=solo` in that
 child process. The launcher does not replace the installed account or settings.
-The multiplayer controls establish a separate authenticated TCP connection for
-one host and one guest, with connection health and disconnect handling.
+The multiplayer controls establish a separate encrypted, authenticated TCP
+connection for one host and one guest, with connection health and disconnect handling.
 This connection is a control channel, not Destiny's BAP or gameplay channel.
 
 The pairing address must be reachable over a LAN or a configured VPN. A pair code
@@ -146,7 +209,7 @@ not a claim about an untested two-machine game session.
 | Accounts and secrets | `src/state/runtime/state.h`, `State`, contains one `AccountState`, one `SignOnState`, and one `BapState`. `src/state/runtime/storage/internal.h` exposes one process-wide root State. | Two network connections are not two isolated player accounts. |
 | Account mutation | `src/server/bap/bap_route.cpp`, `publish_account_mutation`, refreshes other active sessions from the shared account. `src/server/web_service/web_service_runtime.cpp` can change the primary account globally. | Forwarding a guest into the host's current backend could operate on the host's save. |
 | Gameplay endpoint | `src/server/gameplay/endpoint/gameplay_endpoint.cpp`, `initialize`, can bind the configured embedded UDP endpoint. Defaults in `src/core/settings/server/gameplay/definition.h` use loopback addresses. | A UDP endpoint exists, but its presence does not establish a shared two-player world. |
-| Address resolution | `src/server/gameplay/resolution/address_resolution_host.cpp` conditionally handles BAP300/301 and the DES-CBC/HMAC envelope for the configured embedded endpoint. | The missing resolver path is implemented behind a development opt-in; live native channel establishment and remote peer resolution remain unverified. |
+| Address resolution | `src/server/gameplay/resolution/address_resolution_host.cpp` conditionally handles BAP300/301 and the DES-CBC/HMAC envelope for the configured embedded endpoint. | The isolated game established a native channel and acknowledged view replies behind a development opt-in. Remote human resolution remains unverified. |
 | Group membership | `src/server/gameplay/group/shared_membership.h` builds a control host and up to two authenticated humans. `group_host.cpp` requires endpoint-scoped authorization and real captured NetAddr values. | The base native roster now has a shared path, but the companion does not yet have the actual game descriptors needed to activate it. |
 | Player properties | `group_host.cpp`, `consume`, reads the peer-properties header and player-add identity prefix; its comments explicitly identify undecoded profile/property bodies. `bind_view` echoes the peer's view signature. | The existing handshake is insufficient evidence of complete remote Guardian replication. |
 | Steam friend interface | `src/steam/interfaces/tables/common_tables.cpp` registers Friends017 enumeration, persona, presence and invitation methods. `src/steam/interfaces/methods/friends.cpp` exposes only a peer published by the authenticated companion. | The native APIs and Dawn Friends overlay are implemented in source. Visibility in the game's own roster and party acceptance still require actual game verification and a joinable native session. |
@@ -160,23 +223,22 @@ Paths beginning with `src/` in this table are relative to `Dawn/`.
 The following is an implementation sequence. These items are not supplied by the
 launcher pairing protocol.
 
-1. **Separate player state from the activity host.** Introduce authenticated player
-   contexts for account identity, selected character, inventory transactions, keys,
-   and persistence. Thread the context through BAP and web-service handlers rather
-   than resolving every request through `state::account_snapshot()`. A guest must
-   never inherit the host's account merely because both use the same process.
-2. **Provide a complete remote backend boundary.** Either expose the required
-   SignOn/config/BAP services through an authenticated transport or implement an
-   explicit proxy for the existing client-consumer boundary. The host must publish
-   reachable endpoints and connection-scoped credentials. The guest runtime must
-   select this boundary before registering its embedded server consumers.
-3. **Make guest startup conditional.** Add a supported guest runtime branch in
-   `core::initialize` before `state::initialize` and `server::initialize`. Only a
-   successfully validated, compatible host session may enter that branch. A lost
-   connection must not silently fall back to a local world or a different account.
-   Do not call the existing broad `server::shutdown` during live gameplay: client
-   hooks and native activity work can still depend on its state.
-4. **Activate a shared native session.** Connect the guarded two-human membership
+1. **Keep player services local.** Each PC retains its own account identity,
+   selected character, inventory, keys, persistence and local profile/BAP service.
+   The host owns the shared activity. Do not forward account operations into the
+   host's single process-wide account or infer native player IDs from Steam IDs.
+2. **Add a typed activity boundary.** Introduce a guest-local proxy for only the
+   authorized activity operations. Bind its messages to the exact BAP connection,
+   authentication generation, activity instance and host lineage. The host must
+   advertise reachable gameplay endpoints. The ordinary account BAP listener
+   remains on loopback; publishing it to the LAN would not provide this boundary.
+3. **Make gameplay handoff conditional.** Disable the guest's embedded gameplay
+   endpoint only after a validated host grant and compatible native session are
+   ready. Keep its local profile services running. A lost connection must not
+   silently fall back to a separate local world. Do not call the existing broad
+   `server::shutdown` during live gameplay: client hooks and native activity work
+   can still depend on its state.
+4. **Activate a shared native session.** Connect the guarded membership
    builder to authenticated native descriptors and a working peer channel.
    Preserve stable and distinct player/machine IDs, assign entity ownership, and
    publish per-recipient session data. Complete the required property codecs and
@@ -188,7 +250,9 @@ launcher pairing protocol.
 6. **Complete the in-game social path.** Connect the implemented friend,
    presence and invitation APIs to a verified shared-session join path. Verify
    the paired player in the game's own roster, the receiving notification, and
-   invitation acceptance in game.
+   invitation acceptance in game. The new [ticketed acceptance protocol](INVITATION-CONTROL-V2.md)
+   supplies intent only. A future grant must revalidate the current native epochs,
+   activity binding, native machine/player identities and authenticated UDP source.
 7. **Advertise tested capabilities.** Enable multiplayer Play only when the actual
    loaded runtime implements the above contract. A launcher flag or editable file
    is not sufficient proof that a stock installed DLL can host multiplayer.
@@ -200,11 +264,29 @@ the game remains in solo mode. Ordinary solo launches strip inherited companion
 configuration. Direct launch without these variables retains the existing solo
 runtime behavior.
 
+An explicit [two-PC native game preflight](TWO-PC-NATIVE-PREFLIGHT.md) now provides
+a separate test-launch control for isolated game installs. It pins the compiled
+DLL and the current launcher pairing before starting a protocol-three native
+companion. Child startup checks reject a replaced pairing before publishing
+identities. This launch keeps each game in solo mode with its local profile and
+does not supply the missing world handoff or player replication.
+
 The account backend remains local to each player. This avoids forwarding a
 guest's inventory transactions into the host's single process-wide account.
 Changing the platform identity can still affect the account's sign-in identity;
 native game testing must use isolated copies of saves until preservation is
 verified. No automated live server shutdown or account migration is implemented.
+
+The [local-profile handoff design](LOCAL-PROFILE-ACTIVITY-HANDOFF.md) records the
+remaining exact BAP activity boundary. Existing seeded join IDs and local BAP
+handshake state are not proof of a remote native player identity.
+The [activity-binding probe](ACTIVITY-BINDING.md) now observes these boundaries
+without granting admission. The native managed session and the BAP world/facet
+group remain distinct structures whose relationship still needs recovery.
+The [explicit route APIs](EXPLICIT-NATIVE-ROUTES.md) now retain exact authenticated
+context identity and support protected replies when multiple contexts share one
+socket. The internal consumer extension is unregistered by default; no human
+relay or gameplay grant is activated by this transport work.
 
 ## Component verification
 
@@ -214,8 +296,10 @@ disconnects and UI state using test native clients. Connection generations
 prevent queued profiles, invitations, sends, and errors from affecting a later
 pairing, including reconnection to the same identity. They do not start the game.
 
-Current local verification passed 155 launcher assertions and 227 social/IPC/
-membership checks (40 protocol, 33 IPC, 90 social, and 64 membership/link checks).
+Before protocol 2, local verification passed 155 launcher assertions and 227
+social/IPC/membership checks. Protocol 2 now has 78 protocol, 292 native IPC,
+and 221 Social checks. Its launcher and cross-language checks are described in
+the invitation protocol notes.
 Shared member/player slots now remain assigned to the same native identity
 across disconnect/rejoin. If a missing member would require an unsupported
 sparse native membership, publication stops rather than renumbering a survivor.
@@ -228,20 +312,48 @@ The native test projects are:
   against an isolated Windows pipe server, including fragmented input.
 - `Dawn/unit/steam_social_tests.vcxproj`: social ABI values, callback payloads,
   invitation acceptance, stale IDs, transport failures and queue backpressure.
-- `Dawn/unit/shared_membership_tests.vcxproj`: two distinct human rows, native
-  membership encoding/hash state and endpoint-scoped link lookup.
+- `Dawn/unit/shared_membership_tests.vcxproj`: 298 checks including three-human
+  production enqueue/packet/reassembly/hash round trips, six-human storage and
+  fail-closed transport limits, stable identity slots and endpoint-scoped links.
 - `Dawn/unit/address_resolution_tests.vcxproj`: 1,288 body-codec and service-301
   framing checks, including preservation of other services' status-200 headers.
 - `Dawn/unit/des_cbc_tests.vcxproj`: 53 compatibility-primitive checks.
 - `Dawn/unit/routed_datagram_tests.vcxproj`: 535 envelope and failure checks.
 - `Dawn/unit/resolution_replay_tests.vcxproj`: 16,554 replay-window checks.
-- `Dawn/unit/address_resolution_host_tests.vcxproj`: 1,084 enabled-backend checks
-  and 11 checks in a separate `--disabled` process. These link production crypto
+- `Dawn/unit/address_resolution_host_tests.vcxproj`: 2,851 enabled-backend checks
+  and 27 checks in a separate `--disabled` process. These link production crypto
   and the context store without sockets, game processes, or saves.
-- `Dawn/unit/endpoint_resolution_tests.vcxproj`: 136 checks in the recorded
+- `Dawn/unit/endpoint_resolution_tests.vcxproj`: 440+ checks in recorded
   loopback run, using real UDP and production endpoint/crypto code with stubbed
   peer/legacy handlers. Covers authenticated dispatch, wrapped replies, rejected
-  tampering/replay/rebinding, preserved legacy traffic and send failures.
+  tampering/replay/rebinding, preserved legacy traffic, exact-context replies,
+  routed consumer dispatch, human/control isolation, two-client forwarding of
+  1,500-byte opaque payloads, lifecycle cleanup and send failures.
+- `Dawn/unit/peer_view_echo_tests.vcxproj`: 2,006 checks with compiler warnings
+  treated as errors, covering
+  exact link ownership, malformed views, queue rollback and unchanged group slots.
+- `Dawn/unit/native_identity_observation_tests.vcxproj`: 321 checks plus three
+  unsupported-layout checks, with the real adapter and production membership
+  encoder. Covers scalar-read restrictions, native ownership, unstable samples,
+  ambiguous roles, expiry, capacity reclamation and lifecycle fencing.
+- `Dawn/unit/identity_activity_correlation_tests.vcxproj`: 95 managed-session
+  correspondence checks, without assigning semantic meaning to a raw role.
+- `Dawn/unit/creator_activity_snapshot_tests.vcxproj`: 67 checks with the real
+  BAP coordinator, State query and exact retirement paths.
+- `Dawn/unit/activity_binding_tests.vcxproj`: 85 cross-boundary checks with
+  substituted providers, including stale/changed lifetimes and pin release.
+- `Dawn/unit/advertisement_observation_tests.vcxproj`: 133 checks of production
+  advertisement observation, unchanged publication and exact lineage failures.
+- `Dawn/unit/packets_discarded_tests.vcxproj`: 973 checks of native ID4's five-bit
+  increment, declared size, logical/rounded forms, padding and failed-output preservation.
+- `Dawn/unit/membership_consumer_contract_tests.vcxproj`: 10,929 checks of the
+  recovered native connection-selection offsets, role/skip distinction,
+  production leave encoding and signed opaque bytes.
+- `Dawn/unit/client_identity_receipt_tests.vcxproj`: raw identity receipt
+  provenance, fallback separation, binding lifetime and snapshot retirement.
+- `Dawn/unit/remote_human_membership_tests.vcxproj`: independent decoding of
+  two-, three- and six-human BAP bodies, stable gaps, per-human region lanes,
+  optional D4/opaque fields, maximum size, rejection and unchanged solo goldens.
 
 `companion_bridge_harness.vcxproj` builds a small native test worker that links
 the production companion client with test social/log sinks. The launcher's
@@ -253,12 +365,39 @@ It does not verify the game's friend roster or a shared activity.
 
 Native build instructions are in
 [`tools/build/PORTABLE-WINDOWS.md`](../tools/build/PORTABLE-WINDOWS.md).
-The native GitHub workflow builds and runs the ten component test projects;
+The native GitHub workflow builds and runs the twenty component test projects;
 preparing the workflow does not mean a remote run has passed.
+
+For experimental commit `f60ac62b`, the
+[native and interoperability workflow](https://github.com/erictow/MultiDawn/actions/runs/45773564715)
+passed all twenty component suites, eighteen snapshot tests and both then-current
+native companion versions. That checkpoint covers registered human routes and
+the additional-human BAP writer; subsequent preflight changes need their own
+verification.
+
+For experimental commit `abc33b90`, the
+[native checks and interoperability workflow](https://github.com/erictow/MultiDawn/actions/runs/43288105681)
+passed all eighteen then-current component suites, the snapshot tests and both
+companion versions. The
+[launcher and package workflow](https://github.com/erictow/MultiDawn/actions/runs/43288105801)
+also passed. Later identity receipt changes require their own checks.
+
+For production commit `21c2a980`, the remote
+[native component workflow](https://github.com/erictow/MultiDawn/actions/runs/42975247251)
+and [launcher workflow](https://github.com/erictow/MultiDawn/actions/runs/42975247367)
+both completed successfully. Later experimental changes need their own checks.
+
+For experimental commit `066a9bf6`, the
+[native component and interoperability workflow](https://github.com/erictow/MultiDawn/actions/runs/43137042609)
+passed all twelve component suites, the Python snapshot tests and both companion
+versions. The preceding invitation checkpoint also passed the
+[launcher and package workflow](https://github.com/erictow/MultiDawn/actions/runs/43136233523).
+The later identity-fingerprint implementation at `5e8c56ba` also passed the
+[native, snapshot and interoperability workflow](https://github.com/erictow/MultiDawn/actions/runs/43138193997).
 
 The [runtime snapshot tool](../tools/testing/MULTIPLAYER-RUNTIME-SNAPSHOT.md)
 verifies the actual loaded build and reads bounded native session/facet state.
-Its thirteen offline tests cover layout checks, consistency, key redaction,
+Its eighteen offline tests cover layout checks, consistency, key redaction,
 Steam-address redaction, and PID-scoped trace parsing. An optional bounded native session trace reuses the
 existing session-update hook to locate structures without enabling legacy probes.
 
@@ -274,8 +413,9 @@ Keep each original profile and game installation available for comparison.
   Reject malformed/incorrect codes, incompatible protocol versions, and a third
   participant. Verify timeout, disconnect, and session cleanup on both sides.
 - Confirm that both game processes negotiate the intended host and distinct player
-  identities. Confirm that the guest does not bind or use an embedded gameplay/BAP
-  backend. Check the actual loaded DLL and endpoint logs, not just launcher status.
+  identities. Confirm that the guest uses the host's gameplay endpoint while its
+  own profile/BAP service and saves remain local. Check the actual loaded DLL and
+  endpoint logs, not just launcher status.
 - Put both Guardians in the same activity. Observe each player's movement and
   appearance from the other machine. Exercise weapons, damage, enemies, revive,
   objective progression, loading, and return to orbit.

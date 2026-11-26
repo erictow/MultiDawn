@@ -3,11 +3,6 @@
 namespace dawn::middleware::bap::activity_message::replicate_membership {
 namespace {
 
-/** The local member sits in slot zero of both top-level masks. */
-constexpr std::uint32_t kLocalMemberMask = 1;
-/** The reflected activity host occupies slot one. */
-constexpr std::uint32_t kHostMemberMask = 1U << 1U;
-
 static_assert(kMeaningfulBitCount == kEncodedSize * 8U);
 
 } // namespace
@@ -23,8 +18,7 @@ bool encode_replicate_membership(const MembershipSnapshot& snapshot,
     }
 
     encoding::bits::Writer writer(output.first(size));
-    const std::uint32_t memberMask =
-        snapshot.citizen.present ? kLocalMemberMask | kHostMemberMask : kLocalMemberMask;
+    const std::uint32_t memberMask = member_mask(snapshot);
     const bool encoded = writer.write(1, 1) && writer.write(snapshot.revision, 32)
                          && writer.write(snapshot.epoch, 32)
                          && write_member_table(writer, snapshot) && writer.write(1, 1)

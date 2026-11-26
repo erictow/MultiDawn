@@ -80,6 +80,27 @@ struct AdvertisementSnapshot final {
     AdvertisementSnapshot& output,
     group::HostActivityLineageLease& lease) noexcept;
 
+/** Public identity/lineage scalars only; no descriptor or NetAddr body is exposed. */
+struct AdvertisedActivityObservation final {
+    std::uint64_t groupMachineId{};
+    state::activity::ActivityInstanceKey host{};
+    state::activity::ActivityInstanceKey source{};
+    std::int32_t regionIndex{-1};
+    AdvertisementReadiness readiness{AdvertisementReadiness::absent};
+    friend constexpr bool operator==(const AdvertisedActivityObservation&,
+                                      const AdvertisedActivityObservation&) noexcept = default;
+};
+
+/**
+ * Acquires the existing exact host-row pin without provisioning, publishing a control-host
+ * role or registering a native descriptor. Non-ready results contain no routing identities.
+ */
+[[nodiscard]] bool acquire_advertisement_observation(
+    state::activity::ActivityInstanceKey source,
+    std::int32_t region,
+    AdvertisedActivityObservation& output,
+    group::HostActivityLineageLease& lease) noexcept;
+
 /**
  * Reports whether one region's advertisement can be built now.
  * The client applies one membership update per revision. Publishing during `pending` spends that

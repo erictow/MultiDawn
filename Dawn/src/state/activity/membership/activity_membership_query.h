@@ -33,6 +33,23 @@ struct RegionView final {
     HostRegionKey hostRegion{};
     destination::DestinationSelection destination{};
     std::int32_t reportedRegion{kAbsentRegionIndex};
+    /** Committed activity-join key, captured with this region under the same State lock. */
+    std::uint64_t memberKey{};
+    /** Stored BAP join identity only; this can be a seeded fallback, never a native player ID. */
+    std::uint64_t joinIdentity{};
+    bool hasIdentity{};
+    /** A stored identity agrees with the record's independently committed join key. */
+    bool identityMatchesMemberKey{};
+};
+
+/** Local-only raw client publication. Contains account fields; never a public routing snapshot. */
+struct ClientIdentityPublication final {
+    ActivityInstanceKey activity{};
+    /** Current coherent region observation, not the region in which type 23 originally arrived. */
+    HostRegionKey hostRegion{};
+    ClientIdentityReceipt receipt{};
+    std::uint64_t stateRevision{};
+    std::uint64_t recordRevision{};
 };
 
 /**
@@ -68,6 +85,9 @@ struct PendingMutation final {
     Snapshot snapshot{};
     /** A second copy, so a changed identity plan is caught before commit. */
     Identity identityGuard{};
+    /** Actual parsed type-23 identity, kept independently of snapshot.identity's local fallback. */
+    Identity clientIdentityInput{};
+    Identity clientIdentityGuard{};
     /** Sparse authoritative input, kept whether or not a delivery snapshot exists. */
     AuthoritativeUpdate authoritativeInput{};
     /** A second copy, so a changed authoritative plan is caught before commit. */
@@ -91,6 +111,8 @@ struct PendingMutation final {
     MutationKind kind{};
     bool hasSnapshot{};
     bool changesState{};
+    /** Runtime receipt changed, independent of the native membership delivery/revision. */
+    bool changesReceipt{};
     /**
      * Set when the delta moves the player to a different region.
      * The region is not a published membership field, so this is separate from changesState. The
@@ -116,6 +138,21 @@ struct PendingMutation final {
 [[nodiscard]] bool prepare_identity(ActivityInstanceKey key,
                                     const Identity& identity,
                                     PendingMutation& mutation) noexcept;
+
+/**
+ * Prepares a parsed type-23 publication and its local reflected identity atomically.
+ * Only account/unnamed field5 zeroes may be filled in the reflected copy. Raw values
+ * remain exact, including zeroes. This records provenance, not a remote credential.
+ */
+[[nodiscard]] bool prepare_client_identity(ActivityInstanceKey key,
+                                           const Identity& raw,
+                                           const Identity& reflected,
+                                           PendingMutation& mutation) noexcept;
+
+/** Exact joined activity/region only; clears output on failure and has no newest-session fallback. */
+[[nodiscard]] bool snapshot_client_identity(ActivityInstanceKey key,
+                                            HostRegionKey expected,
+                                            ClientIdentityPublication& output) noexcept;
 
 /**
  * Prepares sparse host-state changes for one joined activity session.

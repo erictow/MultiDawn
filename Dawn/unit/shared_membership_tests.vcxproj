@@ -12,6 +12,8 @@
     <ClCompile Include="..\src\middleware\gameplay\descriptor\join_descriptor.cpp" />
     <ClCompile Include="..\src\middleware\gameplay\group\session_messages.cpp" />
     <ClCompile Include="..\src\middleware\gameplay\group\session_state.cpp" />
+    <ClCompile Include="..\src\middleware\gameplay\peer\established_packet.cpp" />
+    <ClCompile Include="..\src\middleware\gameplay\peer\reliable_assembly.cpp" />
     <ClCompile Include="..\src\middleware\encoding\bit_reader.cpp" />
     <ClCompile Include="..\src\middleware\encoding\bit_writer.cpp" />
     <ClCompile Include="..\src\middleware\encoding\bit_raw.cpp" />

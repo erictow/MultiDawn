@@ -124,6 +124,7 @@ namespace MultiDawn.Launcher
         // so a concurrent control send can never wait on a disposed semaphore.
         private readonly SemaphoreSlim controlWrites = new SemaphoreSlim(1, 1);
         private SemaphoreSlim peerWrites;
+        private PairProtection peerProtection;
         private CancellationToken peerCancellation;
         private long connectionGeneration;
         private readonly HashSet<TcpClient> pending = new HashSet<TcpClient>();
@@ -180,18 +181,18 @@ namespace MultiDawn.Launcher
         {
             if (String.IsNullOrEmpty(message) || message.Length > 1024) throw new ArgumentException("Invalid control message size.");
             foreach (char value in message) if (value < 32 || value > 126) throw new ArgumentException("Control messages must be printable ASCII.");
-            TcpClient client; SemaphoreSlim gate; SessionLifetime current; CancellationToken cancellation;
+            TcpClient client; SemaphoreSlim gate; PairProtection protection; SessionLifetime current; CancellationToken cancellation;
             lock (sync)
             {
-                client = peer; gate = peerWrites; current = lifetime;
-                if (client == null || gate == null || current == null || connectionGeneration != expectedGeneration)
+                client = peer; gate = peerWrites; protection = peerProtection; current = lifetime;
+                if (client == null || gate == null || protection == null || current == null || connectionGeneration != expectedGeneration)
                     throw new IOException("The authenticated partner connection is no longer current.");
                 current.AddWorker();
                 cancellation = peerCancellation;
             }
             try
             {
-                await SerializedWriteAsync(client.GetStream(), gate, "MD2 CONTROL " + Convert.ToBase64String(Encoding.ASCII.GetBytes(message)), cancellation).ConfigureAwait(false);
+                await SerializedWriteAsync(client.GetStream(), gate, protection, "CONTROL " + message, cancellation).ConfigureAwait(false);
             }
             finally { current.WorkerDone(); }
         }
@@ -245,6 +246,7 @@ namespace MultiDawn.Launcher
                 pending.Add(client);
             }
             Publish(current, null, "Connecting to host...");
+            PairProtection protection = null;
             try
             {
                 using (current.Token.Register(delegate { client.Close(); }))
@@ -262,34 +264,38 @@ namespace MultiDawn.Launcher
                     client.NoDelay = true;
                     NetworkStream stream = client.GetStream();
                     string clientNonce = PairCode.RandomToken();
-                    await WriteLineAsync(stream, "MD2 HELLO " + clientNonce + " " + localPeerId, current.Token).ConfigureAwait(false);
+                    await WriteLineAsync(stream, "MD3 HELLO " + clientNonce + " " + localPeerId, current.Token).ConfigureAwait(false);
                     string response = await ReadLineAsync(stream, 5000, current.Token).ConfigureAwait(false);
                     string[] words = response.Split(' ');
-                    if (words.Length != 5 || words[0] != "MD2" || words[1] != "CHALLENGE" || !ValidIdentity(words[2]) || !ValidIdentity(words[3])
+                    if (words.Length != 5 || words[0] != "MD3" || words[1] != "CHALLENGE" || !ValidIdentity(words[2]) || !ValidIdentity(words[3])
                         || !SameProof(words[4], Proof(parsed.Token, "host", clientNonce, words[2], localPeerId, words[3])))
                         throw new IOException("The host rejected the pair code or uses a different launcher protocol.");
                     string hostIdentity = words[3];
                     if (expectedHostPeerId != null && !String.Equals(hostIdentity, expectedHostPeerId, StringComparison.Ordinal))
                         throw new IOException("The authenticated host does not match the selected saved friend. Check their current code and address.");
-                    await WriteLineAsync(stream, "MD2 PROOF " + Proof(parsed.Token, "join", clientNonce, words[2], localPeerId, hostIdentity), current.Token).ConfigureAwait(false);
+                    await WriteLineAsync(stream, "MD3 PROOF " + Proof(parsed.Token, "join", clientNonce, words[2], localPeerId, hostIdentity), current.Token).ConfigureAwait(false);
                     response = await ReadLineAsync(stream, 5000, current.Token).ConfigureAwait(false);
-                    if (response == "MD2 BUSY") throw new IOException("The host already has a paired player.");
-                    if (response != "MD2 WELCOME " + hostIdentity) throw new IOException("The host rejected the pair code.");
+                    if (response == "MD3 BUSY") throw new IOException("The host already has a paired player.");
+                    if (!SameProof(response, "MD3 WELCOME " + hostIdentity + " " + Proof(parsed.Token, "welcome", clientNonce, words[2], localPeerId, hostIdentity)))
+                        throw new IOException("The host rejected the pair code or did not confirm this protected connection.");
+                    protection = new PairProtection(parsed.Token, clientNonce, words[2], localPeerId, hostIdentity, false);
                     lock (sync)
                     {
                         if (lifetime != current) throw new OperationCanceledException();
                         pending.Remove(client);
                         peer = client;
                         peerHostPort = targetPort;
+                        peerProtection = protection;
                         connectionGeneration++;
                         peerId = hostIdentity;
                     }
+                    MonitorAsync(client, current, protection);
                     Publish(current, true, "Paired with host. Gameplay multiplayer is not available in this build.");
-                    MonitorAsync(client, current);
                 }
             }
             catch
             {
+                if (protection != null) protection.Dispose();
                 client.Close();
                 lock (sync)
                 {
@@ -301,6 +307,7 @@ namespace MultiDawn.Launcher
                         peer = null;
                         peerHostPort = 0;
                         peerWrites = null;
+                        peerProtection = null;
                         code = token = peerId = "";
                         address = null;
                         port = 0;
@@ -342,6 +349,7 @@ namespace MultiDawn.Launcher
         private async Task AuthenticateAsync(TcpClient client, SessionLifetime current)
         {
             bool accepted = false;
+            PairProtection protection = null;
             try
             {
                 using (CancellationTokenSource handshake = CancellationTokenSource.CreateLinkedTokenSource(current.Token))
@@ -355,39 +363,41 @@ namespace MultiDawn.Launcher
                     string[] words = line.Split(' ');
                     string expected;
                     lock (sync) expected = token;
-                    if (words.Length != 4 || words[0] != "MD2" || words[1] != "HELLO" || !ValidIdentity(words[2]) || !ValidIdentity(words[3]))
+                    if (words.Length != 4 || words[0] != "MD3" || words[1] != "HELLO" || !ValidIdentity(words[2]) || !ValidIdentity(words[3]))
                     {
-                        await WriteLineAsync(stream, "MD2 REJECT", handshake.Token).ConfigureAwait(false);
+                        await WriteLineAsync(stream, "MD3 REJECT", handshake.Token).ConfigureAwait(false);
                         return;
                     }
                     string hostNonce = PairCode.RandomToken();
-                    await WriteLineAsync(stream, "MD2 CHALLENGE " + hostNonce + " " + localPeerId + " " + Proof(expected, "host", words[2], hostNonce, words[3], localPeerId), handshake.Token).ConfigureAwait(false);
+                    await WriteLineAsync(stream, "MD3 CHALLENGE " + hostNonce + " " + localPeerId + " " + Proof(expected, "host", words[2], hostNonce, words[3], localPeerId), handshake.Token).ConfigureAwait(false);
                     string proofLine = await ReadLineAsync(stream, 5000, handshake.Token).ConfigureAwait(false);
-                    string expectedProof = "MD2 PROOF " + Proof(expected, "join", words[2], hostNonce, words[3], localPeerId);
+                    string expectedProof = "MD3 PROOF " + Proof(expected, "join", words[2], hostNonce, words[3], localPeerId);
                     if (!SameProof(proofLine, expectedProof))
                     {
-                        await WriteLineAsync(stream, "MD2 REJECT", handshake.Token).ConfigureAwait(false);
+                        await WriteLineAsync(stream, "MD3 REJECT", handshake.Token).ConfigureAwait(false);
                         return;
                     }
                     bool busy;
                     lock (sync) busy = peer != null;
                     if (busy)
                     {
-                        await WriteLineAsync(stream, "MD2 BUSY", handshake.Token).ConfigureAwait(false);
+                        await WriteLineAsync(stream, "MD3 BUSY", handshake.Token).ConfigureAwait(false);
                         return;
                     }
-                    await WriteLineAsync(stream, "MD2 WELCOME " + localPeerId, handshake.Token).ConfigureAwait(false);
+                    protection = new PairProtection(expected, words[2], hostNonce, words[3], localPeerId, true);
+                    await WriteLineAsync(stream, "MD3 WELCOME " + localPeerId + " " + Proof(expected, "welcome", words[2], hostNonce, words[3], localPeerId), handshake.Token).ConfigureAwait(false);
                     lock (sync)
                     {
                         if (lifetime != current) return;
                         peer = client;
                         peerHostPort = 0;
+                        peerProtection = protection;
                         connectionGeneration++;
                         peerId = words[3];
                         accepted = true;
                     }
+                    MonitorAsync(client, current, protection);
                     Publish(current, true, "One player paired. Gameplay multiplayer is not available in this build.");
-                    MonitorAsync(client, current);
                     }
                 }
             }
@@ -395,11 +405,11 @@ namespace MultiDawn.Launcher
             finally
             {
                 lock (sync) pending.Remove(client);
-                if (!accepted) client.Close();
+                if (!accepted) { if (protection != null) protection.Dispose(); client.Close(); }
             }
         }
 
-        private async void MonitorAsync(TcpClient client, SessionLifetime current)
+        private async void MonitorAsync(TcpClient client, SessionLifetime current, PairProtection protection)
         {
             current.AddWorker();
             try
@@ -407,12 +417,13 @@ namespace MultiDawn.Launcher
             using (CancellationTokenSource monitor = CancellationTokenSource.CreateLinkedTokenSource(current.Token))
             using (monitor.Token.Register(delegate { client.Close(); }))
             {
+                lock (sync) { if (lifetime != current || peer != client) return; }
                 SemaphoreSlim writes = controlWrites;
                 lock (sync) { if (lifetime == current && peer == client) { peerWrites = writes; peerCancellation = monitor.Token; } }
                 int advertisedPort;
                 lock (sync) advertisedPort = isHost ? port : preferredHostPort;
-                Task heartbeat = HeartbeatAsync(client, writes, monitor.Token, advertisedPort);
-                Task reader = ReadPeerAsync(client, writes, current, monitor.Token);
+                Task heartbeat = HeartbeatAsync(client, writes, protection, monitor.Token, advertisedPort);
+                Task reader = ReadPeerAsync(client, writes, protection, current, monitor.Token);
                 try { await Task.WhenAny(heartbeat, reader).ConfigureAwait(false); }
                 catch (Exception) { }
                 monitor.Cancel();
@@ -428,6 +439,7 @@ namespace MultiDawn.Launcher
                     peerHostPort = 0;
                     connectionGeneration++;
                     peerWrites = null;
+                    peerProtection = null;
                     peerId = "";
                     changed = true;
                     hosting = isHost;
@@ -445,37 +457,33 @@ namespace MultiDawn.Launcher
                 Publish(current, false, hosting ? "Player disconnected. Waiting for another player." : "Host disconnected. Choose Disconnect, then enter a current code to reconnect.");
             }
             }
-            finally { current.WorkerDone(); }
+            finally { if (protection != null) protection.Dispose(); current.WorkerDone(); }
         }
 
-        private static async Task HeartbeatAsync(TcpClient client, SemaphoreSlim writes, CancellationToken cancellation, int advertisedPort)
+        private static async Task HeartbeatAsync(TcpClient client, SemaphoreSlim writes, PairProtection protection, CancellationToken cancellation, int advertisedPort)
         {
-            await SerializedWriteAsync(client.GetStream(), writes, "MD2 CONTROL " + Convert.ToBase64String(Encoding.ASCII.GetBytes("FRIEND1 PORT " + advertisedPort.ToString(System.Globalization.CultureInfo.InvariantCulture))), cancellation).ConfigureAwait(false);
+            await SerializedWriteAsync(client.GetStream(), writes, protection, "CONTROL FRIEND1 PORT " + advertisedPort.ToString(System.Globalization.CultureInfo.InvariantCulture), cancellation).ConfigureAwait(false);
             while (true)
             {
                 await Task.Delay(2000, cancellation).ConfigureAwait(false);
-                await SerializedWriteAsync(client.GetStream(), writes, "MD2 PING", cancellation).ConfigureAwait(false);
+                await SerializedWriteAsync(client.GetStream(), writes, protection, "PING", cancellation).ConfigureAwait(false);
             }
         }
 
-        private async Task ReadPeerAsync(TcpClient client, SemaphoreSlim writes, SessionLifetime current, CancellationToken cancellation)
+        private async Task ReadPeerAsync(TcpClient client, SemaphoreSlim writes, PairProtection protection, SessionLifetime current, CancellationToken cancellation)
         {
             NetworkStream stream = client.GetStream();
             while (true)
             {
-                string line = await ReadLineAsync(stream, 10000, cancellation, 2048).ConfigureAwait(false);
-                if (line == "MD2 PING") await SerializedWriteAsync(stream, writes, "MD2 PONG", cancellation).ConfigureAwait(false);
-                else if (line.StartsWith("MD2 CONTROL ", StringComparison.Ordinal))
+                string line = protection.Open(await ReadLineAsync(stream, 10000, cancellation, PairProtection.MaximumWireLength).ConfigureAwait(false));
+                if (line == "PING") await SerializedWriteAsync(stream, writes, protection, "PONG", cancellation).ConfigureAwait(false);
+                else if (line.StartsWith("CONTROL ", StringComparison.Ordinal))
                 {
-                    byte[] payload;
-                    try { payload = Convert.FromBase64String(line.Substring(12)); }
-                    catch (FormatException) { throw new IOException("Malformed control message."); }
-                    if (payload.Length == 0 || payload.Length > 1024 || Convert.ToBase64String(payload) != line.Substring(12)) throw new IOException("Invalid control message size.");
-                    foreach (byte value in payload) if (value < 32 || value > 126) throw new IOException("Invalid control message encoding.");
+                    string message = line.Substring(8);
+                    if (message.Length == 0 || message.Length > 1024) throw new IOException("Invalid control message size.");
                     lock (sync)
                     {
                         if (lifetime != current || peer != client) return;
-                        string message = Encoding.ASCII.GetString(payload);
                         if (message.StartsWith("FRIEND1 PORT ", StringComparison.Ordinal))
                         {
                             int advertised;
@@ -494,14 +502,19 @@ namespace MultiDawn.Launcher
                         if (receiver != null) receiver(message);
                     }
                 }
-                else if (line != "MD2 PONG") throw new IOException("Unexpected pairing message.");
+                else if (line != "PONG") throw new IOException("Unexpected pairing message.");
             }
         }
 
-        private static async Task SerializedWriteAsync(NetworkStream stream, SemaphoreSlim gate, string line, CancellationToken cancellation)
+        private static async Task SerializedWriteAsync(NetworkStream stream, SemaphoreSlim gate, PairProtection protection, string line, CancellationToken cancellation)
         {
             await gate.WaitAsync(cancellation).ConfigureAwait(false);
-            try { await WriteLineAsync(stream, line, cancellation).ConfigureAwait(false); }
+            try
+            {
+                cancellation.ThrowIfCancellationRequested();
+                await WriteLineAsync(stream, protection.Seal(line), cancellation).ConfigureAwait(false);
+            }
+            catch { stream.Close(); throw; } // A failed write consumes its sequence; this stream cannot continue.
             finally { gate.Release(); }
         }
 
@@ -541,7 +554,7 @@ namespace MultiDawn.Launcher
         private static string Proof(string secret, string role, string clientNonce, string hostNonce, string clientIdentity, string hostIdentity)
         {
             using (HMACSHA256 hmac = new HMACSHA256(PairCode.Decode(secret)))
-                return PairCode.Encode(hmac.ComputeHash(Encoding.ASCII.GetBytes("MD2|" + role + "|" + clientNonce + "|" + hostNonce + "|" + clientIdentity + "|" + hostIdentity)));
+                return PairCode.Encode(hmac.ComputeHash(Encoding.ASCII.GetBytes("MD3|" + role + "|" + clientNonce + "|" + hostNonce + "|" + clientIdentity + "|" + hostIdentity)));
         }
         private static bool SameProof(string actual, string expected)
         {
@@ -594,6 +607,7 @@ namespace MultiDawn.Launcher
                 peer = null;
                 peerHostPort = 0;
                 peerWrites = null;
+                peerProtection = null;
                 waiting = new TcpClient[pending.Count];
                 pending.CopyTo(waiting);
                 pending.Clear();
@@ -643,9 +657,12 @@ namespace MultiDawn.Launcher
                 await host.HostAsync(IPAddress.Loopback, 0).ConfigureAwait(false);
                 int actualPort = host.Port;
                 await RejectedHandshakeAsync(actualPort, "MD1 HELLO " + token + " " + PairSession.NewPeerId()).ConfigureAwait(false);
-                await RejectedHandshakeAsync(actualPort, "MD2 HELLO malformed " + PairSession.NewPeerId()).ConfigureAwait(false);
+                await RejectedHandshakeAsync(actualPort, "MD2 HELLO " + PairSession.NewPeerId() + " " + PairSession.NewPeerId()).ConfigureAwait(false);
+                await RejectedHandshakeAsync(actualPort, "MD3 HELLO malformed " + PairSession.NewPeerId()).ConfigureAwait(false);
                 await RejectedGuestProofAsync(host).ConfigureAwait(false);
                 await RejectedReplayAsync(host).ConfigureAwait(false);
+                await RejectedPostHandshakeAsync(host, false).ConfigureAwait(false);
+                await RejectedPostHandshakeAsync(host, true).ConfigureAwait(false);
                 await MalformedFrameAsync(actualPort, Encoding.ASCII.GetBytes(new string('x', 513) + "\n")).ConfigureAwait(false);
                 await MalformedFrameAsync(actualPort, new byte[] { 255, 10 }).ConfigureAwait(false);
                 string stale = PairCode.Create(IPAddress.Loopback, actualPort, token);
@@ -656,6 +673,8 @@ namespace MultiDawn.Launcher
                 await joiner.JoinAsync(host.Code).ConfigureAwait(false);
                 await UntilAsync(delegate { return host.IsPaired; }, "Host paired").ConfigureAwait(false);
                 Require(joiner.IsPaired && host.PeerId == joiner.LocalPeerId && joiner.PeerId == host.LocalPeerId, "Authenticated peer identities");
+                await ConcurrentControlsAsync(host, joiner).ConfigureAwait(false);
+                long oldGeneration = host.ConnectionGeneration;
                 rejected = false;
                 try { await third.JoinAsync(host.Code).ConfigureAwait(false); }
                 catch (IOException) { rejected = true; }
@@ -666,6 +685,11 @@ namespace MultiDawn.Launcher
                 await UntilAsync(delegate { return !host.IsPaired; }, "Host detects disconnect").ConfigureAwait(false);
                 await third.JoinAsync(host.Code).ConfigureAwait(false);
                 await UntilAsync(delegate { return host.IsPaired; }, "Host accepts replacement peer").ConfigureAwait(false);
+                rejected = false;
+                try { await host.SendControlAsync("stale connection", oldGeneration).ConfigureAwait(false); }
+                catch (IOException) { rejected = true; }
+                Require(rejected && host.IsPaired && third.IsPaired, "Stale send generation cannot write onto a replacement protected connection");
+                await ConcurrentControlsAsync(host, third).ConfigureAwait(false);
                 host.Disconnect();
                 await UntilAsync(delegate { return !third.IsPaired; }, "Joiner detects host shutdown").ConfigureAwait(false);
                 TcpListener rebound = new TcpListener(IPAddress.Loopback, actualPort);
@@ -680,6 +704,100 @@ namespace MultiDawn.Launcher
                 }
             }
             await CancelJoinAsync().ConfigureAwait(false);
+            await RejectedWelcomeAsync().ConfigureAwait(false);
+            PairProtectionSelfTests.Run(Require);
+        }
+
+        private static async Task RejectedWelcomeAsync()
+        {
+            for (int variant = 0; variant < 3; ++variant)
+            {
+                TcpListener substitute = new TcpListener(IPAddress.Loopback, 0);
+                substitute.Start();
+                try
+                {
+                    using (PairSession guest = new PairSession())
+                    {
+                        string secret = PairCode.RandomToken(), hostIdentity = PairSession.NewPeerId(), hostNonce = PairSession.NewPeerId();
+                        bool published = false;
+                        guest.PeerChanged += delegate(bool paired) { if (paired) published = true; };
+                        Task joining = guest.JoinAsync(PairCode.Create(IPAddress.Loopback, ((IPEndPoint)substitute.LocalEndpoint).Port, secret));
+                        using (TcpClient server = await substitute.AcceptTcpClientAsync().ConfigureAwait(false))
+                        {
+                            NetworkStream stream = server.GetStream();
+                            string[] hello = (await PairSession.ReadLineAsync(stream, 5000, CancellationToken.None).ConfigureAwait(false)).Split(' ');
+                            string challengeProof = TestProof(secret, "host", hello[2], hostNonce, hello[3], hostIdentity);
+                            await PairSession.WriteLineAsync(stream, "MD3 CHALLENGE " + hostNonce + " " + hostIdentity + " " + challengeProof, CancellationToken.None).ConfigureAwait(false);
+                            await PairSession.ReadLineAsync(stream, 5000, CancellationToken.None).ConfigureAwait(false);
+                            string welcome = "MD3 WELCOME " + hostIdentity;
+                            if (variant == 1) welcome += " " + PairCode.Encode(new byte[32]);
+                            if (variant == 2) welcome += " " + TestProof(secret, "welcome", hello[2], PairSession.NewPeerId(), hello[3], hostIdentity);
+                            await PairSession.WriteLineAsync(stream, welcome, CancellationToken.None).ConfigureAwait(false);
+                            bool rejected = false;
+                            try { await joining.ConfigureAwait(false); } catch (IOException) { rejected = true; }
+                            Require(rejected && !guest.IsPaired && !published, variant == 0 ? "Unauthenticated welcome cannot publish a paired connection" : variant == 1 ? "Forged welcome proof cannot publish a paired connection" : "Welcome from another handshake cannot publish a paired connection");
+                        }
+                    }
+                }
+                finally { substitute.Stop(); }
+            }
+        }
+        private static string TestProof(string secret, string role, string clientNonce, string hostNonce, string clientIdentity, string hostIdentity)
+        {
+            using (HMACSHA256 hmac = new HMACSHA256(PairCode.Decode(secret)))
+                return PairCode.Encode(hmac.ComputeHash(Encoding.ASCII.GetBytes("MD3|" + role + "|" + clientNonce + "|" + hostNonce + "|" + clientIdentity + "|" + hostIdentity)));
+        }
+
+        private static async Task ConcurrentControlsAsync(PairSession host, PairSession joiner)
+        {
+            int hostReceived = 0, guestReceived = 0;
+            HashSet<string> hostMessages = new HashSet<string>(), guestMessages = new HashSet<string>();
+            Action<string> atHost = delegate(string message) { lock (hostMessages) { if (message.StartsWith("test guest ", StringComparison.Ordinal)) { hostMessages.Add(message); Interlocked.Increment(ref hostReceived); } } };
+            Action<string> atGuest = delegate(string message) { lock (guestMessages) { if (message.StartsWith("test host ", StringComparison.Ordinal)) { guestMessages.Add(message); Interlocked.Increment(ref guestReceived); } } };
+            host.ControlReceived += atHost; joiner.ControlReceived += atGuest;
+            try
+            {
+                List<Task> sends = new List<Task>();
+                for (int index = 0; index < 24; ++index)
+                {
+                    sends.Add(host.SendControlAsync("test host " + index));
+                    sends.Add(joiner.SendControlAsync("test guest " + index));
+                }
+                await Task.WhenAll(sends).ConfigureAwait(false);
+                await UntilAsync(delegate { return Volatile.Read(ref hostReceived) == 24 && Volatile.Read(ref guestReceived) == 24; }, "Concurrent protected controls delivered in both directions").ConfigureAwait(false);
+                lock (hostMessages) lock (guestMessages) Require(hostMessages.Count == 24 && guestMessages.Count == 24 && host.IsPaired && joiner.IsPaired, "Protected controls arrive exactly once without disrupting heartbeat");
+            }
+            finally { host.ControlReceived -= atHost; joiner.ControlReceived -= atGuest; }
+        }
+
+        private static async Task RejectedPostHandshakeAsync(PairSession host, bool tamper)
+        {
+            using (TcpClient client = new TcpClient())
+            {
+                await client.ConnectAsync(IPAddress.Loopback, host.Port).ConfigureAwait(false);
+                NetworkStream stream = client.GetStream();
+                string nonce = PairSession.NewPeerId(), identity = PairSession.NewPeerId();
+                await PairSession.WriteLineAsync(stream, "MD3 HELLO " + nonce + " " + identity, CancellationToken.None).ConfigureAwait(false);
+                string[] challenge = (await PairSession.ReadLineAsync(stream, 5000, CancellationToken.None).ConfigureAwait(false)).Split(' ');
+                string proof;
+                using (HMACSHA256 hmac = new HMACSHA256(PairCode.Decode(host.Token)))
+                    proof = PairCode.Encode(hmac.ComputeHash(Encoding.ASCII.GetBytes("MD3|join|" + nonce + "|" + challenge[2] + "|" + identity + "|" + challenge[3])));
+                await PairSession.WriteLineAsync(stream, "MD3 PROOF " + proof, CancellationToken.None).ConfigureAwait(false);
+                Require((await PairSession.ReadLineAsync(stream, 5000, CancellationToken.None).ConfigureAwait(false)).StartsWith("MD3 WELCOME ", StringComparison.Ordinal), "Protected rejection setup authenticates");
+                await UntilAsync(delegate { return host.IsPaired; }, "Protected rejection setup host paired").ConfigureAwait(false);
+                string frame = "MD2 CONTROL dGVzdA==";
+                using (PairProtection protection = new PairProtection(host.Token, nonce, challenge[2], identity, challenge[3], false))
+                {
+                    if (tamper)
+                    {
+                        byte[] bytes = PairCode.Decode(protection.Seal("CONTROL test").Substring(10));
+                        bytes[bytes.Length - 1] ^= 1;
+                        frame = "MD3 FRAME " + PairCode.Encode(bytes);
+                    }
+                }
+                await PairSession.WriteLineAsync(stream, frame, CancellationToken.None).ConfigureAwait(false);
+                await UntilAsync(delegate { return !host.IsPaired; }, tamper ? "Tampered protected control closes the pair" : "Legacy plaintext control closes the pair").ConfigureAwait(false);
+            }
         }
 
         private static async Task RejectedGuestProofAsync(PairSession host)
@@ -688,11 +806,11 @@ namespace MultiDawn.Launcher
             {
                 await client.ConnectAsync(IPAddress.Loopback, host.Port).ConfigureAwait(false);
                 NetworkStream stream = client.GetStream();
-                await PairSession.WriteLineAsync(stream, "MD2 HELLO " + PairSession.NewPeerId() + " " + PairSession.NewPeerId(), CancellationToken.None).ConfigureAwait(false);
+                await PairSession.WriteLineAsync(stream, "MD3 HELLO " + PairSession.NewPeerId() + " " + PairSession.NewPeerId(), CancellationToken.None).ConfigureAwait(false);
                 string challenge = await PairSession.ReadLineAsync(stream, 5000, CancellationToken.None).ConfigureAwait(false);
-                Require(challenge.StartsWith("MD2 CHALLENGE ", StringComparison.Ordinal), "Host challenges before accepting guest");
-                await PairSession.WriteLineAsync(stream, "MD2 PROOF " + PairCode.Encode(new byte[32]), CancellationToken.None).ConfigureAwait(false);
-                Require(await PairSession.ReadLineAsync(stream, 5000, CancellationToken.None).ConfigureAwait(false) == "MD2 REJECT", "Host rejects invalid guest proof");
+                Require(challenge.StartsWith("MD3 CHALLENGE ", StringComparison.Ordinal), "Host challenges before accepting guest");
+                await PairSession.WriteLineAsync(stream, "MD3 PROOF " + PairCode.Encode(new byte[32]), CancellationToken.None).ConfigureAwait(false);
+                Require(await PairSession.ReadLineAsync(stream, 5000, CancellationToken.None).ConfigureAwait(false) == "MD3 REJECT", "Host rejects invalid guest proof");
             }
             Require(!host.IsPaired, "Invalid proof does not occupy player slot");
         }
@@ -704,14 +822,14 @@ namespace MultiDawn.Launcher
             {
                 await client.ConnectAsync(IPAddress.Loopback, host.Port).ConfigureAwait(false);
                 NetworkStream stream = client.GetStream();
-                await PairSession.WriteLineAsync(stream, "MD2 HELLO " + clientNonce + " " + identity, CancellationToken.None).ConfigureAwait(false);
+                await PairSession.WriteLineAsync(stream, "MD3 HELLO " + clientNonce + " " + identity, CancellationToken.None).ConfigureAwait(false);
                 string[] challenge = (await PairSession.ReadLineAsync(stream, 5000, CancellationToken.None).ConfigureAwait(false)).Split(' ');
                 Require(challenge.Length == 5 && challenge[1] == "CHALLENGE", "Replay setup challenge");
                 originalNonce = challenge[2];
                 using (HMACSHA256 hmac = new HMACSHA256(PairCode.Decode(host.Token)))
-                    proof = PairCode.Encode(hmac.ComputeHash(Encoding.ASCII.GetBytes("MD2|join|" + clientNonce + "|" + challenge[2] + "|" + identity + "|" + challenge[3])));
-                await PairSession.WriteLineAsync(stream, "MD2 PROOF " + proof, CancellationToken.None).ConfigureAwait(false);
-                Require((await PairSession.ReadLineAsync(stream, 5000, CancellationToken.None).ConfigureAwait(false)).StartsWith("MD2 WELCOME ", StringComparison.Ordinal), "Replay setup accepted once");
+                    proof = PairCode.Encode(hmac.ComputeHash(Encoding.ASCII.GetBytes("MD3|join|" + clientNonce + "|" + challenge[2] + "|" + identity + "|" + challenge[3])));
+                await PairSession.WriteLineAsync(stream, "MD3 PROOF " + proof, CancellationToken.None).ConfigureAwait(false);
+                Require((await PairSession.ReadLineAsync(stream, 5000, CancellationToken.None).ConfigureAwait(false)).StartsWith("MD3 WELCOME ", StringComparison.Ordinal), "Replay setup accepted once");
                 await UntilAsync(delegate { return host.IsPaired; }, "Replay setup host paired").ConfigureAwait(false);
             }
             await UntilAsync(delegate { return !host.IsPaired; }, "Replay setup disconnected").ConfigureAwait(false);
@@ -719,11 +837,11 @@ namespace MultiDawn.Launcher
             {
                 await replay.ConnectAsync(IPAddress.Loopback, host.Port).ConfigureAwait(false);
                 NetworkStream stream = replay.GetStream();
-                await PairSession.WriteLineAsync(stream, "MD2 HELLO " + clientNonce + " " + identity, CancellationToken.None).ConfigureAwait(false);
+                await PairSession.WriteLineAsync(stream, "MD3 HELLO " + clientNonce + " " + identity, CancellationToken.None).ConfigureAwait(false);
                 string[] challenge = (await PairSession.ReadLineAsync(stream, 5000, CancellationToken.None).ConfigureAwait(false)).Split(' ');
                 Require(challenge[2] != originalNonce, "Fresh host challenge nonce");
-                await PairSession.WriteLineAsync(stream, "MD2 PROOF " + proof, CancellationToken.None).ConfigureAwait(false);
-                Require(await PairSession.ReadLineAsync(stream, 5000, CancellationToken.None).ConfigureAwait(false) == "MD2 REJECT", "Captured guest proof cannot be replayed");
+                await PairSession.WriteLineAsync(stream, "MD3 PROOF " + proof, CancellationToken.None).ConfigureAwait(false);
+                Require(await PairSession.ReadLineAsync(stream, 5000, CancellationToken.None).ConfigureAwait(false) == "MD3 REJECT", "Captured guest proof cannot be replayed");
             }
         }
 
@@ -774,7 +892,7 @@ namespace MultiDawn.Launcher
                 await client.ConnectAsync(IPAddress.Loopback, port).ConfigureAwait(false);
                 await PairSession.WriteLineAsync(client.GetStream(), request, CancellationToken.None).ConfigureAwait(false);
                 string response = await PairSession.ReadLineAsync(client.GetStream(), 5000, CancellationToken.None).ConfigureAwait(false);
-                Require(response == "MD2 REJECT", "Version/token handshake rejected");
+                Require(response == "MD3 REJECT", "Version/token handshake rejected");
             }
         }
         private static async Task UntilAsync(Func<bool> condition, string name)

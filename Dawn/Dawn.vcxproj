@@ -201,6 +201,7 @@
     <ClCompile Include="src\core\settings\state\social_parser.cpp" />
     <ClCompile Include="src\core\runtime\core_runtime.cpp" />
     <ClCompile Include="src\core\multiplayer\companion.cpp" />
+    <ClCompile Include="src\core\multiplayer\activity_binding.cpp" />
     <ClCompile Include="src\steam\ui\social_panel.cpp" />
     <ClCompile Include="src\core\runtime\host_environment.cpp" />
     <ClCompile Include="src\core\ui\modules\ui_module_descriptor.cpp" />
@@ -425,6 +426,7 @@
     <ClCompile Include="src\client\hooks\bootflow\world_step.cpp" />
     <ClCompile Include="src\client\hooks\bootflow\spawn_hold.cpp" />
     <ClCompile Include="src\client\hooks\bootflow\towerfall_executor_bootstrap.cpp" />
+    <ClCompile Include="src\client\hooks\bootflow\native_identity_observation.cpp" />
     <ClCompile Include="src\client\hooks\bootflow\spawn\spawn_gate_probe.cpp" />
     <ClCompile Include="src\client\hooks\bootflow\spawn\spawn_gate_targets.cpp" />
     <ClCompile Include="src\client\hooks\bootflow\spawn\spawn_gate_record_dump.cpp" />
@@ -946,7 +948,14 @@
     <ClInclude Include="src\core\settings\steam\definition.h" />
     <ClInclude Include="src\core\runtime\core_runtime.h" />
     <ClInclude Include="src\core\multiplayer\companion.h" />
+    <ClInclude Include="src\core\multiplayer\activity_binding.h" />
+    <ClInclude Include="src\core\multiplayer\identity_activity_correlation.h" />
+    <ClInclude Include="src\core\multiplayer\fireteam_limits.h" />
+    <ClInclude Include="src\middleware\gameplay\peer\packets_discarded.h" />
     <ClInclude Include="src\core\multiplayer\companion_protocol.h" />
+    <ClInclude Include="src\core\multiplayer\companion_invitation_state.h" />
+    <ClInclude Include="src\core\multiplayer\native_identity_observation_state.h" />
+    <ClInclude Include="src\client\hooks\bootflow\native_identity_observation.h" />
     <ClInclude Include="src\steam\runtime\social.h" />
     <ClInclude Include="src\steam\ui\social_panel.h" />
     <ClInclude Include="src\server\gameplay\group\shared_membership.h" />
@@ -1309,6 +1318,8 @@
     <ClInclude Include="src\middleware\bap\activity_message\sense_update.h" />
     <ClInclude Include="src\middleware\bap\activity_message\activity_patch_epoch_parser.h" />
     <ClInclude Include="src\middleware\bap\activity_message\replicate_membership.h" />
+    <ClInclude Include="src\middleware\bap\activity_message\membership_consumer_contract.h" />
+    <ClInclude Include="src\server\bap\local_identity_snapshot.h" />
     <ClInclude Include="src\middleware\bap\activity_message\activity_message_notification_encoder.h" />
     <ClInclude Include="src\middleware\bap\activity_message\activity_join_result_encoder.h" />
     <ClInclude Include="src\middleware\bap\activity_message\activity_entity_slot_request_parser.h" />

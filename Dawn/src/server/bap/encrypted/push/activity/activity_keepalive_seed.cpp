@@ -10,10 +10,10 @@ namespace dawn::server::bap::encrypted::push::activity {
 namespace {
 
 /**
- * Member field 1 is a skip test. -1 is the only value that keeps the member, because the client
- * drops it when the field read as unsigned is at or below 0x1FF.
+ * Retain the established fallback value until the client publishes its own field 1.
+ * Native 4DF620 uses this field for the connection role; 4DF600's skip byte is separate.
  */
-constexpr std::int32_t kMemberSkipTest = -1;
+constexpr std::int32_t kFallbackMemberRole = -1;
 /**
  * Member field 2 rides a bias of 0x80000000, and the captured reference body sends wire 0x7FFFFFFF,
  * which is logical -1. Seeding zero instead cost the ship and the banner.
@@ -34,7 +34,7 @@ bool seed_identity(state::activity::ActivityInstanceKey activity,
     const state::AccountState account = state::account_snapshot();
     state::activity::membership::Identity identity{};
     identity.memberKey = memberKey;
-    identity.smallOpaque = kMemberSkipTest;
+    identity.smallOpaque = kFallbackMemberRole;
     identity.signedOpaque = kUnsetOpaque;
     identity.joinIdentity = memberKey;
     identity.accountSoid = account.primarySoid;

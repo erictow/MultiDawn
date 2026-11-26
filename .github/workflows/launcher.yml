@@ -9,12 +9,18 @@ on:
       - 'tools/install/New-DawnRelease.ps1'
       - 'tools/install/tests/launcher_release.tests.ps1'
       - 'tools/install/release/READ-ME-MultiDawn.txt'
+      - 'tools/testing/*Native*Preflight.ps1'
+      - 'tools/testing/New-NativeLanTestKit.ps1'
+      - 'tools/testing/tests/native_game_preflight.tests.ps1'
       - 'Launch-MultiDawn.cmd'
       - '.github/workflows/launcher.yml'
   pull_request:
     paths:
       - 'tools/launcher/**'
       - 'tools/install/**'
+      - 'tools/testing/*Native*Preflight.ps1'
+      - 'tools/testing/New-NativeLanTestKit.ps1'
+      - 'tools/testing/tests/native_game_preflight.tests.ps1'
       - 'Launch-MultiDawn.cmd'
       - '.github/workflows/launcher.yml'
 
@@ -33,9 +39,12 @@ jobs:
       - name: Test release archives
         shell: powershell
         run: ./tools/install/tests/launcher_release.tests.ps1
+      - name: Test isolated native game preparation
+        shell: powershell
+        run: ./tools/testing/tests/native_game_preflight.tests.ps1
       - name: Package launcher preview
         shell: powershell
-        run: ./tools/install/New-MultiDawnLauncherRelease.ps1 -Release "0.2.0-preview.${{ github.run_number }}"
+        run: ./tools/install/New-MultiDawnLauncherRelease.ps1 -Release "0.5.0-preview.${{ github.run_number }}"
       - name: Upload portable launcher ZIP
         uses: actions/upload-artifact@v4
         with:

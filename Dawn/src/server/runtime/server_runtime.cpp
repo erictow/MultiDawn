@@ -2,6 +2,7 @@
 
 #include "../../client/network/consumer.h"
 #include "../../core/logging/log.h"
+#include "../../core/multiplayer/activity_binding.h"
 #include "../bap/runtime.h"
 #include "../gameplay/gameplay_runtime.h"
 #include "../http/server_http.h"
@@ -49,10 +50,12 @@ bool initialize() noexcept {
 void service(std::uint64_t now) noexcept {
     transport::service(now);
     gameplay::service(now);
+    core::multiplayer::activity_binding::service(now);
 }
 
 /** Unregisters Server consumers in reverse registration order. */
 void shutdown() noexcept {
+    core::multiplayer::activity_binding::reset();
     ui::runtime::shutdown();
     gameplay::shutdown();
     transport::shutdown();

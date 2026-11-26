@@ -49,7 +49,13 @@ constexpr std::uint64_t kDescriptorCount = 128;
                    && writer.write(ambassadorSlot, kSlotBitWidth) && writer.write(0, 1)
                    && writer.write(0, 32) && writer.write(0, 8) && writer.write(0, 32);
     for (std::size_t member = 0; encoded && member < kRegionTokenCount; ++member) {
-        encoded = writer.write(snapshot.transitionToken, 8);
+        auto token = snapshot.transitionToken;
+        if (member >= kFirstRemoteHumanSlot) {
+            const auto index = member - kFirstRemoteHumanSlot;
+            if (index < snapshot.remoteHumanCount && index < snapshot.remoteHumans.size()
+                && snapshot.remoteHumans[index].present) { token = snapshot.remoteHumans[index].transitionToken; }
+        }
+        encoded = writer.write(token, 8);
     }
     if (!advertise) {
         return encoded && writer.write(0, 8) && writer.write(0, 64);
