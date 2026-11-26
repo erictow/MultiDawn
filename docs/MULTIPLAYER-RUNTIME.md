@@ -32,7 +32,9 @@ The source now includes these native components:
   handshake and acknowledged view replies. Two-player gameplay remains unverified.
 - Exact authenticated route identity survives native UDP dispatch. Internal
   consumers can reply through that specific context when several native peers
-  share a socket. No human relay or gameplay grant is installed by these APIs.
+  share a socket. Internal peer-address registrations now distinguish human
+  contexts from control contexts, and unclaimed human packets cannot enter the
+  control handler. No human relay or gameplay grant is installed by these APIs.
   See [explicit native routes](EXPLICIT-NATIVE-ROUTES.md).
 - Launcher 0.5 protects every post-handshake control frame with encryption,
   authentication and strict directional sequences. The final welcome is also
@@ -44,6 +46,11 @@ The source now includes these native components:
   binding and current State region without exporting account fields to public
   snapshots or companion messages. See
   [identity provenance](CLIENT-IDENTITY-PROVENANCE.md).
+- The BAP type-12 encoder accepts explicit additional humans in stable slots,
+  with independent identity, address and region-token inputs. The recovered
+  build-86657 schema also establishes its leave/skip field and signed opaque
+  byte encoding. Existing solo/control bytes remain unchanged. No live caller
+  supplies these rows; see [additional-human membership](REMOTE-HUMAN-MEMBERSHIP.md).
 
 These changes have not been installed over the existing game. The approved
 Windows SDK is installed locally. The full DLL and native component tests now
@@ -143,11 +150,14 @@ Set `DAWN_NATIVE_ADDRESS_RESOLUTION=1` before an isolated test runtime starts to
 enable service 300/301 and routed UDP handling. The setting is cached for that
 DLL lifetime and defaults off. It does not enable multiplayer Play.
 
-The route requires a current BAP authentication, capability 16, method 0, and an
-exact match to the configured embedded descriptor's 41-byte direct address body.
-It echoes the full native NetAddr and returns the configured IPv4 transport
-endpoint. It does not resolve another player's Steam-format address or expose
-the account backend to the LAN.
+The route requires a current BAP authentication, capability 16 and method 0.
+The control address matches the configured descriptor's 41-byte direct body;
+an internally registered human address must match all 86 bytes and its exact
+authentication owner. Both echo the full requested NetAddr and return the
+configured embedded IPv4 transport endpoint. Human registrations are not exposed
+through companion/social commands and have no active runtime caller. This does
+not resolve another player's Steam-format address or expose the account backend
+to the LAN.
 
 The UDP envelope uses DES-CBC, authenticated by HMAC-SHA1 truncated to ten bytes,
 as required by this game build. Sixteen bounded contexts own random keys,
@@ -298,14 +308,15 @@ The native test projects are:
 - `Dawn/unit/des_cbc_tests.vcxproj`: 53 compatibility-primitive checks.
 - `Dawn/unit/routed_datagram_tests.vcxproj`: 535 envelope and failure checks.
 - `Dawn/unit/resolution_replay_tests.vcxproj`: 16,554 replay-window checks.
-- `Dawn/unit/address_resolution_host_tests.vcxproj`: 1,721 enabled-backend checks
-  and 22 checks in a separate `--disabled` process. These link production crypto
+- `Dawn/unit/address_resolution_host_tests.vcxproj`: 2,851 enabled-backend checks
+  and 27 checks in a separate `--disabled` process. These link production crypto
   and the context store without sockets, game processes, or saves.
-- `Dawn/unit/endpoint_resolution_tests.vcxproj`: 260+ checks in recorded
+- `Dawn/unit/endpoint_resolution_tests.vcxproj`: 440+ checks in recorded
   loopback run, using real UDP and production endpoint/crypto code with stubbed
   peer/legacy handlers. Covers authenticated dispatch, wrapped replies, rejected
   tampering/replay/rebinding, preserved legacy traffic, exact-context replies,
-  routed consumer dispatch, lifecycle cleanup and send failures.
+  routed consumer dispatch, human/control isolation, two-client forwarding of
+  1,500-byte opaque payloads, lifecycle cleanup and send failures.
 - `Dawn/unit/peer_view_echo_tests.vcxproj`: 2,006 checks with compiler warnings
   treated as errors, covering
   exact link ownership, malformed views, queue rollback and unchanged group slots.
@@ -323,6 +334,14 @@ The native test projects are:
   advertisement observation, unchanged publication and exact lineage failures.
 - `Dawn/unit/packets_discarded_tests.vcxproj`: 973 checks of native ID4's five-bit
   increment, declared size, logical/rounded forms, padding and failed-output preservation.
+- `Dawn/unit/membership_consumer_contract_tests.vcxproj`: 10,929 checks of the
+  recovered native connection-selection offsets, role/skip distinction,
+  production leave encoding and signed opaque bytes.
+- `Dawn/unit/client_identity_receipt_tests.vcxproj`: raw identity receipt
+  provenance, fallback separation, binding lifetime and snapshot retirement.
+- `Dawn/unit/remote_human_membership_tests.vcxproj`: independent decoding of
+  two-, three- and six-human BAP bodies, stable gaps, per-human region lanes,
+  optional D4/opaque fields, maximum size, rejection and unchanged solo goldens.
 
 `companion_bridge_harness.vcxproj` builds a small native test worker that links
 the production companion client with test social/log sinks. The launcher's
@@ -334,7 +353,7 @@ It does not verify the game's friend roster or a shared activity.
 
 Native build instructions are in
 [`tools/build/PORTABLE-WINDOWS.md`](../tools/build/PORTABLE-WINDOWS.md).
-The native GitHub workflow builds and runs the nineteen component test projects;
+The native GitHub workflow builds and runs the twenty component test projects;
 preparing the workflow does not mean a remote run has passed.
 
 For experimental commit `abc33b90`, the

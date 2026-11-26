@@ -19,7 +19,10 @@ their entire local backend when changing gameplay hosts.
 
 Native membership storage now reserves up to six human identities plus one
 control host. This preserves future capacity without advertising six-player
-support. Three maximum-width human membership rows fit the current tested queue;
+support. The separate BAP type-12 encoder can represent those six humans with
+stable slots and per-human tokens; its offline tests do not activate admission
+or replication. See [additional-human BAP membership](REMOTE-HUMAN-MEMBERSHIP.md).
+Three maximum-width human gameplay membership rows fit the current tested queue;
 six require further transport work. The current association table holds four
 endpoints, and the reliable outbound queue holds 24 fragments of 32 bytes. A
 maximum-width six-human membership body measures 1,048 bytes and is refused by

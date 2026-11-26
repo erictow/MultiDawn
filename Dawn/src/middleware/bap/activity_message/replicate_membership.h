@@ -9,6 +9,7 @@
 #include "../../gameplay/descriptor/join_descriptor.h"
 #include "activity_client_identity_parser.h"
 #include "client_authoritative_data.h"
+#include "membership_consumer_contract.h"
 
 namespace dawn::middleware::bap::activity_message::replicate_membership {
 
@@ -37,9 +38,21 @@ inline constexpr std::size_t kCitizenEncodedSize =
     kEncodedSize + (kRemoteMemberBitCount + kDescriptorBitCount + 7U) / 8U;
 /** D4 has five presence bits and one selected u8, beyond its existing root bit. */
 inline constexpr std::size_t kSynchronizationBitCount = 13;
+/** Local human plus up to five remote humans; this is codec storage, not gameplay support. */
+inline constexpr std::size_t kMaximumRemoteHumans = 5;
+/** Slots zero/one retain the existing local human/control layout. */
+inline constexpr std::size_t kFirstRemoteHumanSlot = 2;
+/** One combined identity/gate/address/minimal-player row replaces three absent bits. */
+inline constexpr std::size_t kRemoteHumanBitCount = 1'367;
+inline constexpr std::size_t kOpaqueConnectIdentityBitCount =
+    consumer_contract::kOpaqueConnectionByteCount * 8U;
+/** Both D4 legs and an actual synchronization receipt beyond the existing absent root bit. */
+inline constexpr std::size_t kMaximumHumanSynchronizationBits = 173;
 inline constexpr std::size_t kMaximumEncodedSize =
     (kMeaningfulBitCount + kRemoteMemberBitCount + kDescriptorBitCount
-     + 2U * kSynchronizationBitCount + 160U + 7U) / 8U;
+     + 2U * kSynchronizationBitCount + 160U
+     + kMaximumRemoteHumans * (kRemoteHumanBitCount + kOpaqueConnectIdentityBitCount
+                              + kMaximumHumanSynchronizationBits) + 7U) / 8U;
 
 /**
  * One remote-citizen advertisement placed in a single region record.
@@ -74,6 +87,27 @@ struct RegionLeg final {
     friend constexpr bool operator==(const RegionLeg&,const RegionLeg&) noexcept = default;
 };
 
+/**
+ * Structural additional-human row. Values must come from that actual client;
+ * the caller separately proves provenance, authorization and slot lifetime.
+ * The 18-byte profile emitted here is the established minimal identity body,
+ * not complete Guardian appearance or a proof of native replication.
+ */
+struct RemoteHuman final {
+    client_identity::ClientIdentity identity{};
+    std::array<std::byte, gameplay::descriptor::kNetAddrSize> address{};
+    /** Logical byte patterns; native signed-byte wire values are biased by 0x80. */
+    std::array<std::uint8_t, consumer_contract::kOpaqueConnectionByteCount> opaqueConnectIdentity{};
+    /** Omission preserves prior native slot data; it does not write zeroes. */
+    bool hasOpaqueConnectIdentity{};
+    std::uint8_t transitionToken{};
+    std::uint8_t synchronizationToken{};
+    bool hasSynchronizationToken{};
+    RegionLeg currentLeg{}, pendingLeg{};
+    /** False emits three absent bits and clears this slot from both selection masks. */
+    bool present{};
+};
+
 /** Inputs for one local-player membership snapshot. */
 struct MembershipSnapshot final {
     client_identity::ClientIdentity identity{};
@@ -84,7 +118,7 @@ struct MembershipSnapshot final {
     std::uint32_t revision{};
     /** Stable session epoch; changing it clears the client's peer table. */
     std::uint32_t epoch{};
-    /** Transition token copied into every member lane of every region. */
+    /** Token for local/control/absent lanes; each present remote supplies its own token. */
     std::uint8_t transitionToken{};
     /** Each explicit index must belong to its array bubble (index / 8). */
     std::array<ActiveRegion, kRegionCount> activeRegions{};
@@ -97,6 +131,10 @@ struct MembershipSnapshot final {
     RegionLeg currentLeg{},pendingLeg{};
     /** Single-player native ownership; every region consistently names local member zero. */
     bool localAmbassador{};
+    /** Stable native slots 2..6. Gaps preserve other array entries' slot numbers. */
+    std::array<RemoteHuman, kMaximumRemoteHumans> remoteHumans{};
+    /** Reserved array extent, not active count. Present entries beyond it are invalid. */
+    std::uint8_t remoteHumanCount{};
 };
 
 /** Selects a packed active state without changing any echoed transition token. */
@@ -122,10 +160,39 @@ struct MembershipSnapshot final {
         +(snapshot.citizen.present && snapshot.hasHostSynchronizationToken?kSynchronizationBitCount:0U);
 }
 
+[[nodiscard]] constexpr std::size_t remote_synchronization_bits(const RemoteHuman& human) noexcept {
+    const bool active = human.hasSynchronizationToken || human.currentLeg.present || human.pendingLeg.present;
+    return (active ? 5U : 0U) + (human.hasSynchronizationToken ? 8U : 0U)
+        + (human.currentLeg.present ? 80U : 0U) + (human.pendingLeg.present ? 80U : 0U);
+}
+
+/** Safe for invalid oversized extents too; encode validates before touching output. */
+[[nodiscard]] constexpr std::size_t remote_human_bits(const MembershipSnapshot& snapshot) noexcept {
+    std::size_t bits{};
+    for (std::size_t index = 0; index < snapshot.remoteHumans.size()
+         && index < snapshot.remoteHumanCount; ++index) {
+        const auto& human = snapshot.remoteHumans[index];
+        if (human.present) {
+            bits += kRemoteHumanBitCount + remote_synchronization_bits(human)
+                + (human.hasOpaqueConnectIdentity ? kOpaqueConnectIdentityBitCount : 0U);
+        }
+    }
+    return bits;
+}
+
+[[nodiscard]] constexpr std::uint32_t member_mask(const MembershipSnapshot& snapshot) noexcept {
+    std::uint32_t mask = snapshot.citizen.present ? 3U : 1U;
+    for (std::size_t index = 0; index < snapshot.remoteHumans.size()
+         && index < snapshot.remoteHumanCount; ++index) {
+        if (snapshot.remoteHumans[index].present) { mask |= 1U << (kFirstRemoteHumanSlot + index); }
+    }
+    return mask;
+}
+
 [[nodiscard]] constexpr std::size_t meaningful_bits(const MembershipSnapshot& snapshot) noexcept {
     return kMeaningfulBitCount
            + (snapshot.citizen.present ? kRemoteMemberBitCount + kDescriptorBitCount : 0U)
-           + synchronization_bits(snapshot);
+           + synchronization_bits(snapshot) + remote_human_bits(snapshot);
 }
 
 /** @return Exact byte size including optional native synchronization fields. */
@@ -154,7 +221,7 @@ inline constexpr std::size_t kRegionBlockEndBit = 29'899;
 /** @return Bit at which the region block ends for one snapshot. */
 [[nodiscard]] constexpr std::size_t
 region_block_end_bit(const MembershipSnapshot& snapshot) noexcept {
-    return synchronization_bits(snapshot) + (snapshot.citizen.present
+    return synchronization_bits(snapshot) + remote_human_bits(snapshot) + (snapshot.citizen.present
                ? kRegionBlockEndBit + kRemoteMemberBitCount + kDescriptorBitCount
                : kRegionBlockEndBit);
 }
@@ -162,7 +229,7 @@ region_block_end_bit(const MembershipSnapshot& snapshot) noexcept {
 /** @return Bit at which the region block begins for one snapshot. */
 [[nodiscard]] constexpr std::size_t
 region_block_start_bit(const MembershipSnapshot& snapshot) noexcept {
-    return synchronization_bits(snapshot) + (snapshot.citizen.present
+    return synchronization_bits(snapshot) + remote_human_bits(snapshot) + (snapshot.citizen.present
                ? kRegionBlockStartBit + kRemoteMemberBitCount : kRegionBlockStartBit);
 }
 
@@ -170,7 +237,7 @@ region_block_start_bit(const MembershipSnapshot& snapshot) noexcept {
 [[nodiscard]] bool valid(const MembershipSnapshot& snapshot) noexcept;
 
 /**
- * Writes the local member and, when advertised, the non-local activity host.
+ * Writes the local member, optional control host and supplied additional humans.
  * @param writer Fixed-buffer writer positioned at bit 65.
  * @param snapshot Exact local identity and optional host member.
  * @return True when the writer reaches the region-block presence bit.
@@ -180,7 +247,7 @@ region_block_start_bit(const MembershipSnapshot& snapshot) noexcept {
 
 /**
  * Writes all 64 active region records and the host-present tail.
- * @param writer Fixed-buffer writer positioned at bit 835.
+ * @param writer Fixed-buffer writer positioned at region_block_start_bit(snapshot).
  * @param snapshot Transition token and reflected host state.
  * @return True when the writer reaches top-level field four.
  */

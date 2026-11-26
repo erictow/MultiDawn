@@ -66,6 +66,12 @@ it does not yet join a shared activity. Each PC will retain its own save and
 local profile service. The host will own the shared activity. The
 [invitation protocol](docs/INVITATION-CONTROL-V2.md) describes this control step.
 
+The experimental runtime also separates human packet routes from the control
+connection and can encode additional humans in stable native membership slots.
+Those components pass offline checks; the live guest handoff and remote Guardian
+replication remain unfinished. See [additional-human membership](docs/REMOTE-HUMAN-MEMBERSHIP.md)
+for the current implementation boundary.
+
 ## Requirements
 
 - Windows with **Windows PowerShell 5.1 or newer**.

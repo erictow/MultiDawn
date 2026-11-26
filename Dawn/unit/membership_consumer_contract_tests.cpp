@@ -36,7 +36,9 @@ struct Member {
     std::uint8_t flags{}, leave{}, synchronization{};
     std::array<std::byte, 86> address{};
     std::array<std::byte, 18> blob{};
-    bool identity{}, detail{}, hasSynchronization{}, hasBlob{};
+    std::int8_t logicalLeave{};
+    std::size_t trailingBoolBit{}, leaveValueBit{};
+    bool identity{}, detail{}, hasSynchronization{}, hasBlob{}, trailingBool{}, hasLeave{};
 };
 void read_leg(Cursor& cursor) {
     if (!cursor.take(1)) return;
@@ -71,7 +73,8 @@ Member read_member(Cursor& cursor) {
             default: CHECK(false);
             }
         }
-        CHECK(cursor.take(1) == 0); // B2's trailing bool.
+        member.trailingBoolBit = cursor.bit;
+        member.trailingBool = cursor.take(1) != 0; // Required B2 field15, not the skip value.
         if (cursor.take(1)) {
             read_leg(cursor); read_leg(cursor); CHECK(cursor.take(1) == 0);
             member.hasSynchronization = cursor.take(1) != 0;
@@ -80,7 +83,12 @@ Member read_member(Cursor& cursor) {
         }
         CHECK(cursor.take(2) == 0); // Other auxiliary children stay absent.
     }
-    if (cursor.take(1)) member.leave = static_cast<std::uint8_t>(cursor.take(5));
+    member.hasLeave = cursor.take(1) != 0;
+    if (member.hasLeave) {
+        member.leaveValueBit = cursor.bit;
+        member.leave = static_cast<std::uint8_t>(cursor.take(5));
+        member.logicalLeave = static_cast<std::int8_t>(static_cast<int>(member.leave) - 1);
+    }
     return member;
 }
 
@@ -111,7 +119,8 @@ void inspect_wire(const membership::MembershipSnapshot& value) {
     CHECK(local.account == value.identity.accountSoid && local.detailAccount == local.account);
     CHECK(local.field5 == value.identity.field5 && local.detailField5 == local.field5);
     CHECK(local.detailMask == ((1U << 3U) | (1U << 5U) | (1U << 14U)));
-    CHECK(local.hasBlob && local.leave == 1 && local.flags == 0);
+    CHECK(local.hasBlob && local.hasLeave && local.leave == 1 && local.logicalLeave == 0
+        && local.flags == 0 && !local.trailingBool);
     Cursor blob{local.blob};
     CHECK(blob.take(3) == 1 && blob.take(1) == 0 && blob.take(10) == 0 && blob.take(1) == 1);
     CHECK(blob.take(64) == local.account && blob.take(64) == local.field5 && blob.take(1) == 0);
@@ -125,6 +134,7 @@ void inspect_wire(const membership::MembershipSnapshot& value) {
         CHECK(control.account == 0 && control.field5 == 0 && !control.hasBlob);
         CHECK(control.detailMask == ((1U << 0U) | (1U << 11U)));
         CHECK(control.flags == contract::kConnectionGate && control.address == value.citizen.address);
+        CHECK(control.hasLeave && control.logicalLeave == 0 && !control.trailingBool);
         CHECK(control.hasSynchronization == value.hasHostSynchronizationToken);
         if (control.hasSynchronization) CHECK(control.synchronization == value.hostSynchronizationToken);
         firstAbsent = 2;
@@ -142,6 +152,62 @@ void inspect_wire(const membership::MembershipSnapshot& value) {
     CHECK(cursor.take(1) == 1 && cursor.take(32) == expectedMask);
     CHECK(cursor.take(3) == 0); // Third mask and final optional fields stay absent.
     CHECK(cursor.bit == membership::meaningful_bits(value));
+}
+
+void field_bias_and_skip_counterexamples() {
+    // Golden signed-byte wire values come from 80809DF4's bias0x80/width8 metadata.
+    constexpr std::array<std::array<std::uint8_t, 2>, 4> signedBytes{{
+        {0x00, 0x80}, {0x7F, 0xFF}, {0x80, 0x00}, {0xFF, 0x7F}}};
+    for (const auto pair : signedBytes) {
+        CHECK(contract::encode_signed_byte(pair[0]) == pair[1]);
+        CHECK(contract::decode_signed_byte(pair[1]) == pair[0]);
+    }
+
+    auto value = fixture(true);
+    std::array<std::byte, membership::kMaximumEncodedSize> bytes{};
+    std::size_t written{};
+    CHECK(membership::encode_replicate_membership(value, bytes, written));
+    Cursor cursor{std::span(bytes).first(written), membership::kMemberStartBit};
+    static_cast<void>(read_member(cursor));
+    const auto controlStart = cursor.bit;
+    const auto baseline = read_member(cursor);
+    const contract::Masks masks{3, 3, 0};
+    const auto selected = [&](const Member& member) {
+        return contract::selects_remote(masks, 1, 0, member.logicalLeave != 0, member.flags);
+    };
+    CHECK(baseline.hasLeave && baseline.logicalLeave == 0 && selected(baseline));
+
+    // Change actual production wire bits, independently of its Writer and encoder.
+    const auto setBits = [&](std::size_t at, unsigned width, std::uint64_t input) {
+        CHECK(width <= 64 && at + width <= written * 8U);
+        for (unsigned bit = 0; bit < width; ++bit) {
+            const auto index = (at + bit) / 8U;
+            const auto mask = 1U << (7U - (at + bit) % 8U);
+            auto byte = std::to_integer<unsigned>(bytes[index]);
+            byte = (input >> (width - bit - 1U)) & 1U ? byte | mask : byte & ~mask;
+            bytes[index] = static_cast<std::byte>(byte);
+        }
+    };
+    const auto reread = [&]() {
+        Cursor changed{std::span(bytes).first(written), controlStart};
+        return read_member(changed);
+    };
+    setBits(baseline.trailingBoolBit, 1, 1);
+    auto changed = reread();
+    CHECK(changed.trailingBool && changed.logicalLeave == 0 && selected(changed));
+    setBits(baseline.trailingBoolBit, 1, 0);
+    setBits(baseline.leaveValueBit, 5, 2);
+    changed = reread();
+    CHECK(!changed.trailingBool && changed.logicalLeave == 1 && !selected(changed));
+    setBits(baseline.leaveValueBit, 5, 0);
+    changed = reread();
+    CHECK(changed.logicalLeave == -1 && !selected(changed));
+    setBits(baseline.leaveValueBit, 5, 1);
+    // Identity.field1=0 changes the role argument without making the member skipped.
+    setBits(controlStart + 1U + 64U, 10, 1);
+    changed = reread();
+    CHECK(changed.field1 == 0 && contract::role_argument(changed.field1)
+        && changed.logicalLeave == 0 && selected(changed));
 }
 
 void native_selection() {
@@ -172,6 +238,7 @@ void native_selection() {
 
 int main() {
     native_selection();
+    field_bias_and_skip_counterexamples();
     for (const bool control : {false, true}) {
         auto value = fixture(control);
         inspect_wire(value);

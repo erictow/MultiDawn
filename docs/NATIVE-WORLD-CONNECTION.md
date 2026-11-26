@@ -75,7 +75,7 @@ they do not establish that a second human's gameplay payload will be accepted.
 
 ## Remaining milestone 1 work
 
-For the next schema capture, `DAWN_ACTIVITY_BINDING_TRACE=1` also permits at most
+For bounded schema captures, `DAWN_ACTIVITY_BINDING_TRACE=1` also permits at most
 eight `native_world_stack` events from the already installed connection hook.
 Each records at most sixteen native-image return RVAs from a bounded stack walk.
 It records no stack contents, original argument buffers or opaque peer identity,
@@ -88,11 +88,14 @@ The PID 4868 capture resolved that synchronizer to `1702580` and established
 its actual selection masks, local-machine exclusion, separate skip byte,
 connection gate and role/activation arguments. The
 [membership consumer contract](native-membership-consumer-86657.md) records
-those exact findings and the remaining schema/appearance gaps. Its independent
-writer checks preserve the current solo/control output and enable no humans.
+those exact findings. The later PID 36692 capture located the exact type-12
+dispatcher and member schema, including the leave/skip mapping and opaque
+connection field. The [additional-human BAP writer](REMOTE-HUMAN-MEMBERSHIP.md)
+now has independent decoder checks and unchanged solo/control goldens. It has
+no live guest-publication caller and enables no humans in the game.
 
 The world connection and its compatible view are foundations. The guest-local
-profile/activity projection, protected control transport, authorized remote
+profile/activity projection, protected native handoff channel, authorized remote
 human routes, native player publication and world-state transfer still need
 implementation and real two-PC verification. Current managed-session
 observations cannot substitute for the world/facet relationship proven above.

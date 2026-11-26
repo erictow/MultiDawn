@@ -5068,9 +5068,11 @@ bool install_activity_selection_probe() noexcept {
         typeTwoSchemaOwner != nullptr
             ? *reinterpret_cast<std::byte**>(typeTwoSchemaOwner + 0x18U)
             : nullptr;
-    // Types 8 and 9 use independent schema owners.  Type 9 decodes a 0x408-byte manager
-    // synchronization body and is not the small event-29 message, so preserve its real codec
-    // before considering any server encoder.
+    // Historical typeEight/typeNine probe labels below actually refer to wire types 19/24:
+    // the exact 21-row dispatcher at 1F92360 proves those mappings. Do not assume owner
+    // +10/+18 are callable codec entry points: recovered type 12 uses metadata there.
+    // Keep legacy dump labels for comparison; actual membership type 12 instead uses
+    // schema owner global 1FA4180 and generic codecs.
     std::byte* const typeEightSchemaOwner =
         image != nullptr
             ? *reinterpret_cast<std::byte**>(image + 0x01FA3D28U)
@@ -5130,9 +5132,9 @@ bool install_activity_selection_probe() noexcept {
     // runtime-decrypted range so that the type-2 apply path can be followed without mutating it.
     std::byte* const activityNotificationTypeTwoClientApplyRegionTarget =
         image != nullptr ? image + 0x003CA000U : nullptr;
-    // Engine events 27 and 29 (activity notification types 8 and 9) leave the shared client
-    // apply region through two virtual calls.  Capture their runtime-decrypted object resolvers
-    // and the neighboring authority thunks so those calls can be resolved without invoking them.
+    // Legacy typeEight/typeNine diagnostic names identify the wire-19/24 consumers above.
+    // Event 29 is produced by the independently recovered type-12 membership path at 16F0BA0.
+    // Capture these old resolver/thunk neighborhoods only for historical comparisons.
     std::byte* const activityNotificationTypeEightObjectResolverRegionTarget =
         image != nullptr ? image + 0x004CE000U : nullptr;
     std::byte* const activityNotificationTypeNineGlobalResolverRegionTarget =
