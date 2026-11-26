@@ -55,6 +55,10 @@ namespace MultiDawn.Launcher
                 using (RuntimeBridge guestBridge = new RuntimeBridge(guest, Bob, "Bob"))
                 {
                     await UntilAsync(delegate { return hostBridge.PeerSteamId == Bob && guestBridge.PeerSteamId == Alice; }, "Paired launchers negotiate distinct native identities").ConfigureAwait(false);
+                    var savedGuest = new SavedFriend { PeerId = guest.LocalPeerId, Nickname = "Saved Bob" };
+                    hostBridge.SetSavedFriends(new[] { savedGuest });
+                    savedGuest.Nickname = "Unsaved edit";
+                    guestBridge.SetSavedFriends(new[] { new SavedFriend { PeerId = guest.LocalPeerId, Nickname = "Unrelated nickname" } });
                     ProcessStartInfo environment = GameLaunch.CreateStartInfo(Path.GetTempPath());
                     environment.EnvironmentVariables["DAWN_SESSION_TOKEN"] = "stale-token";
                     hostBridge.ApplyEnvironment(environment);
@@ -68,10 +72,14 @@ namespace MultiDawn.Launcher
                         try { await RuntimeBridge.ReadFrameAsync(wrong, CancellationToken.None, 5000).ConfigureAwait(false); } catch (IOException) { closed = true; }
                         Require(closed && !hostBridge.NativeConnected && host.IsPaired, "Incorrect native nonce is rejected without disconnecting paired launchers");
                     }
-                    using (NamedPipeClientStream alice = await AuthenticateAsync(hostBridge, Alice, Bob, "Bob").ConfigureAwait(false))
+                    using (NamedPipeClientStream alice = await AuthenticateAsync(hostBridge, Alice, Bob, "Saved Bob").ConfigureAwait(false))
                     using (NamedPipeClientStream bob = await AuthenticateAsync(guestBridge, Bob, Alice, "Alice").ConfigureAwait(false))
                     {
+                        await ReadUntilAsync(alice, "PEER " + Bob.ToString(CultureInfo.InvariantCulture) + " " + RuntimeBridge.Hex("Saved Bob") + " 1").ConfigureAwait(false);
+                        Require(true, "The native roster uses a copied saved nickname only for the matching paired identity");
+                        hostBridge.SetSavedFriends(new[] { new SavedFriend { PeerId = guest.LocalPeerId, Nickname = "B\u00F6b" } });
                         await ReadUntilAsync(alice, "PEER " + Bob.ToString(CultureInfo.InvariantCulture) + " " + RuntimeBridge.Hex("Bob") + " 1").ConfigureAwait(false);
+                        Require(true, "An unsupported nickname falls back to the peer's advertised name on the native pipe");
                         Require(hostBridge.NativeConnected && guestBridge.NativeConnected, "Only nonce-authenticated native consumers publish game-running presence");
                         string invitation = "dawn-test:86657:invitation";
                         await SendAsync(alice, "INVITE " + Bob.ToString(CultureInfo.InvariantCulture) + " " + RuntimeBridge.Hex(invitation)).ConfigureAwait(false);

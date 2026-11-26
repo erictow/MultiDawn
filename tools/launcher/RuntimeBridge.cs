@@ -51,6 +51,7 @@ namespace MultiDawn.Launcher
         private int queuedCount;
         private int pendingPreflights;
         private NativeConnection native;
+        private Dictionary<string, string> savedNicknames = new Dictionary<string, string>(StringComparer.Ordinal);
         private string boundPeer = "", remoteName = "Paired player";
         private ulong remoteId;
         private long boundGeneration;
@@ -84,6 +85,31 @@ namespace MultiDawn.Launcher
         internal ulong LocalSteamId { get { return localId; } }
         internal ulong PeerSteamId { get { lock (sync) return remoteId; } }
         internal bool NativeConnected { get { lock (sync) return native != null && native.Authenticated; } }
+
+        internal void SetSavedFriends(IEnumerable<SavedFriend> friends)
+        {
+            var snapshot = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (SavedFriend friend in friends) {
+                if (snapshot.Count == FriendStore.MaximumFriends) break;
+                // Saved names support Unicode. The native pipe currently accepts printable ASCII.
+                string nickname = friend.Nickname;
+                if (!PairSession.ValidIdentity(friend.PeerId) || String.IsNullOrWhiteSpace(nickname) || nickname.Length > 64) continue;
+                bool printable = true;
+                foreach (char character in nickname) {
+                    if (character < 32 || character > 126) { printable = false; break; }
+                }
+                if (printable) snapshot[friend.PeerId] = nickname;
+            }
+            lock (sync) savedNicknames = snapshot;
+        }
+
+        // Use the authenticated launcher identity. The advertised persona still travels over TCP.
+        private string NativePeerNameLocked()
+        {
+            string nickname;
+            return savedNicknames.TryGetValue(boundPeer, out nickname) ? nickname : remoteName;
+        }
+
         internal bool TryCaptureGamePreflight(out GamePreflightLaunchContext context)
         {
             long generation; string partner;
@@ -306,7 +332,7 @@ namespace MultiDawn.Launcher
             ulong id; string name, epoch; int protocol; bool running;
             lock (sync) {
                 if (!CurrentNativeLocked(connection)) return;
-                id = remoteId; name = remoteName; running = remoteRunning; epoch = remoteEpoch; protocol = remoteProtocol;
+                id = remoteId; name = NativePeerNameLocked(); running = remoteRunning; epoch = remoteEpoch; protocol = remoteProtocol;
             }
             await TrySendNativeAsync(connection, "PEER " + id.ToString(CultureInfo.InvariantCulture) + " " + Hex(name) + " " + (running ? "1" : "0")).ConfigureAwait(false);
             // Version-two native parsers only know versions zero through two.
@@ -505,7 +531,7 @@ namespace MultiDawn.Launcher
                             lock (sync)
                             {
                                 if (native != connection || disposed) throw new IOException("Native connection was superseded.");
-                                peerId = remoteId; name = remoteName; running = remoteRunning;
+                                peerId = remoteId; name = NativePeerNameLocked(); running = remoteRunning;
                                 connection.Generation = boundGeneration;
                             }
                             if (peerId != 0) break;

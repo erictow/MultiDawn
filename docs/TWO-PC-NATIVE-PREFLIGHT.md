@@ -91,6 +91,16 @@ unavailable in both locations. The guest's Tower map also displayed one online
 friend. The change in view and arrival notification establish travel feedback,
 while the spawn and control events remain to be checked.
 
+The in-game roster listed the connected peer as `Player` and displayed
+`In Orbit`. The kit's default persona is `Player`, and the connection currently
+publishes whether the peer's game is running, with no live activity location.
+Use the guest's own Tower log to verify the activity and spawn. The roster's
+orbit label cannot distinguish the two.
+
+The updated launcher uses a printable ASCII nickname saved for the exact paired
+identity in the local in-game roster. The nickname stays on that PC. If there
+is no matching nickname, the game sees the peer's advertised persona.
+
 If the camera problem appears again, capture the affected game's log before
 relaunching. Compare the `spawn_hold_loader`, `spawn_gate`, `fly_in_complete`,
 `spawn_arrival`, and `tower_spawn_recovery` events with the host's normal

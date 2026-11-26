@@ -450,6 +450,7 @@ namespace MultiDawn.Launcher
                 await value.HostAsync(IPAddress.Parse((string)address.SelectedItem), (int)port.Value);
                 if (session != value) return;
                 runtimeBridge = new RuntimeBridge(value, GameLaunch.Persona(gameRoot.Text.Trim()));
+                runtimeBridge.SetSavedFriends(savedFriends.Items.OfType<SavedFriend>());
                 pairCode.Text = value.Code;
                 sessionStatus.Text = "Hosting. Share this code with your partner on the same LAN or VPN.";
                 peerStatus.Text = "Waiting for a partner. Firewall access may be required for this TCP port.";
@@ -485,6 +486,7 @@ namespace MultiDawn.Launcher
                 await value.JoinAsync(code, target, targetPort, selectedFriend == null ? null : selectedFriend.PeerId);
                 if (session != value) return;
                 runtimeBridge = new RuntimeBridge(value, GameLaunch.Persona(gameRoot.Text.Trim()));
+                runtimeBridge.SetSavedFriends(savedFriends.Items.OfType<SavedFriend>());
                 sessionStatus.Text = "Paired with host. Gameplay launch is unavailable in this build.";
                 peerStatus.Text = "Partner connected. No local game server has been stopped or redirected.";
             }
@@ -511,6 +513,7 @@ namespace MultiDawn.Launcher
                 friendsAvailable = false;
                 friendStatus.Text = "Saved friends could not be read and were preserved: " + error.Message;
             }
+            if (runtimeBridge != null) runtimeBridge.SetSavedFriends(savedFriends.Items.OfType<SavedFriend>());
             savedFriends.SelectedIndex = 0;
             if (selectedIdentity != null)
                 for (int index = 1; index < savedFriends.Items.Count; ++index)
