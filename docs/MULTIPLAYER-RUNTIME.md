@@ -264,6 +264,13 @@ the game remains in solo mode. Ordinary solo launches strip inherited companion
 configuration. Direct launch without these variables retains the existing solo
 runtime behavior.
 
+An explicit [two-PC native game preflight](TWO-PC-NATIVE-PREFLIGHT.md) now provides
+a separate test-launch control for isolated game installs. It pins the compiled
+DLL and the current launcher pairing before starting a protocol-three native
+companion. Child startup checks reject a replaced pairing before publishing
+identities. This launch keeps each game in solo mode with its local profile and
+does not supply the missing world handoff or player replication.
+
 The account backend remains local to each player. This avoids forwarding a
 guest's inventory transactions into the host's single process-wide account.
 Changing the platform identity can still affect the account's sign-in identity;

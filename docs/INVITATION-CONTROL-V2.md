@@ -136,6 +136,13 @@ native -> launcher: HELLO 3 <nonce>
 launcher -> native: WELCOME 3 <localSteamId> <peerSteamId> <nameHex> <running:0|1> <localEpoch> <pairGeneration>
 ```
 
+The explicit game preflight also stamps optional child startup pins
+`DAWN_COMPANION_PAIR_GENERATION` and `DAWN_COMPANION_PEER_ID`. When either is
+present, both must be valid, protocol three is required, and the welcome must
+match them before native identity publication. This prevents a delayed child
+from attaching to a replacement pairing. Unpinned protocol-one/two/three test
+workers retain their existing behavior.
+
 The dedicated query and response never travel as ordinary `SOCIAL` payloads:
 
 ```text

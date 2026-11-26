@@ -162,6 +162,23 @@ void report(const char* result) noexcept {
         log::write(log::Channel::core, log::Level::info, {line.data(), static_cast<std::size_t>(count)});
 }
 
+/** Optional child-process pins use bounded positive decimal fields; empty is not absent. */
+[[nodiscard]] bool read_pair_pin(const wchar_t* name, bool& present, std::uint64_t& output) noexcept {
+    std::array<wchar_t, 22> text{};
+    SetLastError(ERROR_SUCCESS);
+    const DWORD size = GetEnvironmentVariableW(name, text.data(), static_cast<DWORD>(text.size()));
+    present = size != 0 || GetLastError() != ERROR_ENVVAR_NOT_FOUND;
+    output = 0;
+    if (!present) return true;
+    if (size == 0 || size > 20 || size >= text.size()) return false;
+    std::array<char, 20> decimal{};
+    for (DWORD index = 0; index < size; ++index) {
+        if (text[index] < L'0' || text[index] > L'9') return false;
+        decimal[index] = static_cast<char>(text[index]);
+    }
+    return protocol::decimal({decimal.data(), size}, output) && output != 0;
+}
+
 } // namespace
 
 bool initialize() noexcept {
@@ -180,12 +197,19 @@ bool initialize() noexcept {
             && std::wstring_view(version.data(), versionSize) != L"3")) return false;
     const std::uint32_t selectedVersion = versionSize == 1
         ? static_cast<std::uint32_t>(version[0] - L'0') : protocol::kVersion;
+    bool hasPairGeneration{}, hasPeerId{};
+    std::uint64_t expectedPairGeneration{}, expectedPeerId{};
+    if (!read_pair_pin(L"DAWN_COMPANION_PAIR_GENERATION", hasPairGeneration, expectedPairGeneration)
+        || !read_pair_pin(L"DAWN_COMPANION_PEER_ID", hasPeerId, expectedPeerId)
+        || hasPairGeneration != hasPeerId
+        || (hasPairGeneration && (selectedVersion != protocol::kPreflightVersion
+            || !protocol::steam_identity(expectedPeerId)))) return false;
     std::array<wchar_t, 40> id{}, nonce{};
     std::array<wchar_t, 16> process{};
     const DWORD idSize = GetEnvironmentVariableW(L"DAWN_COMPANION_ID", id.data(), static_cast<DWORD>(id.size()));
     const DWORD nonceSize = GetEnvironmentVariableW(L"DAWN_COMPANION_NONCE", nonce.data(), static_cast<DWORD>(nonce.size()));
     const DWORD processSize = GetEnvironmentVariableW(L"DAWN_COMPANION_PID", process.data(), static_cast<DWORD>(process.size()));
-    if (idSize == 0 && nonceSize == 0 && processSize == 0) return true;
+    if (idSize == 0 && nonceSize == 0 && processSize == 0) return !hasPairGeneration;
     if (idSize >= id.size() || nonceSize >= nonce.size() || processSize == 0 || processSize >= process.size()
         || !protocol::identifier({id.data(), idSize}) || !protocol::identifier({nonce.data(), nonceSize})) return false;
     std::array<char, 16> processText{};
@@ -232,6 +256,9 @@ bool initialize() noexcept {
             && protocol::decimal(fields.values[7], g_pairGeneration) && g_pairGeneration != 0;
         if (accepted) std::memcpy(g_localEpoch.data(), fields.values[6].data(), fields.values[6].size());
     }
+    // A child started for an earlier pair must not publish identities after reconnect.
+    if (accepted && hasPairGeneration)
+        accepted = g_pairGeneration == expectedPairGeneration && remote == expectedPeerId;
     if (accepted) {
         accepted = g_companionGenerationClock != UINT64_MAX;
         if (accepted) g_companionGeneration = ++g_companionGenerationClock;

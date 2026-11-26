@@ -19,6 +19,7 @@ constexpr std::uint64_t localId = 0x0110000100000001ULL, remoteId = 0x0110000100
 constexpr wchar_t pipeId[] = L"0123456789abcdef0123456789abcdef";
 constexpr char nonce[] = "fedcba9876543210fedcba9876543210";
 std::atomic<unsigned> checks{0};
+std::atomic<unsigned> localPublications{0}, peerPublications{0};
 dawn::steam::social::PeerProfile peer{};
 dawn::steam::social::InviteSender sender{};
 void* senderContext{};
@@ -57,9 +58,13 @@ std::string receive(HANDLE pipe) {
 
 namespace dawn::core::log { void write(Channel, Level, std::string_view) noexcept {} }
 namespace dawn::steam::social {
-bool set_local_identity(std::uint64_t id, std::string_view) noexcept { return id == fixture::localId; }
+bool set_local_identity(std::uint64_t id, std::string_view) noexcept {
+    ++fixture::localPublications; return id == fixture::localId;
+}
 const char* local_persona_name() noexcept { return "Local fixture"; }
-bool set_peer(const PeerProfile& profile) noexcept { fixture::peer = profile; return profile.steamId == fixture::remoteId; }
+bool set_peer(const PeerProfile& profile) noexcept {
+    ++fixture::peerPublications; fixture::peer = profile; return profile.steamId == fixture::remoteId;
+}
 void clear_peer() noexcept { fixture::peer = {}; }
 void set_invite_sender(InviteSender sender, void* context) noexcept { fixture::sender = sender; fixture::senderContext = context; }
 void set_invite_accepted_sender(InviteAcceptedSender sender, void* context) noexcept {
@@ -327,12 +332,80 @@ static void v3_case(unsigned variant) {
     CloseHandle(advance); CloseHandle(ready); CloseHandle(pipe);
 }
 
+static void pinned_handshake_case(const wchar_t* pairGeneration, const wchar_t* peerId, bool expected) {
+    namespace client = dawn::core::multiplayer;
+    SetEnvironmentVariableW(L"DAWN_COMPANION_PROTOCOL", L"3");
+    SetEnvironmentVariableW(L"DAWN_COMPANION_PAIR_GENERATION", pairGeneration);
+    SetEnvironmentVariableW(L"DAWN_COMPANION_PEER_ID", peerId);
+    const HANDLE pipe = CreateNamedPipeW(L"\\\\.\\pipe\\MultiDawn-0123456789abcdef0123456789abcdef",
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+        1, 4096, 4096, 1000, nullptr);
+    CHECK(pipe != INVALID_HANDLE_VALUE);
+    const auto localsBefore = fixture::localPublications.load();
+    const auto peersBefore = fixture::peerPublications.load();
+    std::thread server([&] {
+        CHECK(ConnectNamedPipe(pipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED);
+        CHECK(fixture::receive(pipe) == std::string("HELLO 3 ") + fixture::nonce);
+        fixture::send(pipe, "WELCOME 3 76561197960265729 76561197960265730 50656572 1 11111111111111111111111111111111 9");
+        char ignored{}; DWORD got{};
+        (void)ReadFile(pipe, &ignored, 1, &got, nullptr);
+    });
+    CHECK(client::initialize() == expected);
+    CHECK(client::connected() == expected);
+    CHECK(fixture::localPublications.load() == localsBefore + (expected ? 1U : 0U));
+    CHECK(fixture::peerPublications.load() == peersBefore + (expected ? 1U : 0U));
+    CHECK((fixture::sender != nullptr) == expected);
+    client::shutdown();
+    server.join();
+    CloseHandle(pipe);
+    SetEnvironmentVariableW(L"DAWN_COMPANION_PAIR_GENERATION", nullptr);
+    SetEnvironmentVariableW(L"DAWN_COMPANION_PEER_ID", nullptr);
+}
+
+static void malformed_pin_cases() {
+    namespace client = dawn::core::multiplayer;
+    SetEnvironmentVariableW(L"DAWN_COMPANION_PROTOCOL", L"3");
+    for (const auto* malformed : {L"0", L"-1", L"+1", L" 9", L"9 ", L"9.0", L"\u0669",
+             L"18446744073709551616", L"000000000000000000009"}) {
+        SetEnvironmentVariableW(L"DAWN_COMPANION_PAIR_GENERATION", malformed);
+        SetEnvironmentVariableW(L"DAWN_COMPANION_PEER_ID", L"76561197960265730");
+        CHECK(!client::initialize() && !client::connected());
+    }
+    const std::wstring oversized(500, L'9');
+    SetEnvironmentVariableW(L"DAWN_COMPANION_PAIR_GENERATION", oversized.c_str());
+    CHECK(!client::initialize() && !client::connected());
+    SetEnvironmentVariableW(L"DAWN_COMPANION_PAIR_GENERATION", L"9");
+    for (const auto* malformed : {L"0", L"1", L"76561197960265728", L"-76561197960265730",
+             L"+76561197960265730", L"76561197960265730 ", L"18446744073709551616"}) {
+        SetEnvironmentVariableW(L"DAWN_COMPANION_PEER_ID", malformed);
+        CHECK(!client::initialize() && !client::connected());
+    }
+    SetEnvironmentVariableW(L"DAWN_COMPANION_PEER_ID", oversized.c_str());
+    CHECK(!client::initialize() && !client::connected());
+    SetEnvironmentVariableW(L"DAWN_COMPANION_PEER_ID", nullptr);
+    CHECK(!client::initialize() && !client::connected());
+    SetEnvironmentVariableW(L"DAWN_COMPANION_PAIR_GENERATION", nullptr);
+    SetEnvironmentVariableW(L"DAWN_COMPANION_PEER_ID", L"76561197960265730");
+    CHECK(!client::initialize() && !client::connected());
+    SetEnvironmentVariableW(L"DAWN_COMPANION_PAIR_GENERATION", L"9");
+    for (const auto* version : {L"1", L"2"}) {
+        SetEnvironmentVariableW(L"DAWN_COMPANION_PROTOCOL", version);
+        CHECK(!client::initialize() && !client::connected());
+    }
+    SetEnvironmentVariableW(L"DAWN_COMPANION_PAIR_GENERATION", nullptr);
+    SetEnvironmentVariableW(L"DAWN_COMPANION_PEER_ID", nullptr);
+    SetEnvironmentVariableW(L"DAWN_COMPANION_PROTOCOL", nullptr);
+}
+
 int main() {
     namespace client = dawn::core::multiplayer;
     SetEnvironmentVariableW(L"DAWN_COMPANION_ID", nullptr);
     SetEnvironmentVariableW(L"DAWN_COMPANION_NONCE", nullptr);
     SetEnvironmentVariableW(L"DAWN_COMPANION_PID", nullptr);
     SetEnvironmentVariableW(L"DAWN_SESSION_MODE", nullptr);
+    SetEnvironmentVariableW(L"DAWN_COMPANION_PAIR_GENERATION", nullptr);
+    SetEnvironmentVariableW(L"DAWN_COMPANION_PEER_ID", nullptr);
+    malformed_pin_cases();
     SetEnvironmentVariableW(L"DAWN_COMPANION_PROTOCOL", L"4");
     CHECK(!client::initialize());
     SetEnvironmentVariableW(L"DAWN_COMPANION_PROTOCOL", nullptr);
@@ -403,6 +476,10 @@ int main() {
     }
     for (unsigned variant = 0; variant <= 15; ++variant) v3_case(variant);
     for (unsigned variant = 20; variant <= 26; ++variant) v3_case(variant);
+    pinned_handshake_case(L"9", L"76561197960265730", true);
+    pinned_handshake_case(L"8", L"76561197960265730", false);
+    pinned_handshake_case(L"9", L"76561197960265729", false);
+    pinned_handshake_case(L"18446744073709551615", L"76561197960265730", false);
     SetEnvironmentVariableW(L"DAWN_COMPANION_PROTOCOL", nullptr);
     std::printf("PASS: %u native companion IPC checks\n", fixture::checks.load());
 }

@@ -5,7 +5,10 @@
 
 namespace dawn::core::multiplayer {
 
-/** Optional, authenticated launcher IPC. An absent configuration keeps direct solo launch. */
+/**
+ * Optional authenticated launcher IPC; absent configuration keeps direct solo launch.
+ * Protocol3 child pair/peer pins, when supplied together, must match WELCOME before publication.
+ */
 [[nodiscard]] bool initialize() noexcept;
 /** Polls bounded local IPC work; never opens the existing account backend to a remote PC. */
 void service(std::uint64_t now) noexcept;

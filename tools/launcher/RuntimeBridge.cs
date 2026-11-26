@@ -84,6 +84,68 @@ namespace MultiDawn.Launcher
         internal ulong LocalSteamId { get { return localId; } }
         internal ulong PeerSteamId { get { lock (sync) return remoteId; } }
         internal bool NativeConnected { get { lock (sync) return native != null && native.Authenticated; } }
+        internal bool TryCaptureGamePreflight(out GamePreflightLaunchContext context)
+        {
+            long generation; string partner;
+            session.ConnectionSnapshot(out generation, out partner);
+            lock (sync) {
+                context = null;
+                if (!CurrentControl(generation, partner) || generation <= 0 || !ValidSteamId(remoteId)) return false;
+                context = new GamePreflightLaunchContext(generation, partner, remoteId);
+            }
+            if (ValidateGamePreflight(context)) return true;
+            context = null;
+            return false;
+        }
+        private bool CurrentGamePreflightLocked(GamePreflightLaunchContext context, long generation, string partner)
+        {
+            return context != null && CurrentControl(generation, partner) && generation == context.PairGeneration
+                && partner == context.PartnerLauncherId && remoteId == context.PeerSteamId && ValidSteamId(remoteId);
+        }
+        internal bool ValidateGamePreflight(GamePreflightLaunchContext context)
+        {
+            long generation; string partner;
+            session.ConnectionSnapshot(out generation, out partner);
+            lock (sync) if (!CurrentGamePreflightLocked(context, generation, partner)) return false;
+            // Pair callbacks acquire the bridge lock while holding their own session lock.
+            // Reobserve outside this lock order before accepting a copied bridge context.
+            session.ConnectionSnapshot(out generation, out partner);
+            return generation == context.PairGeneration && partner == context.PartnerLauncherId;
+        }
+        internal bool ApplyGamePreflightEnvironment(ProcessStartInfo info, GamePreflightLaunchContext context)
+        {
+            if (info == null || info.UseShellExecute) throw new ArgumentException("Use an isolated child process environment.");
+            long generation; string partner;
+            session.ConnectionSnapshot(out generation, out partner);
+            lock (sync) {
+                if (!CurrentGamePreflightLocked(context, generation, partner)) return false;
+                ApplyEnvironment(info);
+                info.EnvironmentVariables["DAWN_COMPANION_PROTOCOL"] = "3";
+                info.EnvironmentVariables["DAWN_COMPANION_PAIR_GENERATION"] = context.PairGeneration.ToString(CultureInfo.InvariantCulture);
+                info.EnvironmentVariables["DAWN_COMPANION_PEER_ID"] = context.PeerSteamId.ToString(CultureInfo.InvariantCulture);
+                info.EnvironmentVariables["DAWN_NATIVE_ADDRESS_RESOLUTION"] = "1";
+                info.EnvironmentVariables["DAWN_NATIVE_SESSION_TRACE"] = "1";
+                info.EnvironmentVariables["DAWN_NATIVE_IDENTITY_OBSERVATION"] = "1";
+                info.EnvironmentVariables["DAWN_ACTIVITY_BINDING_TRACE"] = "1";
+            }
+            return ValidateGamePreflight(context);
+        }
+        internal string GamePreflightStatus
+        {
+            get {
+                long generation; string partner;
+                session.ConnectionSnapshot(out generation, out partner);
+                lock (sync) {
+                    if (!CurrentControl(generation, partner)) return "Native test: pair with another launcher.";
+                    if (!ValidSteamId(remoteId)) return "Native test: waiting for the partner profile.";
+                    if (!CurrentNativeLocked(native)) return "Native test: local game companion is not connected.";
+                    if (native.Protocol != 3) return "Native test: the local game companion needs protocol 3.";
+                    if (!remoteRunning || remoteProtocol < 2 || !InviteLedger.Token(remoteEpoch))
+                        return "Native test: local game connected; waiting for the partner's game.";
+                    return "Native test: both game companions connected. Shared gameplay remains unavailable.";
+                }
+            }
+        }
         internal string NativeEpochForTest { get { lock (sync) return native != null && native.Authenticated ? native.Epoch : "-"; } }
         internal string PeerEpochForTest { get { lock (sync) return remoteEpoch; } }
         internal int PeerProtocolForTest { get { lock (sync) return remoteProtocol; } }

@@ -120,6 +120,13 @@ identity pins, and rejection of stale tokens and IP-only joins.
 
 ## Native social companion
 
+The explicit developer-only
+[two-PC native preflight](../../docs/TWO-PC-NATIVE-PREFLIGHT.md) can now launch
+real isolated game clients attached to their paired launchers. It requires the
+test kit's exact runtime hash and isolated-install marker. Ordinary multiplayer
+Play remains disabled; this path tests native presence and invitation intent,
+not shared activities or remote Guardian movement.
+
 This source branch adds bounded social control messages to an authenticated
 pair. An optional named pipe connects a newly built native runtime to its local
 launcher. The pipe permits the current Windows user and denies network logons;
