@@ -13,7 +13,8 @@ namespace MultiDawn.Launcher
         private static async Task<string> RunAsync(string harness)
         {
             if (!File.Exists(harness)) throw new FileNotFoundException("Build the native companion_bridge_harness project first.", harness);
-            return await RunVersionAsync(harness, 2).ConfigureAwait(false)
+            return await RunVersionAsync(harness, 3).ConfigureAwait(false)
+                + await RunVersionAsync(harness, 2).ConfigureAwait(false)
                 + await RunVersionAsync(harness, 1).ConfigureAwait(false);
         }
         private static async Task<string> RunVersionAsync(string harness, int protocol)
@@ -48,7 +49,8 @@ namespace MultiDawn.Launcher
                         if (!Clean(firstBridge, secondBridge)) throw new IOException("Native exit did not retire both runtime epochs and invitation contexts.");
                         if (!host.IsPaired || !guest.IsPaired) throw new IOException("Native worker exit incorrectly terminated launcher pairing.");
                         return output + "PASS: actual C++ companion framing, nonce authentication, identity publication, bidirectional invitations, and native exit cleanup."
-                            + (protocol == 2 ? " Invitation acceptance reached the host as intent only; no gameplay grant." : " Legacy protocol 1 remains compatible.") + Environment.NewLine
+                            + (protocol == 3 ? " Current accepted-invitation preflight was observed after intent consumption; no gameplay grant."
+                                : protocol == 2 ? " Invitation acceptance reached the host as intent only; no gameplay grant." : " Legacy protocol 1 remains compatible.") + Environment.NewLine
                             + "No Destiny process or game DLL was started. No account or save was opened." + Environment.NewLine;
                     }
                     finally { Stop(first); Stop(second); }

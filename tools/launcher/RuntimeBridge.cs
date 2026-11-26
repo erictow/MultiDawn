@@ -13,7 +13,7 @@ using System.Threading.Tasks;
 
 namespace MultiDawn.Launcher
 {
-    /** Social IPC for the native runtime. It does not carry account or gameplay packets. */
+    /** Launcher IPC for native social intent and preflight observations; no account or gameplay packets. */
     internal sealed class RuntimeBridge : IDisposable
     {
         private sealed class NativeConnection
@@ -49,6 +49,7 @@ namespace MultiDawn.Launcher
         private readonly Task listenerWorker, presenceWorker;
         private Task queued = Task.FromResult(0);
         private int queuedCount;
+        private int pendingPreflights;
         private NativeConnection native;
         private string boundPeer = "", remoteName = "Paired player";
         private ulong remoteId;
@@ -89,6 +90,16 @@ namespace MultiDawn.Launcher
         internal bool AcceptedIntentForTest { get { lock (sync) return invitations.Outgoing != null && invitations.Outgoing.Accepted; } }
         internal string IncomingTicketForTest { get { lock (sync) return invitations.Incoming == null ? "" : invitations.Incoming.Ticket; } }
         internal Task ExpireForTest() { return ExpireInvitationsAsync(); }
+        internal int PendingPreflightsForTest { get { return Thread.VolatileRead(ref pendingPreflights); } }
+        internal async Task HoldNativeWritesForTest(Task barrier, TaskCompletionSource<bool> entered)
+        {
+            NativeConnection target;
+            lock (sync) target = CurrentNativeLocked(native) ? native : null;
+            if (target == null) throw new IOException("No native consumer to hold.");
+            await target.Writes.WaitAsync(cancellation).ConfigureAwait(false);
+            try { entered.TrySetResult(true); await barrier.ConfigureAwait(false); }
+            finally { target.Writes.Release(); }
+        }
 
         /** Only use for explicit native-social preflight; this does not enable multiplayer Play. */
         internal void ApplyEnvironment(ProcessStartInfo info)
@@ -193,7 +204,7 @@ namespace MultiDawn.Launcher
                         destination = native != null && native.Authenticated ? native : null;
                         // Protocol two must wait for a ticketed acceptance and host authorization.
                         // A legacy invitation cannot bypass that path, including mixed-version pairs.
-                        if (destination != null && destination.Protocol == 2) return;
+                        if (destination != null && destination.Protocol >= 2) return;
                     }
                     if (destination != null) await TrySendNativeAsync(destination, "INVITEFROM " + fields[2] + " " + fields[3]).ConfigureAwait(false);
                     return;
@@ -222,7 +233,7 @@ namespace MultiDawn.Launcher
 
         private List<InviteRecord> UpdateInvitationsLocked()
         {
-            InviteContext context = CurrentNativeLocked(native) && native.Protocol == 2 && remoteProtocol == 2 && remoteRunning
+            InviteContext context = CurrentNativeLocked(native) && native.Protocol >= 2 && remoteProtocol >= 2 && remoteRunning
                 && InviteLedger.Token(remoteEpoch)
                 ? new InviteContext(boundGeneration, boundPeer, localId, remoteId, native.Epoch, remoteEpoch) : null;
             return invitations.SetContext(context);
@@ -236,7 +247,9 @@ namespace MultiDawn.Launcher
                 id = remoteId; name = remoteName; running = remoteRunning; epoch = remoteEpoch; protocol = remoteProtocol;
             }
             await TrySendNativeAsync(connection, "PEER " + id.ToString(CultureInfo.InvariantCulture) + " " + Hex(name) + " " + (running ? "1" : "0")).ConfigureAwait(false);
-            if (connection.Protocol == 2)
+            // Version-two native parsers only know versions zero through two.
+            if (connection.Protocol == 2 && protocol == 3) protocol = 2;
+            if (connection.Protocol >= 2)
                 await TrySendNativeAsync(connection, "RUNTIME " + id.ToString(CultureInfo.InvariantCulture) + " " + epoch + " " + protocol.ToString(CultureInfo.InvariantCulture)).ConfigureAwait(false);
         }
 
@@ -244,7 +257,7 @@ namespace MultiDawn.Launcher
         {
             foreach (InviteRecord record in records) {
                 NativeConnection target;
-                lock (sync) target = CurrentNativeLocked(native) && native.Protocol == 2 && native.Epoch == record.Context.LocalEpoch ? native : null;
+                lock (sync) target = CurrentNativeLocked(native) && native.Protocol >= 2 && native.Epoch == record.Context.LocalEpoch ? native : null;
                 if (target != null) await TrySendNativeAsync(target, "REVOKED " + record.Ticket).ConfigureAwait(false);
                 if (forward) {
                     try { await session.SendControlAsync("SOCIAL2 REVOKE " + record.Ticket + " " + record.HostEpoch + " " + record.GuestEpoch, record.Context.Generation).ConfigureAwait(false); }
@@ -265,7 +278,7 @@ namespace MultiDawn.Launcher
             if (fields.Length == 7 && fields[1] == "RUNTIME") {
                 ulong id = Identity(fields[2]), revision;
                 string name = Unhex(fields[3], 127, false), epoch = fields[4]; int protocol;
-                if (!Int32.TryParse(fields[5], NumberStyles.None, CultureInfo.InvariantCulture, out protocol) || protocol < 0 || protocol > 2
+                if (!Int32.TryParse(fields[5], NumberStyles.None, CultureInfo.InvariantCulture, out protocol) || protocol < 0 || protocol > 3
                     || !UInt64.TryParse(fields[6], NumberStyles.None, CultureInfo.InvariantCulture, out revision) || revision == 0
                     || (protocol == 0 ? epoch != "-" : !InviteLedger.Token(epoch)) || id == localId)
                     throw new IOException("Invalid native runtime announcement.");
@@ -324,14 +337,27 @@ namespace MultiDawn.Launcher
 
         private async Task ReceiveNativeAsync(NativeConnection connection, string[] fields)
         {
+            if (connection.Protocol == 3 && fields.Length == 4 && fields[0] == "PREFLIGHT") {
+                if (!InviteLedger.Token(fields[1]) || !InviteLedger.Token(fields[3])) throw new IOException("Invalid preflight token.");
+                ulong peer = Identity(fields[2]);
+                InviteRecord selected;
+                lock (sync) {
+                    if (!CurrentNativeLocked(connection)) return;
+                    selected = invitations.Accepted(peer, fields[3]);
+                }
+                Interlocked.Increment(ref pendingPreflights);
+                try { await SendPreflightAsync(connection, fields[1], peer, fields[3], selected).ConfigureAwait(false); }
+                finally { Interlocked.Decrement(ref pendingPreflights); }
+                return;
+            }
             if (fields.Length != 3) throw new IOException("Unexpected native message.");
             if (fields[0] == "INVITE") {
                 ulong target = Identity(fields[1]); Unhex(fields[2], 255, false);
                 InviteRecord record = null, replaced = null; bool versionTwo;
                 lock (sync) {
                     if (!CurrentNativeLocked(connection) || target != remoteId || !remoteRunning) throw new IOException("Invitation recipient is unavailable.");
-                    versionTwo = connection.Protocol == 2;
-                    if (versionTwo && remoteProtocol != 2) throw new IOException("The peer native runtime does not support ticketed invitations.");
+                    versionTwo = connection.Protocol >= 2;
+                    if (versionTwo && remoteProtocol < 2) throw new IOException("The peer native runtime does not support ticketed invitations.");
                     if (versionTwo)
                         record = invitations.Offer(Guid.NewGuid().ToString("N").ToUpperInvariant(), fields[2], out replaced);
                 }
@@ -343,7 +369,7 @@ namespace MultiDawn.Launcher
                 await session.SendControlAsync(control, connection.Generation).ConfigureAwait(false);
                 return;
             }
-            if (fields[0] == "ACCEPT" && connection.Protocol == 2) {
+            if (fields[0] == "ACCEPT" && connection.Protocol >= 2) {
                 ulong from = Identity(fields[1]);
                 if (!InviteLedger.Token(fields[2])) throw new IOException("Invalid invitation ticket.");
                 InviteRecord record;
@@ -379,7 +405,9 @@ namespace MultiDawn.Launcher
             bool running; long generation; int protocol; string epoch; ulong revision;
             lock (sync) {
                 generation = boundGeneration; running = CurrentNativeLocked(native);
-                protocol = running ? native.Protocol : 0; epoch = running ? native.Epoch : "-"; revision = runtimeRevision;
+                // Protocol three adds a local-pipe query; its remote invitation capability
+                // remains version two so existing paired launchers remain compatible.
+                protocol = running ? Math.Min(native.Protocol, 2) : 0; epoch = running ? native.Epoch : "-"; revision = runtimeRevision;
             }
             try {
                 await session.SendControlAsync("SOCIAL1 PROFILE " + localId.ToString(CultureInfo.InvariantCulture) + " " + Hex(localName) + " " + (running ? "1" : "0"), generation).ConfigureAwait(false);
@@ -404,7 +432,7 @@ namespace MultiDawn.Launcher
                     {
                         await Task.Factory.FromAsync(connection.Pipe.BeginWaitForConnection, connection.Pipe.EndWaitForConnection, null).ConfigureAwait(false);
                         string hello = await ReadFrameAsync(connection.Pipe, cancellation, 5000).ConfigureAwait(false);
-                        connection.Protocol = FixedEquals(hello, "HELLO 2 " + Nonce) ? 2 : FixedEquals(hello, "HELLO 1 " + Nonce) ? 1 : 0;
+                        connection.Protocol = FixedEquals(hello, "HELLO 3 " + Nonce) ? 3 : FixedEquals(hello, "HELLO 2 " + Nonce) ? 2 : FixedEquals(hello, "HELLO 1 " + Nonce) ? 1 : 0;
                         if (connection.Protocol == 0) throw new IOException("Native companion authentication failed.");
                         DateTime deadline = DateTime.UtcNow.AddSeconds(5);
                         ulong peerId;
@@ -422,7 +450,10 @@ namespace MultiDawn.Launcher
                             await Task.Delay(30, cancellation).ConfigureAwait(false);
                         } while (DateTime.UtcNow < deadline);
                         if (peerId == 0) throw new IOException("The native companion has no authenticated peer profile.");
-                        await SendNativeAsync(connection, "WELCOME " + connection.Protocol.ToString(CultureInfo.InvariantCulture) + " " + localId.ToString(CultureInfo.InvariantCulture) + " " + peerId.ToString(CultureInfo.InvariantCulture) + " " + Hex(name) + " " + (running ? "1" : "0")).ConfigureAwait(false);
+                        string welcome = "WELCOME " + connection.Protocol.ToString(CultureInfo.InvariantCulture) + " " + localId.ToString(CultureInfo.InvariantCulture) + " " + peerId.ToString(CultureInfo.InvariantCulture) + " " + Hex(name) + " " + (running ? "1" : "0");
+                        if (connection.Protocol == 3)
+                            welcome += " " + connection.Epoch + " " + connection.Generation.ToString(CultureInfo.InvariantCulture);
+                        await SendNativeAsync(connection, welcome).ConfigureAwait(false);
                         List<InviteRecord> revoked;
                         lock (sync) {
                             if (native != connection || connection.Generation != boundGeneration) throw new IOException("Native connection was superseded.");
@@ -475,24 +506,57 @@ namespace MultiDawn.Launcher
             catch (ObjectDisposedException) { }
         }
 
+        private async Task SendPreflightAsync(NativeConnection target, string nonce, ulong peer, string ticket, InviteRecord selected)
+        {
+            await target.Writes.WaitAsync(cancellation).ConfigureAwait(false);
+            try {
+                Task write;
+                lock (sync) {
+                    if (!CurrentNativeLocked(target) || target.Protocol != 3) return;
+                    int remaining = invitations.RemainingAccepted(selected, peer, ticket);
+                    bool current = remaining > 0 && selected.Context.Generation > 0
+                        && selected.Context.Generation == target.Generation && selected.Context.Generation == boundGeneration
+                        && selected.Context.Launcher == boundPeer && selected.Context.LocalId == localId
+                        && selected.Context.PeerId == remoteId && selected.Context.PeerId == peer
+                        && selected.Context.LocalEpoch == target.Epoch && selected.Context.PeerEpoch == remoteEpoch
+                        && remoteRunning && remoteProtocol >= 2;
+                    string reply = current
+                        ? "PREFLIGHT_OK " + nonce + " " + peer.ToString(CultureInfo.InvariantCulture) + " " + ticket
+                            + " " + selected.Context.Generation.ToString(CultureInfo.InvariantCulture)
+                            + " " + target.Epoch + " " + remoteEpoch + " " + remaining.ToString(CultureInfo.InvariantCulture)
+                        : "PREFLIGHT_NO " + nonce;
+                    // Serialize, revalidate and initiate the exact pipe write before releasing
+                    // the context lock. No lock is held while awaiting asynchronous I/O.
+                    write = WriteFrameCoreAsync(target.Pipe, reply, cancellation);
+                }
+                await write.ConfigureAwait(false);
+            }
+            catch (IOException) { target.Pipe.Dispose(); throw; }
+            catch (ObjectDisposedException) { target.Pipe.Dispose(); throw new IOException("Native companion disconnected."); }
+            finally { target.Writes.Release(); }
+        }
+
         internal static async Task WriteFrameAsync(Stream stream, SemaphoreSlim writes, string message, CancellationToken cancellation)
+        {
+            ValidateText(message, 1024, false);
+            await writes.WaitAsync(cancellation).ConfigureAwait(false);
+            try { await WriteFrameCoreAsync(stream, message, cancellation).ConfigureAwait(false); }
+            finally { writes.Release(); }
+        }
+
+        private static async Task WriteFrameCoreAsync(Stream stream, string message, CancellationToken cancellation)
         {
             ValidateText(message, 1024, false);
             byte[] text = Encoding.ASCII.GetBytes(message), frame = new byte[message.Length + 4];
             byte[] length = BitConverter.GetBytes(text.Length);
             if (!BitConverter.IsLittleEndian) Array.Reverse(length);
             Array.Copy(length, frame, 4); Array.Copy(text, 0, frame, 4, text.Length);
-            await writes.WaitAsync(cancellation).ConfigureAwait(false);
-            try
+            using (CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation))
             {
-                using (CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation))
-                {
-                    timeout.CancelAfter(5000);
-                    using (timeout.Token.Register(delegate { stream.Dispose(); }))
-                        await stream.WriteAsync(frame, 0, frame.Length, timeout.Token).ConfigureAwait(false);
-                }
+                timeout.CancelAfter(5000);
+                using (timeout.Token.Register(delegate { stream.Dispose(); }))
+                    await stream.WriteAsync(frame, 0, frame.Length, timeout.Token).ConfigureAwait(false);
             }
-            finally { writes.Release(); }
         }
 
         internal static async Task<string> ReadFrameAsync(Stream stream, CancellationToken cancellation, int firstByteTimeout)

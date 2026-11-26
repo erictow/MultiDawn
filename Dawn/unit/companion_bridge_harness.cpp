@@ -78,8 +78,11 @@ int main(int argc, char** argv) {
     std::array<wchar_t, 4> configuredVersion{};
     const auto versionSize = GetEnvironmentVariableW(L"DAWN_COMPANION_PROTOCOL", configuredVersion.data(),
                                                      static_cast<DWORD>(configuredVersion.size()));
-    const bool v2 = versionSize == 1 && configuredVersion[0] == L'2';
+    const bool v3 = versionSize == 1 && configuredVersion[0] == L'3';
+    const bool v2 = v3 || (versionSize == 1 && configuredVersion[0] == L'2');
     bool sent = false, received = false, accepted = false, intentReceived = false;
+    bool preflightRequested = false, preflightObserved = false;
+    std::array<char, 33> intentTicket{};
     std::uint64_t completedAt = 0;
     const std::uint64_t deadline = GetTickCount64() + 15000;
     while (client::connected() && GetTickCount64() < deadline) {
@@ -100,20 +103,31 @@ int main(int argc, char** argv) {
         if (v2 && client::take_accepted_invitation(intent)) {
             intentReceived = intent.peerSteamId == fixture::peer.steamId
                 && client::protocol::ticket(intent.ticket.data()) && intent.deadline > now;
+            if (intentReceived) intentTicket = intent.ticket;
         }
-        if (sent && received && (!v2 || (accepted && intentReceived))) {
+        if (v3 && intentReceived && !preflightRequested)
+            preflightRequested = client::request_invitation_preflight(fixture::peer.steamId, intentTicket.data());
+        client::InvitationPreflightObservation observation{};
+        if (v3 && client::take_invitation_preflight(observation)) {
+            preflightObserved = observation.peerSteamId == fixture::peer.steamId
+                && observation.ticket == intentTicket && observation.deadline > now
+                && client::validate_invitation_preflight(observation);
+        }
+        if (sent && received && (!v2 || (accepted && intentReceived)) && (!v3 || preflightObserved)) {
             if (completedAt == 0) completedAt = now;
             if (now - completedAt >= 1000) break;
         }
         Sleep(10);
     }
     client::shutdown();
-    if (!sent || !received || (v2 && (!accepted || !intentReceived))) {
-        std::fprintf(stderr, "FAIL: native worker send=%u receive=%u accept=%u intent=%u protocol=%u\n",
-                     sent ? 1U : 0U, received ? 1U : 0U, accepted ? 1U : 0U, intentReceived ? 1U : 0U, v2 ? 2U : 1U);
+    if (!sent || !received || (v2 && (!accepted || !intentReceived)) || (v3 && !preflightObserved)) {
+        std::fprintf(stderr, "FAIL: native worker send=%u receive=%u accept=%u intent=%u preflight=%u protocol=%u\n",
+                     sent ? 1U : 0U, received ? 1U : 0U, accepted ? 1U : 0U, intentReceived ? 1U : 0U,
+                     preflightObserved ? 1U : 0U, v3 ? 3U : v2 ? 2U : 1U);
         return 1;
     }
-    std::puts(v2 ? "PASS: native v2 companion exchanged invitations and accepted intents through both launchers; no gameplay grant"
+    std::puts(v3 ? "PASS: native v3 companion observed current preflight after consuming accepted intents through both launchers; no gameplay grant"
+                 : v2 ? "PASS: native v2 companion exchanged invitations and accepted intents through both launchers; no gameplay grant"
                  : "PASS: production native companion exchanged invitations through both launchers");
     return 0;
 }

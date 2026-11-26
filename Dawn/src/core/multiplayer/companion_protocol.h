@@ -11,6 +11,8 @@ namespace dawn::core::multiplayer::protocol {
 inline constexpr std::size_t kMaximumMessage = 1024;
 inline constexpr std::uint32_t kVersion = 1;
 inline constexpr std::uint32_t kIntentVersion = 2;
+/** Explicit local-pipe opt-in; does not change SOCIAL2 or enable game admission. */
+inline constexpr std::uint32_t kPreflightVersion = 3;
 
 /** Runtime epochs and invitation tickets use one canonical, bounded wire form. */
 [[nodiscard]] inline bool ticket(std::string_view value) noexcept {

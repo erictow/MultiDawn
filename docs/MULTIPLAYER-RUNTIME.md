@@ -51,6 +51,11 @@ The source now includes these native components:
   build-86657 schema also establishes its leave/skip field and signed opaque
   byte encoding. Existing solo/control bytes remain unchanged. No live caller
   supplies these rows; see [additional-human membership](REMOTE-HUMAN-MEMBERSHIP.md).
+- An explicit version-three native companion can recheck a live accepted ticket
+  against the current launcher pair and both runtime epochs. Its expiring result
+  remains an invitation observation, with no account data or gameplay grant.
+  Default companion launch stays on version two; see
+  [invitation preflight](INVITATION-CONTROL-V2.md#opt-in-version-three-preflight).
 
 These changes have not been installed over the existing game. The approved
 Windows SDK is installed locally. The full DLL and native component tests now
@@ -355,6 +360,13 @@ Native build instructions are in
 [`tools/build/PORTABLE-WINDOWS.md`](../tools/build/PORTABLE-WINDOWS.md).
 The native GitHub workflow builds and runs the twenty component test projects;
 preparing the workflow does not mean a remote run has passed.
+
+For experimental commit `f60ac62b`, the
+[native and interoperability workflow](https://github.com/erictow/MultiDawn/actions/runs/45773564715)
+passed all twenty component suites, eighteen snapshot tests and both then-current
+native companion versions. That checkpoint covers registered human routes and
+the additional-human BAP writer; subsequent preflight changes need their own
+verification.
 
 For experimental commit `abc33b90`, the
 [native checks and interoperability workflow](https://github.com/erictow/MultiDawn/actions/runs/43288105681)

@@ -27,6 +27,7 @@ public:
     }
 
     [[nodiscard]] bool ready() const noexcept { return version_ == 2; }
+    [[nodiscard]] std::string_view epoch() const noexcept { return epoch_.data(); }
 
     /** Duplicates do not extend the deadline or recreate an already consumed intent. */
     [[nodiscard]] bool accepted(std::uint64_t peer, std::string_view ticket,
@@ -66,6 +67,98 @@ private:
     AcceptedInvitationIntent current_{};
     std::uint64_t version_{};
     bool available_{};
+};
+
+/** Bounded request/reply state. Caller authenticates the pipe and serializes every operation. */
+class InvitationPreflightState final {
+public:
+    static constexpr std::uint64_t kRequestTimeout = 5'000;
+
+    [[nodiscard]] bool begin(std::string_view nonce, std::uint64_t peer,
+                              std::string_view ticket, std::string_view localEpoch,
+                              std::string_view peerEpoch, std::uint64_t pairGeneration,
+                              std::uint64_t companionGeneration, std::uint64_t requestGeneration,
+                              std::uint64_t now) noexcept {
+        expire(now);
+        if (pending_ || !protocol::ticket(nonce) || !protocol::ticket(ticket)
+            || !protocol::ticket(localEpoch) || !protocol::ticket(peerEpoch)
+            || !protocol::steam_identity(peer) || pairGeneration == 0
+            || companionGeneration == 0 || requestGeneration == 0) return false;
+        *this = {};
+        std::memcpy(nonce_.data(), nonce.data(), nonce.size());
+        std::memcpy(observation_.ticket.data(), ticket.data(), ticket.size());
+        std::memcpy(observation_.localEpoch.data(), localEpoch.data(), localEpoch.size());
+        std::memcpy(observation_.peerEpoch.data(), peerEpoch.data(), peerEpoch.size());
+        observation_.peerSteamId = peer;
+        observation_.pairGeneration = pairGeneration;
+        observation_.companionGeneration = companionGeneration;
+        observation_.requestGeneration = requestGeneration;
+        started_ = now;
+        pending_ = true;
+        return true;
+    }
+
+    /** Well-formed stale nonces are ignored; matching malformed/mismatched replies are refused. */
+    [[nodiscard]] bool response(const protocol::Fields& fields, std::uint64_t now) noexcept {
+        expire(now);
+        if (fields.count == 2 && fields.values[0] == "PREFLIGHT_NO" && protocol::ticket(fields.values[1])) {
+            if (pending_ && fields.values[1] == nonce_.data()) *this = {};
+            return true;
+        }
+        std::uint64_t peer{}, generation{}, ttl{};
+        if (fields.count != 8 || fields.values[0] != "PREFLIGHT_OK"
+            || !protocol::ticket(fields.values[1]) || !protocol::decimal(fields.values[2], peer)
+            || !protocol::steam_identity(peer) || !protocol::ticket(fields.values[3])
+            || !protocol::decimal(fields.values[4], generation) || generation == 0
+            || !protocol::ticket(fields.values[5]) || !protocol::ticket(fields.values[6])
+            || !protocol::decimal(fields.values[7], ttl) || ttl == 0 || ttl > 60'000) return false;
+        if (!pending_ || fields.values[1] != nonce_.data()) return true;
+        if (peer != observation_.peerSteamId || fields.values[3] != observation_.ticket.data()
+            || generation != observation_.pairGeneration
+            || fields.values[5] != observation_.localEpoch.data()
+            || fields.values[6] != observation_.peerEpoch.data()) return false;
+        // Charge all local queuing/response time against the authoritative remaining TTL.
+        if (now < started_ || now - started_ >= ttl || started_ > UINT64_MAX - ttl) {
+            *this = {};
+            return true;
+        }
+        observation_.deadline = started_ + ttl;
+        pending_ = false;
+        available_ = true;
+        return true;
+    }
+
+    void revoke(std::string_view ticket) noexcept {
+        if (ticket == observation_.ticket.data()) *this = {};
+    }
+    /** Conservatively retire an older observation when another invitation replaces it locally. */
+    void replace(std::string_view ticket) noexcept {
+        if (observation_.ticket[0] != '\0' && ticket != observation_.ticket.data()) *this = {};
+    }
+    void expire(std::uint64_t now) noexcept {
+        if (((pending_ || observation_.deadline != 0) && now < started_)
+            || (pending_ && now - started_ >= kRequestTimeout)
+            || (observation_.deadline != 0 && now >= observation_.deadline)) *this = {};
+    }
+    [[nodiscard]] bool pending() const noexcept { return pending_; }
+    [[nodiscard]] bool take(std::uint64_t now, InvitationPreflightObservation& output) noexcept {
+        output = {};
+        expire(now);
+        if (!available_) return false;
+        output = observation_;
+        available_ = false;
+        return true;
+    }
+    [[nodiscard]] bool validate(std::uint64_t now, const InvitationPreflightObservation& observed) noexcept {
+        expire(now);
+        return observation_.deadline != 0 && now < observation_.deadline && observed == observation_;
+    }
+
+private:
+    std::array<char, 33> nonce_{};
+    InvitationPreflightObservation observation_{};
+    std::uint64_t started_{};
+    bool pending_{}, available_{};
 };
 
 } // namespace dawn::core::multiplayer

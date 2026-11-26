@@ -98,3 +98,10 @@ it must never directly call `authorize_shared_peer`. Retire guest-local gameplay
 service only after a valid handoff is confirmed, with bounded failure cleanup.
 Real two-PC shared activity, invitations, and independent save/reload remain the
 acceptance checks.
+
+The opt-in version-three companion now supplies a dedicated
+[accepted-ticket preflight](INVITATION-CONTROL-V2.md#opt-in-version-three-preflight).
+It checks the launcher's live record without consuming the earlier intent event.
+Its expiring result is an observation of invitation state; it does not establish
+the BAP world relationship, carry a guest identity publication or authorize a
+human route. Local validation of a consumed result is not a retained host lease.

@@ -1,4 +1,4 @@
-# Invitation control protocol, version 2
+# Invitation acceptance and preflight
 
 Version 2 carries a player's invitation acceptance from the Dawn Friends panel
 through two paired launchers to the inviting native runtime. Acceptance records
@@ -120,6 +120,65 @@ revalidate the launcher's live record and deadline before a gameplay grant and
 bind that grant to the actual native session and authenticated UDP peer. There
 is no gameplay grant message in version two.
 
+## Opt-in version-three preflight
+
+Version three extends the local native pipe only. Set
+`DAWN_COMPANION_PROTOCOL=3` explicitly in an isolated companion test environment.
+Normal launcher preflight continues to select version two; solo Play remains
+unchanged. Native clients using versions one and two keep their existing
+handshakes and behavior.
+
+The new handshake supplies the native client with its exact launcher-issued
+runtime epoch and current pairing generation:
+
+```text
+native -> launcher: HELLO 3 <nonce>
+launcher -> native: WELCOME 3 <localSteamId> <peerSteamId> <nameHex> <running:0|1> <localEpoch> <pairGeneration>
+```
+
+The dedicated query and response never travel as ordinary `SOCIAL` payloads:
+
+```text
+native -> launcher: PREFLIGHT <requestNonce> <peerSteamId> <ticket>
+launcher -> native: PREFLIGHT_OK <requestNonce> <peerSteamId> <ticket> <pairGeneration> <localEpoch> <peerEpoch> <ttlMilliseconds>
+launcher -> native: PREFLIGHT_NO <requestNonce>
+```
+
+Request nonces, epochs and tickets use the canonical 32-character uppercase hex
+form. Pairing generations are positive decimal values; TTL is 1 to 60,000
+milliseconds. The success message remains within the existing eight-field and
+1,024-byte limits. No account identity, profile data or gameplay packets are
+added to this channel.
+
+Under its bridge lock, the launcher checks the current native connection,
+pairing context and an exact live accepted incoming or outgoing invitation.
+The query does not consume the acceptance record or recreate its notification.
+The serialized pipe send rechecks that same record and context and recomputes
+its remaining lifetime. Replacement, revocation, expiry or an epoch change
+cannot reuse an earlier successful lookup for a later send.
+
+The native runtime accepts a result only for its one outstanding request, with
+the matching nonce, ticket, peer, pairing generation and both current epochs.
+Its deadline conservatively subtracts elapsed request time from the returned
+TTL. A pending request times out after five seconds. Well-formed responses to
+old nonces are ignored without installing a result or disconnecting a healthy
+pipe. Pending and completed results are cleared on their relevant
+revocation, runtime replacement, disconnect or expiry. A consumed observation
+can be checked against current local companion state, but that check does not
+query the launcher again.
+
+Version three retains version-two invitation semantics. Launcher-to-launcher
+`SOCIAL2` runtime announcements continue to advertise the compatible version-two
+intent capability. An older paired launcher does not need to understand the
+new local pipe query.
+
+`request_invitation_preflight`, `take_invitation_preflight` and
+`validate_invitation_preflight` expose this observation boundary to a future
+native controller. A successful preflight grants no gameplay access. The
+controller still needs the exact current BAP binding and actual identity
+receipt, activity/region, world lineage, remote player publication and human
+route. No runtime handoff controller currently calls these APIs.
+
 ## Verification
 
 `tools/launcher/Build-Launcher.ps1 -RunTests` compiles with warnings treated as
@@ -130,8 +189,16 @@ outgoing downgrade rejection, including an unknown peer capability.
 
 The native protocol, pipe-client, and social test projects cover the C++ side.
 `--native-companion-test` runs the production C++ companion in disposable workers
-through two real C# bridges. These checks do not load the game, open saves, prove
+through two real C# bridges for versions three, two and one. The version-three
+workers successfully query the current invitation after consuming its intent
+event. These checks do not load the game, open saves, prove
 the game's own roster UI, or demonstrate two Guardians sharing an activity.
 The cross-language test also waits for both native connections and published
 runtime epochs to retire, checks that invitation contexts are cleared, and
 confirms that the launcher pair remains connected after both workers exit.
+
+Version-three ledger and real TCP/pipe tests also cover wrong tickets and peers,
+unaccepted records, the exact expiry boundary, TTL recomputation behind a held
+writer, queued revocation/replacement, native restart and pairing reconnect.
+Native request-state checks cover nonce/generation/epoch binding, replay,
+request timeout, clock rollback and deadline overflow.

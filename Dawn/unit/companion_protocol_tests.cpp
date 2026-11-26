@@ -13,6 +13,109 @@ void check(bool condition, int line) {
     if (!condition) { std::fprintf(stderr, "FAIL companion protocol line %d\n", line); std::exit(1); }
 }
 #define CHECK(value) check((value), __LINE__)
+
+void preflight_cases() {
+    using namespace dawn::core::multiplayer;
+    constexpr std::string_view nonce = "00000000000000000000000000000001";
+    constexpr std::string_view nextNonce = "00000000000000000000000000000002";
+    constexpr std::string_view ticket = "0123456789ABCDEF0123456789ABCDEF";
+    constexpr std::string_view localEpoch = "11111111111111111111111111111111";
+    constexpr std::string_view peerEpoch = "22222222222222222222222222222222";
+    constexpr std::uint64_t peer = 0x0110000100000002ULL;
+    InvitationPreflightState state;
+    InvitationPreflightObservation observation{};
+    auto begin = [&](std::uint64_t now, std::string_view requestNonce = "00000000000000000000000000000001") {
+        return state.begin(requestNonce, peer, ticket, localEpoch, peerEpoch, 9, 11, 13, now);
+    };
+    auto reply = [&](const std::string& text, std::uint64_t now) {
+        wire::Fields fields;
+        CHECK(wire::split(text, fields));
+        return state.response(fields, now);
+    };
+    const std::string success = "PREFLIGHT_OK " + std::string(nonce) + " 76561197960265730 "
+        + std::string(ticket) + " 9 " + std::string(localEpoch) + " " + std::string(peerEpoch) + " 1000";
+    CHECK(!state.take(0, observation) && observation == InvitationPreflightObservation{});
+    CHECK(reply(success, 0) && !state.take(0, observation)); // Unsolicited is ignored.
+    for (unsigned variant = 0; variant < 8; ++variant) {
+        CHECK(!state.begin(variant == 0 ? "bad" : nonce, variant == 1 ? 0 : peer,
+            variant == 2 ? "bad" : ticket, variant == 3 ? "bad" : localEpoch,
+            variant == 4 ? "bad" : peerEpoch, variant == 5 ? 0 : 9,
+            variant == 6 ? 0 : 11, variant == 7 ? 0 : 13, 1000));
+    }
+    CHECK(begin(1000) && state.pending());
+    CHECK(!begin(1001, nextNonce));
+    CHECK(reply(success, 1050) && !state.pending());
+    CHECK(state.take(1051, observation) && observation.deadline == 2000
+        && observation.peerSteamId == peer && observation.pairGeneration == 9
+        && observation.companionGeneration == 11 && observation.requestGeneration == 13
+        && std::string_view(observation.ticket.data()) == ticket
+        && std::string_view(observation.localEpoch.data()) == localEpoch
+        && std::string_view(observation.peerEpoch.data()) == peerEpoch);
+    const auto copied = observation;
+    CHECK(!state.take(1052, observation) && observation == InvitationPreflightObservation{});
+    CHECK(state.validate(1999, copied));
+    CHECK(reply(success, 1999) && state.validate(1999, copied)); // Replay cannot extend.
+    for (unsigned variant = 0; variant < 8; ++variant) {
+        auto forged = copied;
+        switch (variant) {
+        case 0: ++forged.peerSteamId; break;
+        case 1: ++forged.pairGeneration; break;
+        case 2: ++forged.companionGeneration; break;
+        case 3: ++forged.requestGeneration; break;
+        case 4: ++forged.deadline; break;
+        case 5: forged.ticket.fill('A'); break;
+        case 6: forged.localEpoch.fill('A'); break;
+        case 7: forged.peerEpoch.fill('A'); break;
+        }
+        CHECK(!state.validate(1999, forged));
+    }
+    CHECK(!state.validate(2000, copied));
+    CHECK(begin(3000, nextNonce));
+    CHECK(reply(success, 3001) && state.pending()); // Old nonce never consumes new request.
+    CHECK(reply("PREFLIGHT_NO " + std::string(nonce), 3001) && state.pending());
+    CHECK(reply("PREFLIGHT_NO " + std::string(nextNonce), 3001) && !state.pending());
+    CHECK(!state.take(3001, observation));
+    // Every binding lane is required for the matching request nonce.
+    for (unsigned variant = 0; variant < 9; ++variant) {
+        state = {}; CHECK(begin(1000));
+        wire::Fields fields; CHECK(wire::split(success, fields));
+        switch (variant) {
+        case 0: fields.values[2] = "76561197960265729"; break;
+        case 1: fields.values[3] = localEpoch; break;
+        case 2: fields.values[4] = "10"; break;
+        case 3: fields.values[5] = peerEpoch; break;
+        case 4: fields.values[6] = localEpoch; break;
+        case 5: fields.values[7] = "0"; break;
+        case 6: fields.values[7] = "60001"; break;
+        case 7: fields.count = 7; break;
+        case 8: fields.values[1] = "bad"; break;
+        }
+        CHECK(!state.response(fields, 1001) && state.pending());
+        CHECK(!state.take(1001, observation));
+    }
+    state = {}; CHECK(begin(1000));
+    state.expire(5999); CHECK(state.pending());
+    state.expire(6000); CHECK(!state.pending());
+    CHECK(reply(success, 6000) && !state.take(6000, observation));
+    state = {}; CHECK(begin(1000));
+    CHECK(reply(success, 2000) && !state.take(2000, observation)); // TTL exhausted in transit.
+    state = {}; CHECK(begin(UINT64_MAX - 20));
+    CHECK(reply(success, UINT64_MAX - 10) && !state.take(UINT64_MAX - 10, observation));
+    state = {}; CHECK(begin(1000));
+    CHECK(reply(success, 1001) && state.take(1001, observation));
+    CHECK(!state.validate(999, observation)); // A backwards clock cannot revive a lifetime.
+    for (const bool afterReply : {false, true}) {
+        state = {}; CHECK(begin(1000));
+        if (afterReply) CHECK(reply(success, 1001) && state.take(1001, observation));
+        state.revoke(localEpoch); CHECK(afterReply ? state.validate(1001, observation) : state.pending());
+        state.revoke(ticket); CHECK(!state.pending() && !state.validate(1001, observation));
+        CHECK(reply(success, 1002) && !state.take(1002, observation));
+        state = {}; CHECK(begin(1000));
+        if (afterReply) CHECK(reply(success, 1001) && state.take(1001, observation));
+        state.replace(ticket); CHECK(afterReply ? state.validate(1001, observation) : state.pending());
+        state.replace(localEpoch); CHECK(!state.pending() && !state.validate(1001, observation));
+    }
+}
 }
 
 int main() {
@@ -110,5 +213,6 @@ int main() {
     CHECK(intents.accepted(peer, ticket, 100, 1600));
     CHECK(intents.runtime("-", 0, changed) && changed && !intents.ready());
     CHECK(!intents.take(1601, intent));
+    preflight_cases();
     std::printf("PASS: %u companion protocol checks\n", checks);
 }

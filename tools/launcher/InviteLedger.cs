@@ -114,6 +114,17 @@ namespace MultiDawn.Launcher
                 || hostEpoch != outgoing.HostEpoch || guestEpoch != outgoing.GuestEpoch) return null;
             outgoing.Accepted = true; return outgoing;
         }
+        /** Accepted user intent only; a copied result must be revalidated before use. */
+        internal InviteRecord Accepted(ulong peer, string ticket)
+        {
+            if (context == null || peer != context.PeerId || !Token(ticket)) return null;
+            foreach (InviteRecord record in new[] { outgoing, incoming })
+                if (Live(record) && record.Accepted && record.Ticket == ticket) return record;
+            return null;
+        }
+        /** Reference identity prevents replacement records from satisfying a queued query. */
+        internal int RemainingAccepted(InviteRecord record, ulong peer, string ticket)
+        { return record != null && Object.ReferenceEquals(record, Accepted(peer, ticket)) ? Remaining(record) : 0; }
         internal InviteRecord Revoke(string ticket, string hostEpoch, string guestEpoch)
         {
             foreach (InviteRecord record in new[] { outgoing, incoming })
