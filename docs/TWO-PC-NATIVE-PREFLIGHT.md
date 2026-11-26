@@ -87,13 +87,16 @@ The left landing point near Bazaar showed a static view over the exterior
 wall, with mostly sky. Choosing Courtyard fast travel on the right switched
 the Director briefly to its orbit view. A Courtyard arrival notification then
 appeared and the camera showed a closer exterior wall view. Control remained
-unavailable in both locations. The guest's Tower map also displayed one online
-friend. The change in view and arrival notification establish travel feedback,
-while the spawn and control events remain to be checked.
+unavailable in both locations. The change in view and arrival notification
+establish travel feedback, while the spawn and control events remain to be
+checked.
 
-The in-game roster listed the connected peer as `Player` and displayed
-`In Orbit`. The kit's default persona is `Player`, and the connection currently
-publishes whether the peer's game is running, with no live activity location.
+The host's in-game roster showed `1 Friend Online`, with the paired peer in
+**Friends** and only the local player in **Game**. The guest's Director also
+showed `1 Friend Online`. The roster listed the connected peer as `Player` and
+displayed `In Orbit`. The kit's default persona is `Player`, and the connection
+currently publishes whether the peer's game is running, with no live activity
+location.
 Use the guest's own Tower log to verify the activity and spawn. The roster's
 orbit label cannot distinguish the two.
 
