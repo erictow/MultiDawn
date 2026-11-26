@@ -630,6 +630,65 @@ __declspec(noinline) bool __fastcall spawn_gate(std::int32_t datum) noexcept {
     return call.accepts_side_effects() ? decision.result : allowed;
 }
 
+struct TowerControlSample final {
+    bool controlled{}, runtimeFound{}, worldReadable{}, localReady{}, replacing{},
+         loaderReadable{}, loaderBusy{};
+    std::int32_t worldState{-2};
+
+    friend bool operator==(const TowerControlSample&, const TowerControlSample&) noexcept = default;
+};
+
+/** Logs existing frame observations without adding native reads or retaining player handles. */
+void trace_tower_control(state::activity::ActivityInstanceKey tower, TowerControlSample sample,
+                         std::uint64_t now) noexcept {
+    static const bool enabled = [] {
+        std::array<wchar_t, 4> value{};
+        return GetEnvironmentVariableW(L"DAWN_ACTIVITY_BINDING_TRACE", value.data(),
+                                       static_cast<DWORD>(value.size())) == 1 && value[0] == L'1';
+    }();
+    if (!enabled) return;
+
+    static SRWLOCK lock = SRWLOCK_INIT;
+    static state::activity::ActivityInstanceKey priorTower{};
+    static TowerControlSample prior{};
+    static std::uint64_t lastSample{}, missingSince{};
+    static unsigned count{};
+    static bool missingReported{};
+    if (!TryAcquireSRWLockExclusive(&lock)) return;
+    if (count >= 64 || (lastSample != 0 && (now <= lastSample || now - lastSample < 250))) {
+        ReleaseSRWLockExclusive(&lock);
+        return;
+    }
+    const bool changedTower = priorTower != tower;
+    const bool changed = changedTower || sample != prior;
+    lastSample = now;
+    if (sample.controlled || changedTower) {
+        missingSince = 0;
+        missingReported = false;
+    }
+    if (!sample.controlled && missingSince == 0) missingSince = now;
+    const bool stillMissing = !sample.controlled && !missingReported && now - missingSince >= 2'000;
+    if (stillMissing) missingReported = true;
+    priorTower = tower;
+    prior = sample;
+    if (changed || stillMissing) ++count;
+    ReleaseSRWLockExclusive(&lock);
+    if (!changed && !stillMissing) return;
+
+    std::array<char, 256> line{};
+    const int written = std::snprintf(line.data(), line.size(),
+        "ev=bootflow stage=tower_control reason=%s controlled=%u runtime_found=%u world_readable=%u "
+        "world_state=%d local_ready=%u replacement=%u loader_readable=%u loader_busy=%u",
+        stillMissing ? "missing_2s" : "changed", sample.controlled ? 1U : 0U,
+        sample.runtimeFound ? 1U : 0U, sample.worldReadable ? 1U : 0U, sample.worldState,
+        sample.localReady ? 1U : 0U, sample.replacing ? 1U : 0U,
+        sample.loaderReadable ? 1U : 0U, sample.loaderBusy ? 1U : 0U);
+    if (written > 0 && static_cast<std::size_t>(written) < line.size()) {
+        core::log::write(core::log::Channel::client, core::log::Level::info,
+                         {line.data(), static_cast<std::size_t>(written)});
+    }
+}
+
 // Observe only the camera thread's normal native accessors. The server owns
 // reinitialization through a type-5 publication on its existing receive path.
 void poll_tower_recovery(state::activity::ActivityInstanceKey tower,bool hasPlayer) noexcept {
@@ -649,9 +708,10 @@ void poll_tower_recovery(state::activity::ActivityInstanceKey tower,bool hasPlay
         state::activity::tower_spawn_recovery::cancel(tower,state::activity::mission_run_generation());
     }
     const auto loader=hasPlayer?LoaderObservation{}:observe_loader();
+    const auto now = GetTickCount64();
+    const bool replacing = g_playerReplacementPending.load(std::memory_order_acquire);
     if(g_towerRecovery.observe({found?static_cast<std::uint32_t>(lifetime.datum):UINT32_MAX,
-            hasPlayer,initialized,g_playerReplacementPending.load(std::memory_order_acquire),
-            loader.readable && !loader.busy,local},GetTickCount64())) {
+            hasPlayer,initialized,replacing,loader.readable && !loader.busy,local},now)) {
         const auto recovery=state::activity::tower_spawn_recovery::request(tower,
             state::activity::mission_run_generation(),static_cast<std::uint32_t>(lifetime.datum));
         if(recovery.revision) {
@@ -663,6 +723,8 @@ void poll_tower_recovery(state::activity::ActivityInstanceKey tower,bool hasPlay
             core::log::write(core::log::Channel::client,core::log::Level::info,line.data());
         }
     }
+    trace_tower_control(tower, {hasPlayer, found, initialized, local, replacing,
+                               loader.readable, loader.busy, world}, now);
 }
 
 /** Hex of a request record's leading bytes, or "-" when the record cannot be resolved. */

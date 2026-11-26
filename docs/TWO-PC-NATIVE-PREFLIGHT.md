@@ -80,16 +80,19 @@ launchers saved their partner and reported both native game companions connected
 Each game loaded its own Tower. The host snapshot verified the pinned runtime,
 normal spawn completion, and zero remote gameplay peers. The guest reported a
 frozen camera outside the Tower wall even after fast travel. Camera input and
-Dawn's noclip and forward movement controls had no visible effect. Guest world
-entry and controlled Guardian spawn still need confirmation from its log.
+Dawn's noclip and forward movement controls had no visible effect. The same
+Courtyard wall view was later reported on the host.
 
 The left landing point near Bazaar showed a static view over the exterior
 wall, with mostly sky. Choosing Courtyard fast travel on the right switched
 the Director briefly to its orbit view. A Courtyard arrival notification then
 appeared and the camera showed a closer exterior wall view. Control remained
 unavailable in both locations. The change in view and arrival notification
-establish travel feedback, while the spawn and control events remain to be
-checked.
+establish travel feedback. Both logs confirm Tower world entry and a completed
+native teleportation. The guest completed transitions between slices 48 and 0
+and back. Both reached the initial spawn gate. Neither log provides a positive
+controlled-Guardian observation after the affected travel. A completed teleport
+does not establish that the Guardian became controllable.
 
 The host's in-game roster showed `1 Friend Online`, with the paired peer in
 **Friends** and only the local player in **Game**. The guest's Director also
@@ -113,6 +116,13 @@ menu closed. An `ev=noclip stage=toggle` line indicates that Dawn handled the
 key, while actual movement also requires a character physics body. A comparison
 using Solo Play from the same isolated folder, character, and landing zone can
 help narrow down whether the symptom is specific to the paired test launch.
+
+A development runtime running with `DAWN_ACTIVITY_BINDING_TRACE=1` also emits
+`stage=tower_control` from existing Tower camera frame observations. This shows
+whether the local game has a controlled entity, whether the runtime slot is
+present, and whether the game reported readiness. It samples at most four
+times per second and reports changes or a sustained missing entity, with at
+most 64 records per DLL lifetime. It adds no native reads or recovery actions.
 
 ## Build a kit from source
 
