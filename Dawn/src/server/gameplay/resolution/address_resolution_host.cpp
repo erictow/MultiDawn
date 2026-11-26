@@ -272,6 +272,14 @@ bool revoke_peer_address(PeerAddressHandle registered) noexcept {
     return false;
 }
 
+bool validate_peer_address(PeerAddressHandle registered,
+                           std::span<const std::byte> exactAddress) noexcept {
+    if (!enabled() || !registered || exactAddress.size() != codec::NetAddr{}.size()) return false;
+    const Lock lock;
+    const auto* current = registered_address(registered);
+    return current != nullptr && std::equal(exactAddress.begin(), exactAddress.end(), current->address.begin());
+}
+
 bool resolve_address(state::activity::AuthenticationKey owner,
                        std::span<const std::byte> request,
                        std::span<std::byte> response, std::size_t& written) noexcept {

@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "middleware/bap/activity_message/replicate_membership.h"
+#include "core/multiplayer/world_roster_projection.h"
 
 namespace membership = dawn::middleware::bap::activity_message::replicate_membership;
 namespace client_identity = dawn::middleware::bap::activity_message::client_identity;
@@ -401,9 +402,93 @@ void invalid_inputs() {
     refuses(absent);
 }
 
+namespace roster = dawn::core::multiplayer::world_roster;
+std::array<roster::Peer, membership::kMaximumRemoteHumans> registrations{};
+
+bool live_address(roster::resolver::PeerAddressHandle handle, std::span<const std::byte> address) noexcept {
+    for (const auto& row : registrations) {
+        if (row.registeredAddress && row.registeredAddress == handle && address.size() == row.human.address.size()
+            && std::equal(address.begin(), address.end(), row.human.address.begin())) return true;
+    }
+    return false;
+}
+
+void projection_lifecycle() {
+    auto source = with_humans(5);
+    auto base = source;
+    base.remoteHumans = {};
+    base.remoteHumanCount = 0;
+    const roster::Recipient recipient{{{{1, {2}}, {3}}, {4}}, {{800, {5}}, {6}},
+        base.identity.memberKey, base.citizen.memberKey, base.epoch, base.citizen.regionIndex};
+    roster::Projection rosterView;
+    CHECK(!rosterView.open({}) && rosterView.open(recipient));
+    CHECK(rosterView.open(recipient));
+
+    std::array<roster::SlotHandle, membership::kMaximumRemoteHumans> handles{};
+    for (std::size_t index = 0; index < handles.size(); ++index) {
+        registrations[index] = {source.remoteHumans[index], {recipient.binding.authentication, 20 + index}, 80 + index, 1000};
+    }
+    auto refused = [&](const roster::Peer& peer) {
+        roster::SlotHandle handle{999, 2};
+        CHECK(!rosterView.add(recipient, base, peer, 100, &live_address, handle));
+        CHECK(!handle);
+    };
+    auto wrong = registrations[0]; wrong.registeredAddress.owner.generation.value++;
+    refused(wrong);
+    wrong = registrations[0]; wrong.deadline = 100;
+    refused(wrong);
+    wrong = registrations[0]; wrong.human.address[60] ^= std::byte{1};
+    refused(wrong);
+    for (std::size_t index = 0; index < handles.size(); ++index) {
+        CHECK(rosterView.add(recipient, base, registrations[index], 100, &live_address, handles[index]));
+        CHECK(handles[index].nativeSlot == membership::kFirstRemoteHumanSlot + index);
+        refused(registrations[index]);
+    }
+    membership::MembershipSnapshot output{};
+    CHECK(rosterView.project(recipient, base, 999, &live_address, output));
+    CHECK(inspect(output) == inspect(source));
+    auto other = recipient; ++other.region.generation.value;
+    CHECK(!rosterView.open(other));
+    CHECK(!rosterView.project(other, base, 999, &live_address, output));
+    CHECK(!rosterView.project(recipient, base, 1000, &live_address, output));
+    CHECK(output.remoteHumanCount == 5 && membership::member_mask(output) == 127);
+    auto baseWithOwner = base; baseWithOwner.remoteHumans[0] = source.remoteHumans[0];
+    CHECK(!rosterView.project(recipient, baseWithOwner, 999, &live_address, output));
+
+    // Simulate resolver revocation between publications. Refuse the whole projection
+    // until the owner retires the exact row, rather than shifting another player's slot.
+    const auto retiredAddress = registrations[2].registeredAddress;
+    registrations[2].registeredAddress = {};
+    CHECK(!rosterView.project(recipient, base, 999, &live_address, output));
+    roster::resolver::PeerAddressHandle revoke{};
+    CHECK(!rosterView.retire(other, handles[2], revoke) && !revoke);
+    CHECK(rosterView.retire(recipient, handles[2], revoke) && revoke == retiredAddress);
+    CHECK(!rosterView.retire(recipient, handles[2], revoke) && !revoke);
+    CHECK(rosterView.project(recipient, base, 999, &live_address, output));
+    auto sparse = source; sparse.remoteHumans[2] = {};
+    CHECK(inspect(output) == inspect(sparse));
+    refused(registrations[0]);
+
+    auto newEpoch = other; ++newEpoch.epoch;
+    CHECK(!rosterView.open(newEpoch));
+    for (std::size_t index : {0U, 1U, 3U, 4U}) {
+        CHECK(rosterView.retire(recipient, handles[index], revoke) && revoke == registrations[index].registeredAddress);
+    }
+    CHECK(!rosterView.open(other) && rosterView.open(newEpoch));
+    base.epoch = newEpoch.epoch;
+    roster::SlotHandle fresh{};
+    CHECK(rosterView.add(newEpoch, base, registrations[0], 100, &live_address, fresh));
+    CHECK(fresh.nativeSlot == handles[0].nativeSlot && fresh.generation != handles[0].generation);
+    CHECK(!rosterView.retire(newEpoch, handles[0], revoke) && !revoke);
+    CHECK(!rosterView.project(recipient, base, 100, &live_address, output));
+    CHECK(rosterView.project(newEpoch, base, 100, &live_address, output));
+    CHECK(output.remoteHumanCount == 1);
+    same_identity(output.remoteHumans[0].identity, registrations[0].human.identity);
+}
+
 } // namespace
 
 int main() {
-    baselines(); human_cases(); invalid_inputs();
+    baselines(); human_cases(); invalid_inputs(); projection_lifecycle();
     std::printf("PASS remote human membership %u checks; structural encoding only\n", checks);
 }

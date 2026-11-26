@@ -105,3 +105,29 @@ It checks the launcher's live record without consuming the earlier intent event.
 Its expiring result is an observation of invitation state; it does not establish
 the BAP world relationship, carry a guest identity publication or authorize a
 human route. Local validation of a consumed result is not a retained host lease.
+
+## Recipient roster projection
+
+`world_roster::Projection` prepares a BAP membership snapshot for one exact
+recipient binding, host-region lifetime and native membership epoch. The
+handoff controller must supply an already validated human publication and
+grant. It gives the projection the exact resolver registration for that NetAddr
+and the grant deadline. The projection checks the registration again before it
+copies the row into a snapshot. The host control row and local player's row
+remain those of the recipient's existing BAP snapshot.
+
+The projection assigns each human one native slot for the epoch. Revoking a
+row leaves a gap and returns the exact address registration to its owner for
+revocation. The projector refuses stale scopes, expired grants, retired
+registrations and conflicting snapshots without changing the caller's output.
+It refuses to recycle a slot under the same epoch because optional native
+fields can retain the former occupant's data. Moving to a new projection scope
+requires retiring the old rows and proving a new native epoch.
+
+The resolver's `validate_peer_address` checks all 86 bytes with the exact
+registration handle under its own lock. This is a point-in-time check. A
+future controller must serialize grant changes and revalidate before
+committing a publication or forwarding a datagram. The projector neither
+starts a shared session nor validates a guest's opaque properties. It has no
+live caller yet. The membership tests project and decode six-human rows,
+including sparse rows after a departure and retirement across epochs.

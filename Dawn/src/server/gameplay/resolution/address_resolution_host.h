@@ -66,6 +66,10 @@ struct AuthenticatedRoute {
 /** Retires only this registration and all its contexts, preserving control/sibling routes. */
 [[nodiscard]] bool revoke_peer_address(PeerAddressHandle registered) noexcept;
 
+/** Verifies this exact current registration and complete NetAddr without retaining a lease. */
+[[nodiscard]] bool validate_peer_address(PeerAddressHandle registered,
+                                         std::span<const std::byte> exactAddress) noexcept;
+
 /**
  * Answers BAP300 for the configured embedded method-0 control endpoint or an exact
  * registered peer address owned by this authentication. Material remains local and

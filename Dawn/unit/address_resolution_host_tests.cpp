@@ -804,9 +804,13 @@ static void peer_registration_policy() {
     }
     testSettings.server.gameplay.topology = Topology::embedded;
     const auto registered = register_address(a, address);
+    CHECK(host::validate_peer_address(registered, address));
+    CHECK(!host::validate_peer_address({b, registered.generation}, address));
+    CHECK(!host::validate_peer_address(registered, std::span(address).first(address.size() - 1)));
     rejects_registration(a, address);
     rejects_registration(b, address);
     auto sameBody = address; sameBody[72] ^= std::byte{1};
+    CHECK(!host::validate_peer_address(registered, sameBody));
     rejects_registration(a, sameBody);
     rejects_registration(b, sameBody); // No ambiguous native body, even with another opaque tail.
     struct AliasedRegistration { host::PeerAddressHandle handle{}; std::array<std::byte, 86> tail{}; } aliased;
@@ -831,6 +835,7 @@ static void peer_registration_policy() {
     CHECK(!host::revoke_peer_address(wrong));
     CHECK(!host::revoke_peer_address({}));
     CHECK(host::revoke_peer_address(registered) && host::snapshot().live == 0);
+    CHECK(!host::validate_peer_address(registered, address));
     CHECK(!host::revoke_peer_address(registered));
     rejects_resolution(a, request(address));
 
