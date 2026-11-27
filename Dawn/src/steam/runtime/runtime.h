@@ -14,6 +14,9 @@ namespace dawn::steam {
  */
 inline constexpr std::uint64_t kLocalSteamId = 0x0110000130AA9EC5ULL;
 
+/** Non-local owner of the embedded group host's matchmaking lobby. */
+inline constexpr std::uint64_t kEmbeddedHostSteamId = kLocalSteamId + 1;
+
 /** Steam user handle the shim hands out. */
 using UserHandle = std::int32_t;
 

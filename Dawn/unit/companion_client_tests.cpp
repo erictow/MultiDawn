@@ -5,21 +5,25 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
 #include "../src/core/multiplayer/companion.h"
 #include "../src/core/multiplayer/companion_protocol.h"
 #include "../src/core/logging/log.h"
+#include "../src/steam/runtime/runtime.h"
 #include "../src/steam/runtime/social.h"
 
 // The test replaces only the social/log boundary. It exercises the production pipe client.
 namespace fixture {
 constexpr std::uint64_t localId = 0x0110000100000001ULL, remoteId = 0x0110000100000002ULL;
+constexpr std::string_view localPersona = "Local fixture";
 constexpr wchar_t pipeId[] = L"0123456789abcdef0123456789abcdef";
 constexpr char nonce[] = "fedcba9876543210fedcba9876543210";
 std::atomic<unsigned> checks{0};
 std::atomic<unsigned> localPublications{0}, peerPublications{0};
+std::uint64_t publishedLocal{};
 std::atomic<unsigned> tracedRequests{0}, tracedResults{0};
 dawn::steam::social::PeerProfile peer{};
 dawn::steam::social::InviteSender sender{};
@@ -64,10 +68,12 @@ void write(Channel, Level, std::string_view line) noexcept {
 }
 }
 namespace dawn::steam::social {
-bool set_local_identity(std::uint64_t id, std::string_view) noexcept {
-    ++fixture::localPublications; return id == fixture::localId;
+bool set_local_identity(std::uint64_t id, std::string_view name) noexcept {
+    ++fixture::localPublications;
+    fixture::publishedLocal = id;
+    return (id == fixture::localId || id == kLocalSteamId) && name == fixture::localPersona;
 }
-const char* local_persona_name() noexcept { return "Local fixture"; }
+const char* local_persona_name() noexcept { return fixture::localPersona.data(); }
 bool set_peer(const PeerProfile& profile) noexcept {
     ++fixture::peerPublications; fixture::peer = profile; return profile.steamId == fixture::remoteId;
 }
@@ -145,6 +151,7 @@ static void v2_case(const std::vector<std::string>& messages, bool malformed, bo
         (void)ReadFile(pipe, &ignored, 1, &got, nullptr);
     });
     CHECK(client::initialize() && client::connected());
+    CHECK(fixture::publishedLocal == fixture::localId);
     // The native caller cannot downgrade to a ticketless invitation while its
     // protocol-2 peer's runtime capability is unknown, even before service polls.
     CHECK(fixture::sender != nullptr && !fixture::sender(fixture::senderContext, fixture::remoteId, "+too-early"));
@@ -396,7 +403,8 @@ static void traced_acceptance_case(bool revoked) {
     SetEnvironmentVariableW(L"DAWN_ACTIVITY_BINDING_TRACE", nullptr);
 }
 
-static void pinned_handshake_case(const wchar_t* pairGeneration, const wchar_t* peerId, bool expected) {
+static void pinned_handshake_case(const wchar_t* pairGeneration, const wchar_t* peerId, bool expected,
+                                  std::uint64_t welcomePeer = fixture::remoteId) {
     namespace client = dawn::core::multiplayer;
     SetEnvironmentVariableW(L"DAWN_COMPANION_PROTOCOL", L"3");
     SetEnvironmentVariableW(L"DAWN_COMPANION_PAIR_GENERATION", pairGeneration);
@@ -410,7 +418,8 @@ static void pinned_handshake_case(const wchar_t* pairGeneration, const wchar_t* 
     std::thread server([&] {
         CHECK(ConnectNamedPipe(pipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED);
         CHECK(fixture::receive(pipe) == std::string("HELLO 3 ") + fixture::nonce);
-        fixture::send(pipe, "WELCOME 3 76561197960265729 76561197960265730 50656572 1 11111111111111111111111111111111 9");
+        fixture::send(pipe, "WELCOME 3 76561197960265729 " + std::to_string(welcomePeer)
+            + " 50656572 1 11111111111111111111111111111111 9");
         char ignored{}; DWORD got{};
         (void)ReadFile(pipe, &ignored, 1, &got, nullptr);
     });
@@ -419,6 +428,10 @@ static void pinned_handshake_case(const wchar_t* pairGeneration, const wchar_t* 
     CHECK(fixture::localPublications.load() == localsBefore + (expected ? 1U : 0U));
     CHECK(fixture::peerPublications.load() == peersBefore + (expected ? 1U : 0U));
     CHECK((fixture::sender != nullptr) == expected);
+    if (expected) {
+        CHECK(fixture::publishedLocal == dawn::steam::kLocalSteamId);
+        CHECK(fixture::peer.steamId == fixture::remoteId && std::string_view(fixture::peer.name.data()) == "Peer");
+    }
     client::shutdown();
     server.join();
     CloseHandle(pipe);
@@ -509,6 +522,7 @@ int main() {
         (void)ReadFile(pipe, &ignored, 1, &written, nullptr);
     });
     CHECK(client::initialize() && client::connected());
+    CHECK(fixture::publishedLocal == fixture::localId);
     CHECK(fixture::peer.steamId == fixture::remoteId && std::string_view(fixture::peer.name.data()) == "Peer");
     CHECK(fixture::sender != nullptr);
     CHECK(!fixture::sender(fixture::senderContext, fixture::localId, "+join 123"));
@@ -547,6 +561,10 @@ int main() {
     pinned_handshake_case(L"8", L"76561197960265730", false);
     pinned_handshake_case(L"9", L"76561197960265729", false);
     pinned_handshake_case(L"18446744073709551615", L"76561197960265730", false);
+    for (const auto reserved : {dawn::steam::kLocalSteamId, dawn::steam::kEmbeddedHostSteamId}) {
+        const auto peerId = std::to_wstring(reserved);
+        pinned_handshake_case(L"9", peerId.c_str(), false, reserved);
+    }
     SetEnvironmentVariableW(L"DAWN_COMPANION_PROTOCOL", nullptr);
     std::printf("PASS: %u native companion IPC checks\n", fixture::checks.load());
 }

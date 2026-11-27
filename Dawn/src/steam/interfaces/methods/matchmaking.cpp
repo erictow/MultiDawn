@@ -38,9 +38,6 @@ constexpr std::size_t kLobbyDataCapacity = 16;
 constexpr std::size_t kLobbyDataKeyCapacity = 256;
 /** Steam lobby metadata values are at most 8192 bytes, plus the terminator. */
 constexpr std::size_t kLobbyDataValueCapacity = 8193;
-/** The embedded group host needs a non-local owner identity when the client joins its lobby. */
-constexpr std::uint64_t kEmbeddedHostSteamId = kLocalSteamId + 1;
-
 /** Steam lobby-entry callback payload layout. */
 struct LobbyEnter {
     std::uint64_t lobby{};

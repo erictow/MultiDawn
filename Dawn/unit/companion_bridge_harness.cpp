@@ -8,6 +8,7 @@
 #include "../src/core/multiplayer/companion.h"
 #include "../src/core/multiplayer/companion_protocol.h"
 #include "../src/core/logging/log.h"
+#include "../src/steam/runtime/runtime.h"
 #include "../src/steam/runtime/social.h"
 
 namespace fixture {
@@ -80,6 +81,10 @@ int main(int argc, char** argv) {
                                                      static_cast<DWORD>(configuredVersion.size()));
     const bool v3 = versionSize == 1 && configuredVersion[0] == L'3';
     const bool v2 = v3 || (versionSize == 1 && configuredVersion[0] == L'2');
+    if (v3 && fixture::local != dawn::steam::kLocalSteamId) {
+        std::fputs("FAIL: preflight changed the native worker's solo identity\n", stderr);
+        client::shutdown(); return 1;
+    }
     bool sent = false, received = false, accepted = false, intentReceived = false;
     bool preflightRequested = false, preflightObserved = false;
     std::array<char, 33> intentTicket{};

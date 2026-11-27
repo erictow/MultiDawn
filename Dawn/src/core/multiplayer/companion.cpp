@@ -9,6 +9,7 @@
 #include <cstring>
 
 #include "../logging/log.h"
+#include "../../steam/runtime/runtime.h"
 #include "../../steam/runtime/social.h"
 
 namespace dawn::core::multiplayer {
@@ -286,13 +287,15 @@ bool initialize() noexcept {
                && fields.count == (selectedVersion == protocol::kPreflightVersion ? 8U : 6U)
                && fields.values[0] == "WELCOME"
                && fields.values[1] == versionText;
-    std::uint64_t local = 0, remote = 0;
+    std::uint64_t launcherLocal = 0, remote = 0;
     if (accepted) {
-        accepted = protocol::decimal(fields.values[2], local) && protocol::steam_identity(local)
-                   && protocol::decimal(fields.values[3], remote) && remote != local;
+        accepted = protocol::decimal(fields.values[2], launcherLocal) && protocol::steam_identity(launcherLocal)
+            && protocol::decimal(fields.values[3], remote) && protocol::steam_identity(remote)
+            && remote != launcherLocal;
     }
     if (accepted && selectedVersion == protocol::kPreflightVersion) {
-        accepted = protocol::ticket(fields.values[6])
+        accepted = remote != steam::kLocalSteamId && remote != steam::kEmbeddedHostSteamId
+            && protocol::ticket(fields.values[6])
             && protocol::decimal(fields.values[7], g_pairGeneration) && g_pairGeneration != 0;
         if (accepted) std::memcpy(g_localEpoch.data(), fields.values[6].data(), fields.values[6].size());
     }
@@ -303,7 +306,12 @@ bool initialize() noexcept {
         accepted = g_companionGenerationClock != UINT64_MAX;
         if (accepted) g_companionGeneration = ++g_companionGenerationClock;
     }
-    if (accepted) accepted = steam::social::set_local_identity(local, steam::social::local_persona_name()) && apply_peer(fields, true);
+    if (accepted) {
+        // The game's loopback lobby and initial player row still use its solo identity.
+        // The launcher retains its own routing identity for invites and presence.
+        const auto engineLocal = selectedVersion == protocol::kPreflightVersion ? steam::kLocalSteamId : launcherLocal;
+        accepted = steam::social::set_local_identity(engineLocal, steam::social::local_persona_name()) && apply_peer(fields, true);
+    }
     if (accepted) {
         g_lastReceived = GetTickCount64();
         std::array<wchar_t, 4> trace{};
