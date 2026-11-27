@@ -336,12 +336,15 @@ The native test projects are:
   unsupported-layout checks, with the real adapter and production membership
   encoder. Covers scalar-read restrictions, native ownership, unstable samples,
   ambiguous roles, expiry, capacity reclamation and lifecycle fencing.
-- `Dawn/unit/identity_activity_correlation_tests.vcxproj`: 95 managed-session
-  correspondence checks, without assigning semantic meaning to a raw role.
+- `Dawn/unit/native_activity_policy_tests.vcxproj`: includes native facet
+  qualification, exclusion retirement and stale world-connection rejection.
+- `Dawn/unit/identity_activity_correlation_tests.vcxproj`: 143 checks for
+  managed-session correspondence and independent local player corroboration.
 - `Dawn/unit/creator_activity_snapshot_tests.vcxproj`: 67 checks with the real
   BAP coordinator, State query and exact retirement paths.
-- `Dawn/unit/activity_binding_tests.vcxproj`: 85 cross-boundary checks with
-  substituted providers, including stale/changed lifetimes and pin release.
+- `Dawn/unit/activity_binding_tests.vcxproj`: 127 cross-boundary checks with
+  substituted providers, including separate managed and world results,
+  invite receipt revalidation, stale lifetimes and pin release.
 - `Dawn/unit/advertisement_observation_tests.vcxproj`: 133 checks of production
   advertisement observation, unchanged publication and exact lineage failures.
 - `Dawn/unit/packets_discarded_tests.vcxproj`: 973 checks of native ID4's five-bit
