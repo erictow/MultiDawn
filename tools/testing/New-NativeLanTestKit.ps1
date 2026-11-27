@@ -66,7 +66,21 @@ $launcherHash = ($inputs | Where-Object { $_.Path -eq 'MultiDawn.Launcher.exe' }
 $utf8 = New-Object Text.UTF8Encoding($false)
 $launchLines = @('@echo off', ('start "" "%~dp0MultiDawn.Launcher.exe" --native-game-preflight ' + $runtimeHash))
 [IO.File]::WriteAllText((Join-Path $output 'Start-Native-Test.cmd'), (($launchLines -join "`r`n") + "`r`n"), $utf8)
-$prepareLines = @('@echo off', 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\testing\Prepare-NativeGamePreflight.ps1"', 'pause')
+$prepareLines = @(
+    '@echo off'
+    'setlocal DisableDelayedExpansion'
+    'if not "%~2"=="" ('
+    '    echo Drop one Dawn game folder onto this file.'
+    '    pause'
+    '    exit /b 1'
+    ')'
+    'set "MULTIDAWN_PREPARE_SOURCE=%~1"'
+    'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\testing\Prepare-NativeGamePreflight.ps1" -OpenLauncher'
+    'if errorlevel 1 ('
+    '    pause'
+    '    exit /b 1'
+    ')'
+)
 [IO.File]::WriteAllText((Join-Path $output 'Prepare-Test-Game.cmd'), (($prepareLines -join "`r`n") + "`r`n"), $utf8)
 $files = @(Get-ChildItem -LiteralPath $output -Recurse -File | Sort-Object FullName | ForEach-Object {
     [ordered]@{ path = $_.FullName.Substring($output.Length + 1).Replace([char]92, [char]47); size = $_.Length; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }

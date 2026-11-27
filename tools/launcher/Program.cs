@@ -64,11 +64,14 @@ namespace MultiDawn.Launcher
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             string expectedRuntimeHash = null;
+            string preparedFolder = null;
             if (args.Length > 0 && args[0] == "--native-game-preflight") {
-                if (args.Length != 2 || !NativeGamePreflight.IsSha256(args[1])) return 2;
+                if (args.Length < 2 || args.Length > 3 || !NativeGamePreflight.IsSha256(args[1])) return 2;
                 expectedRuntimeHash = args[1].ToUpperInvariant();
+                preparedFolder = args.Length == 3 ? args[2]
+                    : NativeGamePreflight.ReadLatestPreparedFolder(AppDomain.CurrentDomain.BaseDirectory);
             }
-            using (LauncherForm form = new LauncherForm(expectedRuntimeHash))
+            using (LauncherForm form = new LauncherForm(expectedRuntimeHash, preparedFolder))
             {
                 if (args.Length == 2 && args[0] == "--capture-preview")
                 {
@@ -221,8 +224,8 @@ namespace MultiDawn.Launcher
         private System.Windows.Forms.Timer nativeStatusTimer;
         private string nativeTestFailure;
 
-        internal LauncherForm() : this(null) { }
-        internal LauncherForm(string expectedHash)
+        internal LauncherForm() : this(null, null) { }
+        internal LauncherForm(string expectedHash, string preparedFolder)
         {
             if (expectedHash != null && !NativeGamePreflight.IsSha256(expectedHash)) throw new ArgumentException("Invalid native runtime hash.");
             expectedRuntimeHash = expectedHash;
@@ -239,7 +242,8 @@ namespace MultiDawn.Launcher
             configPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MultiDawn", "launcher-path.txt");
             friendStore = new FriendStore(Path.Combine(Path.GetDirectoryName(configPath), "friends.json"));
             BuildControls();
-            LoadPath();
+            if (String.IsNullOrWhiteSpace(preparedFolder)) LoadPath();
+            else gameRoot.Text = preparedFolder;
             LoadFriends(null);
             RefreshState();
             FormClosing += delegate { closing = true; if (runtimeBridge != null) runtimeBridge.Dispose(); if (session != null) session.Dispose(); if (game != null) game.Dispose(); };
@@ -647,6 +651,10 @@ namespace MultiDawn.Launcher
 
         internal static void RunUiSmokeTests(Action<bool, string> check)
         {
+            string preparedFolder = Path.Combine(Path.GetTempPath(), "MultiDawn prepared test");
+            using (LauncherForm native = new LauncherForm(new string('A', 64), preparedFolder))
+                check(native.gameRoot.Text == preparedFolder && native.nativeTest != null && !native.multiplayer.Checked,
+                    "Native launcher opens with the prepared folder selected and waits for Host or Join");
             using (LauncherForm form = new LauncherForm())
             {
                 form.gameRoot.Text = Path.GetTempPath();
@@ -672,7 +680,7 @@ namespace MultiDawn.Launcher
                 check(!form.joinAddress.Enabled && !form.joinPort.Enabled && !form.savedFriends.Enabled && !form.saveFriend.Enabled,
                     "Solo locks saved-friend and endpoint controls");
             }
-            using (LauncherForm form = new LauncherForm(new string('A', 64))) {
+            using (LauncherForm form = new LauncherForm(new string('A', 64), null)) {
                 form.gameRoot.Text = Path.GetTempPath();
                 check(form.nativeTest != null && !form.nativeTest.Enabled, "Explicit native-test launcher mode requires pairing before native game launch");
                 form.multiplayer.Checked = true;

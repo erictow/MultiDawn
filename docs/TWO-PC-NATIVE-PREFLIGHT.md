@@ -14,17 +14,20 @@ two-player milestone, for the three-player fireteam work.
    as that PC's separate game installation. Each PC needs the complete archived
    game build `86657.20.08.23.1800.d2_rc`. The kit supplies the matching Dawn
    runtime, so there is no separate Dawn or Sunrise installation step.
-2. Close Destiny on that PC. Run `Prepare-Test-Game.cmd` and enter the existing
-   local archived game folder when prompted. The helper creates a new isolated
-   installation under the extracted kit's `build/gameplay-tests/` directory.
-   It installs the kit's DLL and runtime content in that new directory only.
+2. Close Destiny on that PC. Drag the existing Dawn game folder that contains
+   `destiny2.exe` onto `Prepare-Test-Game.cmd`. You can also double-click the
+   command and paste the folder path. The helper creates an isolated installation
+   under `build/gameplay-tests/`, installs the kit's runtime there, and opens the
+   launcher with the new test folder selected.
 3. When available, the helper copies that PC's own closed local player database
    into the test install. The source save and settings remain unchanged. With
    no existing save, it creates a fresh profile. `-FreshProfile` explicitly
    skips the local save copy when invoking the PowerShell helper directly.
-4. Keep the printed test-game folder path. Immutable package assets use local
-   hard links to avoid another roughly 90 GB download. Never run a game updater
-   against the isolated test directory, because those package files are shared.
+4. Use `Start-Native-Test.cmd` to reopen the launcher with this kit's latest
+   prepared folder. Run preparation again to create a new test copy. Immutable
+   package assets use local hard links to avoid another roughly 90 GB download.
+   Never run a game updater against the isolated test directory, because those
+   package files are shared.
 5. Keep Steam running as required by your existing Dawn installation. Let each
    PC generate its own `%LOCALAPPDATA%/MultiDawn` identities. Do not copy
    `peer-id.txt` or `steam-id.txt` between PCs.
@@ -35,9 +38,10 @@ helper can share packages through hard links.
 
 ## Pair and launch
 
-1. Run `Start-Native-Test.cmd` on both PCs. This enables a separate **Launch native
-   test** control. Opening `MultiDawn.Launcher.exe` normally keeps the ordinary UI.
-2. Select the newly prepared test-game folder before enabling Multiplayer.
+1. Use the launcher opened by preparation or run `Start-Native-Test.cmd` on
+   both PCs. This enables **Launch native test**.
+2. Confirm that the **Game Folder** box shows the prepared `session-...` folder,
+   then enable Multiplayer.
 3. On the host, enable Multiplayer, select its LAN IPv4 address and choose Host.
    On the other PC, enable Multiplayer, enter the host's current pair code and
    choose Join. Share pair codes privately.
@@ -141,11 +145,19 @@ readiness set. The host also recorded noclip key toggles. The fly-in marker
 therefore accompanies a completed world load on these runs, while the camera
 frame still has no controlled Guardian.
 
-The supplied solo log reached the same Tower spawn gate without authenticating
-a companion. It contained no `tower_control` samples, so it cannot establish
-whether the Guardian became controllable. The other supplied file was the
-previous paired run and reproduced `controlled=0`. No further live run has been
-requested while offline work proceeds.
+The first supplied solo log reached the same Tower spawn gate and contained no
+`tower_control` samples. In the matched `9b90b04a` comparison, the same host
+fixture reached `controlled=1` 78 ms after fly-in in solo mode. In the paired
+run, it stayed at `controlled=0` with loader idle, before any invite acceptance.
+Both runs completed local address resolution. The successful solo run also
+reattached the local replication connection as control became available.
+The paired host later logged `accepted_ticket_verified`, confirming the
+invitation reached the host after the spawn failure.
+
+The paired test now keeps the same in-process Steam identity as solo for
+the local player and loopback lobby. Pairing continues to use the launcher's
+separate identity for friends and invitations. A matched paired launch must
+verify whether this restores control on both PCs.
 
 For a controlled solo comparison, close the game and launcher on one PC after
 saving its log. Run these commands in PowerShell from its extracted kit:

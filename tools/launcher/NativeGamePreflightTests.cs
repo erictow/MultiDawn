@@ -16,7 +16,7 @@ namespace MultiDawn.Launcher
         private const ulong Alice = 0x0110000100001011UL, Bob = 0x0110000100002022UL;
         internal static string Run()
         {
-            report.Clear(); Files(); PairingAsync().GetAwaiter().GetResult(); return report.ToString();
+            report.Clear(); Files(); PreparedFolder(); PairingAsync().GetAwaiter().GetResult(); return report.ToString();
         }
         private static void Check(bool passed, string message)
         { if (!passed) throw new IOException("Native game preflight test failed: " + message); report.AppendLine("PASS: " + message); }
@@ -72,6 +72,34 @@ namespace MultiDawn.Launcher
             finally {
                 foreach (string path in new[] { exe, dll, rootDll, marker, save }) if (File.Exists(path)) File.Delete(path);
                 Directory.Delete(Path.Combine(root, "bin/x64")); Directory.Delete(Path.Combine(root, "bin")); Directory.Delete(root);
+            }
+        }
+
+        private static void PreparedFolder()
+        {
+            string kit = Path.Combine(Path.GetTempPath(), "MultiDawn-Prefill-" + Guid.NewGuid().ToString("N"));
+            string build = Path.Combine(kit, "build");
+            string testRoot = Path.Combine(build, "gameplay-tests");
+            string fixture = Path.Combine(testRoot, "session-noah's-test & copy");
+            string pointer = Path.Combine(build, "latest-native-test-path.txt");
+            string marker = Path.Combine(fixture, "native-test-install.json");
+            Directory.CreateDirectory(fixture);
+            try {
+                Check(NativeGamePreflight.ReadLatestPreparedFolder(kit) == null, "An unprepared kit can fall back to the saved game folder");
+                File.WriteAllText(pointer, fixture + Environment.NewLine, Encoding.UTF8);
+                Check(NativeGamePreflight.ReadLatestPreparedFolder(kit) == null, "A missing fixture marker cannot prefill an incomplete test install");
+                File.WriteAllText(marker, "{}");
+                Check(NativeGamePreflight.ReadLatestPreparedFolder(kit) == fixture,
+                    "Native test startup recovers this kit's exact prepared folder with spaces and punctuation");
+                File.WriteAllText(pointer, "build\\gameplay-tests\\session-noah's-test & copy");
+                Check(NativeGamePreflight.ReadLatestPreparedFolder(kit) == null, "A relative fixture pointer cannot depend on the launch working directory");
+                File.WriteAllText(pointer, kit);
+                Check(NativeGamePreflight.ReadLatestPreparedFolder(kit) == null, "A fixture pointer must stay inside this kit's test tree");
+            }
+            finally {
+                if (File.Exists(marker)) File.Delete(marker);
+                if (File.Exists(pointer)) File.Delete(pointer);
+                Directory.Delete(fixture); Directory.Delete(testRoot); Directory.Delete(build); Directory.Delete(kit);
             }
         }
 

@@ -24,6 +24,32 @@ namespace MultiDawn.Launcher
                 return BitConverter.ToString(algorithm.ComputeHash(stream)).Replace("-", "");
         }
 
+        internal static string ReadLatestPreparedFolder(string kitRoot)
+        {
+            try
+            {
+                string build = Path.Combine(kitRoot, "build");
+                string pointer = Path.Combine(build, "latest-native-test-path.txt");
+                string folder;
+                using (FileStream input = File.Open(pointer, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete)) {
+                    if (input.Length > 64 * 1024) return null;
+                    using (StreamReader reader = new StreamReader(input)) folder = reader.ReadToEnd().Trim();
+                }
+                if (!Path.IsPathRooted(folder)) return null;
+                folder = Path.GetFullPath(folder);
+                string testRoot = Path.GetFullPath(Path.Combine(build, "gameplay-tests")) + Path.DirectorySeparatorChar;
+                if (!folder.StartsWith(testRoot, StringComparison.OrdinalIgnoreCase)
+                    || !File.Exists(Path.Combine(folder, "native-test-install.json"))) return null;
+                return folder;
+            }
+            catch (Exception error)
+            {
+                if (error is IOException || error is UnauthorizedAccessException || error is ArgumentException
+                    || error is NotSupportedException) return null;
+                throw;
+            }
+        }
+
         /** Metadata validation is performed by GameLaunch.Validate separately before these pins. */
         internal static string ValidatePins(string gameRoot, string expectedRuntimeSha256)
         {

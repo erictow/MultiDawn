@@ -6,14 +6,16 @@ Prepares a separate native test installation, retaining this PC's offline progre
 Checks the supplied runtime against its expected SHA-256 before creating a fixture.
 The existing isolated-install helper validates the supported game build and shares
 only immutable package assets. Source saves are opened read-only with writes and
-deletes denied until preparation finishes. No game or launcher is started.
+deletes denied until preparation finishes. OpenLauncher also opens the test kit's
+launcher on the completed fixture. No game is started.
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $SourceGame,
+    [string] $SourceGame,
     [string] $DllPath,
     [string] $ExpectedRuntimeSha256,
-    [switch] $FreshProfile
+    [switch] $FreshProfile,
+    [switch] $OpenLauncher
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -46,6 +48,16 @@ if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
         if ($sourceCommit -notmatch '^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$') { throw 'Invalid source commit in the native LAN test manifest.' }
     }
 }
+if ([string]::IsNullOrWhiteSpace($SourceGame) -and $OpenLauncher) { $SourceGame = $env:MULTIDAWN_PREPARE_SOURCE }
+if ([string]::IsNullOrWhiteSpace($SourceGame)) {
+    $SourceGame = Read-Host 'Path to your Dawn game folder'
+}
+$SourceGame = ([string] $SourceGame).Trim()
+if ($SourceGame.Length -ge 2 -and $SourceGame.StartsWith('"') -and $SourceGame.EndsWith('"')) {
+    $SourceGame = $SourceGame.Substring(1, $SourceGame.Length - 2)
+}
+if ([string]::IsNullOrWhiteSpace($SourceGame)) { throw 'Enter or drop a Dawn game folder.' }
+
 if ([string]::IsNullOrWhiteSpace($DllPath)) { $DllPath = Join-Path $repo 'runtime/steam_api64.dll' }
 if ([string]::IsNullOrWhiteSpace($ExpectedRuntimeSha256)) {
     if ($null -eq $manifest) { throw 'Supply ExpectedRuntimeSha256 or use a kit containing native-lan-test.json.' }
@@ -53,6 +65,19 @@ if ([string]::IsNullOrWhiteSpace($ExpectedRuntimeSha256)) {
 }
 if ($ExpectedRuntimeSha256 -notmatch '^[0-9a-fA-F]{64}$') { throw 'ExpectedRuntimeSha256 must contain exactly 64 hexadecimal characters.' }
 $expectedHash = $ExpectedRuntimeSha256.ToUpperInvariant()
+$launcher = $null
+if ($OpenLauncher) {
+    if ($null -eq $manifest -or [string] $manifest.runtimeSha256 -ine $expectedHash -or
+            [string] $manifest.launcherSha256 -notmatch '^[0-9a-fA-F]{64}$') {
+        throw 'Opening the launcher requires a matching native LAN test kit manifest.'
+    }
+    $launcher = Get-Item -LiteralPath (Join-Path $repo 'MultiDawn.Launcher.exe')
+    if ($launcher.PSIsContainer) { throw 'MultiDawn.Launcher.exe must be a file.' }
+    Assert-PlainItem $launcher
+    if ((Get-FileHash -LiteralPath $launcher.FullName -Algorithm SHA256).Hash -ine $manifest.launcherSha256) {
+        throw 'Launcher SHA-256 does not match the test kit. Extract a fresh copy of the kit.'
+    }
+}
 $dll = Get-Item -LiteralPath $DllPath
 if ($dll.PSIsContainer) { throw 'DllPath must identify a file.' }
 Assert-PlainItem $dll
@@ -153,11 +178,22 @@ try {
     $pendingReady = $ready + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
     [IO.File]::WriteAllText($pendingReady, $output + [Environment]::NewLine, $utf8)
     Move-Item -LiteralPath $pendingReady -Destination $ready -Force
-    Write-Output $output
 } finally {
     foreach ($profile in $profiles) {
         if ($null -ne $profile.Wal) { $profile.Wal.Dispose() }
         if ($null -ne $profile.Database) { $profile.Database.Dispose() }
     }
     if ($null -ne $dllStream) { $dllStream.Dispose() }
+}
+
+Write-Output $output
+if ($OpenLauncher) {
+    # The generated fixture path has no trailing separator or embedded quotes.
+    $start = [Diagnostics.ProcessStartInfo]::new($launcher.FullName)
+    $start.UseShellExecute = $false
+    $start.WorkingDirectory = $repo
+    $start.Arguments = '--native-game-preflight {0} "{1}"' -f $expectedHash, $output
+    $process = [Diagnostics.Process]::Start($start)
+    if ($null -eq $process) { throw 'The native test launcher did not start.' }
+    $process.Dispose()
 }

@@ -6,7 +6,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
 $testRoot = Join-Path $repo ('build/native-preflight-tests/' + [Guid]::NewGuid().ToString('N'))
-$kit = Join-Path $testRoot 'kit [literal]'
+$kit = Join-Path $testRoot 'kit O''Connor & [literal]'
 $testing = Join-Path $kit 'tools/testing'
 [IO.Directory]::CreateDirectory($testing) | Out-Null
 Copy-Item -LiteralPath (Join-Path $repo 'tools/testing/Prepare-NativeGamePreflight.ps1') -Destination $testing
@@ -53,7 +53,6 @@ function Get-Process {
     if ($Name -ne 'destiny2') { throw 'Unexpected process query.' }
     if ($global:NativePreflightPretendRunning) { [pscustomobject]@{ Id = 123; ProcessName = 'destiny2' } }
 }
-
 $stub = @'
 [CmdletBinding()]
 param([string] $SourceGame, [string] $DllPath)
@@ -96,12 +95,47 @@ Write-File $dll 'small test runtime bytes; never loaded'
 $hash = (Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash
 $commit = '0123456789abcdef0123456789abcdef01234567'
 $manifestPath = Join-Path $kit 'native-lan-test.json'
-Write-File $manifestPath (([ordered]@{ schema=1; sourceCommit=$commit; runtimeSha256=$hash; launcherSha256=('B' * 64) }) | ConvertTo-Json)
+$launcher = Join-Path $kit 'MultiDawn.Launcher.exe'
+$launchCapture = Join-Path $kit 'captured-launch.txt'
+$captureSource = Join-Path $testRoot 'CaptureLauncher.cs'
+Write-File $captureSource @'
+using System;
+using System.IO;
+public static class CaptureLauncher
+{
+    public static void Main(string[] args)
+    {
+        string receipt = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "captured-launch.txt");
+        bool sourceUnlocked = false;
+        string source = Environment.GetEnvironmentVariable("MULTIDAWN_PREPARE_SOURCE");
+        if (!String.IsNullOrEmpty(source))
+        {
+            try
+            {
+                using (File.Open(Path.Combine(source, @"bin\x64\Dawn\player-state.db"),
+                    FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { sourceUnlocked = true; }
+            }
+            catch (IOException) { }
+        }
+        string[] report = new string[args.Length + 1];
+        Array.Copy(args, report, args.Length);
+        report[args.Length] = sourceUnlocked ? "unlocked" : "locked";
+        File.WriteAllLines(receipt + ".tmp", report);
+        File.Move(receipt + ".tmp", receipt);
+    }
+}
+'@
+$compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+if (-not (Test-Path -LiteralPath $compiler)) { $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework/v4.0.30319/csc.exe' }
+& $compiler /nologo /target:winexe "/out:$launcher" $captureSource
+Assert ($LASTEXITCODE -eq 0) 'Could not compile the synthetic launcher'
+$launcherHash = (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash
+Write-File $manifestPath (([ordered]@{ schema=1; sourceCommit=$commit; runtimeSha256=$hash; launcherSha256=$launcherHash }) | ConvertTo-Json)
 $lockMarker = Join-Path $kit 'expect-save-locks.txt'
 Write-File $lockMarker 'required'
 $source = New-Source 'own game [literal]'
 $before = Snapshot $source
-$output = & $prepare -SourceGame $source
+$output = & $prepare -SourceGame ('"' + $source + '"')
 $runtime = Join-Path $output 'bin/x64/Dawn'
 Assert ([IO.File]::ReadAllText((Join-Path $runtime 'player-state.db')) -ceq 'local progress: own game [literal]') 'Database bytes changed'
 Assert ([IO.File]::ReadAllText((Join-Path $runtime 'player-state.db-wal')) -ceq 'pending local progress: own game [literal]') 'WAL bytes changed'
@@ -119,7 +153,32 @@ Assert ($settings.core.logging.file_sink -and $settings.core.logging.levels.clie
     $settings.core.logging.levels.core -ceq 'info' -and $settings.core.logging.levels.state -ceq 'warn' -and $settings.keep -ceq 'unchanged') 'Logging changed unrelated settings'
 $ready = Join-Path $kit 'build/latest-native-test-path.txt'
 Assert ([IO.File]::ReadAllText($ready).Trim() -ceq $output) 'Ready path does not identify the completed fixture'
+Assert (-not (Test-Path -LiteralPath $launchCapture)) 'Preparation launched a process without OpenLauncher'
 Pass 'Fixture logging, provenance, existing metadata and latest-ready path are correct'
+$dropSource = New-Source ('guest ' + [char]0x00E9 + ' O''Connor & friends [literal]')
+$dropBefore = Snapshot $dropSource
+$originalDrop = $env:MULTIDAWN_PREPARE_SOURCE
+try {
+    $env:MULTIDAWN_PREPARE_SOURCE = $dropSource
+    $openedFixture = & $prepare -OpenLauncher
+    for ($attempt = 0; $attempt -lt 50 -and -not (Test-Path -LiteralPath $launchCapture); ++$attempt) { Start-Sleep -Milliseconds 100 }
+    $capture = [IO.File]::ReadAllLines($launchCapture)
+    Assert ($capture.Count -eq 4 -and $capture[0] -ceq '--native-game-preflight' -and $capture[1] -ceq $hash -and
+        $capture[2] -ceq $openedFixture -and $capture[3] -ceq 'unlocked') 'Launcher did not receive the pinned fixture after releasing source locks'
+    Assert ([IO.File]::ReadAllText($ready).Trim() -ceq $openedFixture) 'Successful drop did not open the new fixture'
+    $dropSave = [IO.File]::ReadAllText((Join-Path $openedFixture 'bin/x64/Dawn/player-state.db'))
+    Assert ($dropSave -ceq ('local progress: ' + (Split-Path -Leaf $dropSource))) 'Dropped path chose a different save'
+    Assert ((Snapshot $dropSource) -ceq $dropBefore) 'Dropped folder contents changed'
+    $calls = Calls
+    $readyBefore = [IO.File]::ReadAllText($ready)
+    $launcherBytes = [IO.File]::ReadAllBytes($launcher)
+    try {
+        Write-File $launcher 'mismatched launcher bytes'
+        Refuses { & $prepare -OpenLauncher } '*Launcher SHA-256 does not match*'
+        Assert ((Calls) -ceq $calls -and [IO.File]::ReadAllText($ready) -ceq $readyBefore) 'Launcher mismatch created a fixture'
+    } finally { [IO.File]::WriteAllBytes($launcher, $launcherBytes) }
+} finally { $env:MULTIDAWN_PREPARE_SOURCE = $originalDrop }
+Pass 'Quoted source and dropped paths retain their literal spelling; the pinned launcher opens only after successful preparation and lock release'
 $calls = Calls
 $readyBefore = [IO.File]::ReadAllText($ready)
 Refuses { & $prepare -SourceGame $source -ExpectedRuntimeSha256 ('0' * 64) } '*SHA-256 does not match*'
