@@ -106,6 +106,29 @@ Its expiring result is an observation of invitation state; it does not establish
 the BAP world relationship, carry a guest identity publication or authorize a
 human route. Local validation of a consumed result is not a retained host lease.
 
+### Local world binding at invite acceptance
+
+The paired `f89bd0ad` logs showed two controllable Guardians and two distinct
+locally advertised Tower hosts. Each native world connection reached that PC's
+embedded control peer, while each managed table retained only its local human.
+The matching numeric activity-session field was insufficient to identify one
+shared instance.
+
+`activity_binding::inspect_world` now joins the exact creator, region and
+advertisement pin to an accepted connection from the existing native facet
+hooks. It confirms the control member and creator machine in that connection,
+then requires two current managed tables to agree on the creator's native
+player ID. It also checks the local authenticated gameplay route and rechecks
+all of these lifetimes before returning. Removing or reusing the native facet
+binding invalidates its observation.
+
+The native test can report `ev=world_activity_binding` at local world bind and
+when it verifies an accepted invite. The invite receipt is revalidated after
+capture and the event carries no ticket, player ID or route. The result is a
+process-local observation with no remote admission. The next integration is to
+use the verified local bindings to exchange the two players' scoped handoff
+information and install the host's activity routes.
+
 ## Recipient roster projection
 
 `world_roster::Projection` prepares a BAP membership snapshot for one exact

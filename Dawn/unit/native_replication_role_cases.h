@@ -34,4 +34,55 @@ void native_replication_role_cases() {
     CHECK(!bindings.remember({999,888,5},0,0)); // Capacity exhaustion forwards native registration.
     for(unsigned i=0;i<128;++i)CHECK(bindings.remove(100+i,5,0,0));
     CHECK(bindings.size()==0);
+
+    const b::Binding first{100,200,0}, second{101,201,0};
+    const auto snapshot = [&](b::Excluded::WorldConnection& observation) {
+        r::Address observedAddress{};
+        const bool found = bindings.snapshot_world(90,91,observation,observedAddress);
+        CHECK(observedAddress == (found ? address : r::Address{}));
+        return found;
+    };
+    b::Excluded::WorldConnection observation{};
+    CHECK(!bindings.stage_world(first,90,91,10,address));
+    CHECK(bindings.remember(first,0,0));
+    const auto pending = bindings.stage_world(first,90,91,10,address);
+    CHECK(pending && !snapshot(observation));
+    bindings.complete_world(first,pending,false);
+    CHECK(!snapshot(observation) && observation == b::Excluded::WorldConnection{});
+    const auto accepted = bindings.stage_world(first,90,91,10,address);
+    CHECK(accepted > pending);
+    bindings.complete_world(first,pending,true);
+    CHECK(!snapshot(observation));
+    bindings.complete_world(first,accepted,true);
+    CHECK(snapshot(observation));
+    CHECK(observation.generation==accepted && observation.controlEpoch==10
+        && observation.creatorMachineId==90 && observation.controlMachineId==91);
+
+    CHECK(bindings.remember(second,0,0));
+    const auto duplicate = bindings.stage_world(second,90,91,10,address);
+    CHECK(duplicate > accepted && !snapshot(observation));
+    bindings.complete_world(second,duplicate,true);
+    CHECK(!snapshot(observation) && observation == b::Excluded::WorldConnection{});
+    CHECK(!bindings.remove(second.manager,second.index,999,1)); // Reused native slot still retires observation.
+    CHECK(snapshot(observation) && observation.generation==accepted);
+    CHECK(bindings.remove(first.manager,first.index,0,0));
+    CHECK(!snapshot(observation));
+
+    CHECK(bindings.remember(first,0,0));
+    const auto reused = bindings.stage_world(first,90,91,11,address);
+    bindings.complete_world(first,accepted,true);
+    CHECK(reused > duplicate && !snapshot(observation));
+    bindings.complete_world(first,reused,true);
+    CHECK(snapshot(observation) && observation.generation==reused && observation.controlEpoch==11);
+    bindings.invalidate_world(first.manager,first.index);
+    CHECK(!snapshot(observation) && bindings.size()==1);
+    const auto afterInvalidation = bindings.stage_world(first,90,91,11,address);
+    bindings.complete_world(first,afterInvalidation,true);
+    CHECK(!bindings.stage_world(first,91,91,11,address) && !snapshot(observation));
+    const auto beforeQuiesce = bindings.stage_world(first,90,91,11,address);
+    bindings.clear_world_observations();
+    bindings.complete_world(first,beforeQuiesce,true);
+    CHECK(!snapshot(observation) && bindings.remove(first.manager,first.index,0,0));
+    CHECK(bindings.remember(first,0,0));
+    CHECK(bindings.stage_world(first,90,91,12,address)>beforeQuiesce);
 }

@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdio>
 
+#include "companion.h"
 #include "../logging/log.h"
 #include "../../client/hooks/bootflow/native_identity_observation.h"
 #include "../../server/gameplay/gameplay_advertisement.h"
@@ -11,6 +12,7 @@
 namespace dawn::core::multiplayer::activity_binding {
 namespace {
 namespace native = client::hooks::bootflow::native_identity_observation;
+namespace world_view = client::hooks::bootflow::native_replication_observer;
 namespace gameplay = server::gameplay;
 
 struct DiagnosticSource { std::uint64_t fingerprint{}; std::int32_t region{-1}; };
@@ -33,6 +35,12 @@ public:
     LineagePin() = default;
     LineagePin(const LineagePin&) = delete;
     LineagePin& operator=(const LineagePin&) = delete;
+};
+
+struct Source final {
+    server::bap::CreatorActivitySnapshot creator{};
+    gameplay::AdvertisedActivityObservation advertisement{};
+    LineagePin pin{};
 };
 
 [[nodiscard]] bool same_route(const gameplay::resolution::AuthenticatedRoute& a,
@@ -60,30 +68,45 @@ public:
     case Result::malformedManagedGroup: return "malformed_managed_group";
     case Result::noAuthenticatedRoute: return "no_authenticated_route";
     case Result::changed: return "changed_during_capture";
+    case Result::noWorldConnection: return "no_exact_world_connection";
+    case Result::noWorldHuman: return "no_corroborated_world_human";
+    case Result::ambiguousWorldHuman: return "ambiguous_world_human";
+    case Result::malformedWorldHuman: return "malformed_world_human";
     }
     return "unknown";
 }
 
+struct DiagnosticHistory {
+    Result result{};
+    DiagnosticSource source{};
+    unsigned events{};
+
+    [[nodiscard]] bool record(Result latest, DiagnosticSource value) noexcept {
+        if (events >= 128 || (events != 0 && result == latest
+            && source.fingerprint == value.fingerprint && source.region == value.region)) return false;
+        ++events;
+        result = latest;
+        source = value;
+        return true;
+    }
+};
+
 SRWLOCK g_traceLock = SRWLOCK_INIT;
 std::uint64_t g_lastPoll{};
-unsigned g_events{};
-Result g_lastResult{};
-DiagnosticSource g_lastSource{};
-bool g_polled{}, g_reported{};
-} // namespace
+bool g_polled{};
+DiagnosticHistory g_managedHistory{}, g_worldHistory{};
 
-static Result inspect_impl(std::uint64_t now, Observation& output, DiagnosticSource* source) noexcept {
-    output = {};
-    if (source != nullptr) *source = {};
+[[nodiscard]] Result inspect_source(Source& source, DiagnosticSource* diagnostic) noexcept {
+    if (diagnostic != nullptr) *diagnostic = {};
     if (!native::enabled()) return Result::disabled;
-    server::bap::CreatorActivitySnapshot creator{};
+    auto& creator = source.creator;
     if (!server::bap::snapshot_current_creator_activity(creator)) return Result::noCreator;
     if (!static_cast<bool>(creator.binding) || !creator.lineage.owns(creator.hostRegion.activity)
         || creator.hostRegion.activity != creator.lineage.bound || creator.memberKey == 0
         || creator.reportedRegion < 0) return Result::noCreator;
 
-    LineagePin pin;
-    gameplay::AdvertisedActivityObservation advertisement{};
+    auto& pin = source.pin;
+    auto& advertisement = source.advertisement;
     if (!gameplay::acquire_advertisement_observation(creator.lineage.bound, creator.reportedRegion,
                                                  advertisement, pin.value)
         || advertisement.readiness != gameplay::AdvertisementReadiness::ready
@@ -96,8 +119,83 @@ static Result inspect_impl(std::uint64_t now, Observation& output, DiagnosticSou
         || advertisement.groupMachineId != pin.value.groupSessionId
         || !gameplay::group::validate_host_activity_lineage(pin.value)) return Result::noAdvertisement;
 
-    if (source != nullptr)
-        *source = {source_fingerprint(creator.memberKey, advertisement.groupMachineId), creator.reportedRegion};
+    if (diagnostic != nullptr)
+        *diagnostic = {source_fingerprint(creator.memberKey, advertisement.groupMachineId), creator.reportedRegion};
+    return Result::observed;
+}
+
+[[nodiscard]] bool read_route(const Source& source, gameplay::resolution::AuthenticatedRoute& route) noexcept {
+    const auto owner = source.creator.binding.authentication;
+    return gameplay::resolution::lookup_authenticated_route(owner, route)
+        && route.handle.owner == owner && static_cast<bool>(route.handle)
+        && route.source.address != 0 && route.source.port != 0;
+}
+
+[[nodiscard]] bool current_creator(const Source& source) noexcept {
+    server::bap::CreatorActivitySnapshot latest{};
+    return server::bap::snapshot_creator_activity(source.creator.binding, latest) && latest == source.creator;
+}
+
+[[nodiscard]] bool current_route_and_lineage(const Source& source,
+                                             const gameplay::resolution::AuthenticatedRoute& route) noexcept {
+    return gameplay::resolution::validate_authenticated_route(route)
+        && gameplay::group::validate_host_activity_lineage(source.pin.value);
+}
+
+[[nodiscard]] bool read_world(const Source& source, world_view::WorldConnection& output) noexcept {
+    return world_view::snapshot_world_connection(source.creator.memberKey, source.advertisement.groupMachineId, output)
+        && output.creatorMachineId == source.creator.memberKey
+        && output.controlMachineId == source.advertisement.groupMachineId
+        && output.controlEpoch != 0 && output.generation != 0;
+}
+
+[[nodiscard]] Result read_world_human(const Source& source, std::uint64_t now,
+                                      identity_activity::WorldHuman& output) noexcept {
+    std::array<identity_observation::Observation, identity_observation::kManagerCapacity> observations{};
+    std::size_t count{};
+    if (!native::collect(observations, now, count) || count > observations.size()) return Result::changed;
+    switch (identity_activity::corroborate_world_human(source.creator.memberKey,
+                                             std::span(observations).first(count), now, output)) {
+    case identity_activity::Result::matched: return Result::observed;
+    case identity_activity::Result::noMatch: return Result::noWorldHuman;
+    case identity_activity::Result::ambiguous: return Result::ambiguousWorldHuman;
+    case identity_activity::Result::invalidInput: return Result::malformedWorldHuman;
+    }
+    return Result::changed;
+}
+
+[[nodiscard]] Result inspect_world_impl(std::uint64_t now, WorldObservation& output,
+                                        DiagnosticSource* diagnostic) noexcept {
+    output = {};
+    Source source{};
+    if (const auto result = inspect_source(source, diagnostic); result != Result::observed) return result;
+    WorldObservation candidate{};
+    if (!read_world(source, candidate.world)) return Result::noWorldConnection;
+    if (const auto result = read_world_human(source, now, candidate.human); result != Result::observed) return result;
+    if (!read_route(source, candidate.route)) return Result::noAuthenticatedRoute;
+
+    world_view::WorldConnection currentWorld{};
+    identity_activity::WorldHuman currentHuman{};
+    if (!current_creator(source)
+        || read_world_human(source, now, currentHuman) != Result::observed
+        || !identity_activity::same_world_human(candidate.human, currentHuman)
+        || !read_world(source, currentWorld) || currentWorld != candidate.world
+        || !current_route_and_lineage(source, candidate.route)) return Result::changed;
+
+    candidate.creator = source.creator;
+    candidate.host = source.advertisement.host;
+    candidate.lineageGeneration = source.pin.value.rowGeneration;
+    candidate.human = currentHuman;
+    output = candidate;
+    return Result::observed;
+}
+
+[[nodiscard]] Result inspect_impl(std::uint64_t now, Observation& output, DiagnosticSource* diagnostic) noexcept {
+    output = {};
+    Source source{};
+    if (const auto result = inspect_source(source, diagnostic); result != Result::observed) return result;
+    const auto& creator = source.creator;
+    const auto& advertisement = source.advertisement;
 
     std::array<identity_observation::Observation, identity_observation::kManagerCapacity> observations{};
     std::size_t count{};
@@ -112,30 +210,27 @@ static Result inspect_impl(std::uint64_t now, Observation& output, DiagnosticSou
     }
 
     gameplay::resolution::AuthenticatedRoute route{};
-    if (!gameplay::resolution::lookup_authenticated_route(creator.binding.authentication, route)
-        || route.handle.owner != creator.binding.authentication || !static_cast<bool>(route.handle)
-        || route.source.address == 0 || route.source.port == 0) return Result::noAuthenticatedRoute;
+    if (!read_route(source, route)) return Result::noAuthenticatedRoute;
 
     // Reobserve after crossing independently locked boundaries. No resolver/group lock is held
     // while asking BAP or the native collector for a current copied value.
-    server::bap::CreatorActivitySnapshot current{};
-    if (!server::bap::snapshot_creator_activity(creator.binding, current) || current != creator
+    if (!current_creator(source)
         || !native::collect(observations, now, count) || count > observations.size()) return Result::changed;
     identity_activity::Correlation again{};
     if (identity_activity::correlate(creator.memberKey, advertisement.groupMachineId,
             std::span(observations).first(count), now, again) != identity_activity::Result::matched
         || !identity_activity::same_correspondence(again, match)
-        || !gameplay::resolution::validate_authenticated_route(route)
-        || !gameplay::group::validate_host_activity_lineage(pin.value)) return Result::changed;
+        || !current_route_and_lineage(source, route)) return Result::changed;
 
     output.creator = creator;
     output.host = advertisement.host;
     output.groupMachineId = advertisement.groupMachineId;
-    output.lineageGeneration = pin.value.rowGeneration;
+    output.lineageGeneration = source.pin.value.rowGeneration;
     output.native = again;
     output.route = route;
     return Result::observed;
 }
+} // namespace
 
 Result inspect(std::uint64_t now, Observation& output) noexcept {
     return inspect_impl(now, output, nullptr);
@@ -154,6 +249,34 @@ bool validate(const Observation& previous, std::uint64_t now) noexcept {
         && same_route(current.route, previous.route);
 }
 
+Result inspect_world(std::uint64_t now, WorldObservation& output) noexcept {
+    return inspect_world_impl(now, output, nullptr);
+}
+
+bool validate_world(const WorldObservation& previous, std::uint64_t now) noexcept {
+    if (!static_cast<bool>(previous.creator.binding) || previous.world.generation == 0
+        || previous.human.playerId == 0 || now < previous.human.sampledAt
+        || now - previous.human.sampledAt > identity_observation::kMaximumAgeMs) return false;
+    WorldObservation current{};
+    if (inspect_world(now, current) != Result::observed) return false;
+    return current.creator == previous.creator && current.host == previous.host
+        && current.lineageGeneration == previous.lineageGeneration
+        && current.world == previous.world && identity_activity::same_world_human(current.human, previous.human)
+        && same_route(current.route, previous.route);
+}
+
+void trace_invitation_world(const InvitationPreflightObservation& invitation) noexcept {
+    if (!validate_traced_invitation_preflight(invitation)) return;
+    WorldObservation observed{};
+    const auto result = inspect_world(GetTickCount64(), observed);
+    if (!validate_traced_invitation_preflight(invitation)) return;
+    std::array<char, 144> line{};
+    const int size = std::snprintf(line.data(), line.size(),
+        "ev=world_activity_binding stage=accepted_invite result=%s admission=0", name(result));
+    if (size > 0 && static_cast<std::size_t>(size) < line.size())
+        log::write(log::Channel::core, log::Level::info, {line.data(), static_cast<std::size_t>(size)});
+}
+
 void service(std::uint64_t now) noexcept {
     if (!trace_requested() || !TryAcquireSRWLockExclusive(&g_traceLock)) return;
     const bool due = !g_polled || now < g_lastPoll || now - g_lastPoll >= 500;
@@ -163,14 +286,15 @@ void service(std::uint64_t now) noexcept {
     Observation observed{};
     DiagnosticSource source{};
     const Result result = inspect_impl(GetTickCount64(), observed, &source);
-    bool report{};
+    WorldObservation world{};
+    DiagnosticSource worldSource{};
+    const auto worldResult = inspect_world_impl(GetTickCount64(), world, &worldSource);
+
     AcquireSRWLockExclusive(&g_traceLock);
-    if (g_events < 128 && (!g_reported || result != g_lastResult
-        || source.fingerprint != g_lastSource.fingerprint || source.region != g_lastSource.region)) {
-        ++g_events; g_reported = true; g_lastResult = result; g_lastSource = source; report = true;
-    }
+    const bool reportManaged = g_managedHistory.record(result, source);
+    const bool reportWorld = g_worldHistory.record(worldResult, worldSource);
     ReleaseSRWLockExclusive(&g_traceLock);
-    if (report) {
+    if (reportManaged) {
         std::array<char, 192> line{};
         const int size = std::snprintf(line.data(), line.size(),
             "ev=activity_binding pid=%lu result=%s source_fingerprint=0x%016llX region=%d admission=0",
@@ -178,12 +302,23 @@ void service(std::uint64_t now) noexcept {
         if (size > 0 && static_cast<std::size_t>(size) < line.size())
             log::write(log::Channel::core, log::Level::info, {line.data(), static_cast<std::size_t>(size)});
     }
+
+    if (reportWorld) {
+        std::array<char, 144> line{};
+        const int size = std::snprintf(line.data(), line.size(),
+            "ev=world_activity_binding stage=local_world result=%s region=%d admission=0",
+            name(worldResult), worldSource.region);
+        if (size > 0 && static_cast<std::size_t>(size) < line.size())
+            log::write(log::Channel::core, log::Level::info, {line.data(), static_cast<std::size_t>(size)});
+    }
 }
 
 void reset() noexcept {
     AcquireSRWLockExclusive(&g_traceLock);
-    g_lastPoll = 0; g_events = 0; g_polled = false; g_reported = false;
-    g_lastSource = {};
+    g_lastPoll = 0;
+    g_polled = false;
+    g_managedHistory = {};
+    g_worldHistory = {};
     ReleaseSRWLockExclusive(&g_traceLock);
 }
 

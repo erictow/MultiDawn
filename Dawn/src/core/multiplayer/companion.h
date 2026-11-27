@@ -5,13 +5,15 @@
 
 namespace dawn::core::multiplayer {
 
+struct InvitationPreflightObservation;
+
 /**
  * Optional authenticated launcher IPC; absent configuration keeps direct solo launch.
  * Protocol3 child pair/peer pins, when supplied together, must match WELCOME before publication.
  */
 [[nodiscard]] bool initialize() noexcept;
-/** Polls bounded local IPC work; never opens the existing account backend to a remote PC. */
-void service(std::uint64_t now) noexcept;
+/** Polls bounded local IPC work and optionally copies the one-shot private trace receipt. */
+void service(std::uint64_t now, InvitationPreflightObservation* traced = nullptr) noexcept;
 void shutdown() noexcept;
 [[nodiscard]] bool connected() noexcept;
 /** True only when both current runtimes support ticketed intent exchange, not gameplay joining. */
@@ -41,5 +43,7 @@ struct InvitationPreflightObservation {
 [[nodiscard]] bool take_invitation_preflight(InvitationPreflightObservation& output) noexcept;
 /** Rechecks current local pipe/epochs and revocation; not a fresh launcher requery or lease. */
 [[nodiscard]] bool validate_invitation_preflight(const InvitationPreflightObservation& observed) noexcept;
+/** Rechecks the private trace receipt and its current accepted intent after local observation. */
+[[nodiscard]] bool validate_traced_invitation_preflight(const InvitationPreflightObservation& observed) noexcept;
 
 } // namespace dawn::core::multiplayer

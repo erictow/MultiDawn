@@ -380,24 +380,53 @@ static void traced_acceptance_case(bool revoked) {
                 + ticket + " 9 11111111111111111111111111111111 22222222222222222222222222222222 59000");
         }
         SetEvent(ready);
+        if (!revoked) {
+            CHECK(WaitForSingleObject(drained, 5000) == WAIT_OBJECT_0);
+            fixture::send(pipe, "REVOKED " + ticket);
+            SetEvent(ready);
+        }
         char ignored{}; DWORD got{};
         (void)ReadFile(pipe, &ignored, 1, &got, nullptr);
     });
     CHECK(client::initialize());
     CHECK(WaitForSingleObject(ready, 5000) == WAIT_OBJECT_0);
-    client::service(GetTickCount64());
+    client::InvitationPreflightObservation traced{};
+    traced.requestGeneration = 1;
+    client::service(GetTickCount64(), &traced);
+    CHECK(traced == client::InvitationPreflightObservation{});
     client::AcceptedInvitationIntent intent{};
     CHECK(client::take_accepted_invitation(intent) == !revoked);
     if (!revoked) CHECK(intent.ticket.data() == ticket && intent.peerSteamId == fixture::remoteId);
     SetEvent(drained);
     CHECK(WaitForSingleObject(ready, 5000) == WAIT_OBJECT_0);
-    client::service(GetTickCount64());
+    client::service(GetTickCount64(), &traced);
     CHECK(client::connected());
     CHECK(fixture::tracedRequests == requestsBefore + (revoked ? 0U : 1U));
     CHECK(fixture::tracedResults == resultsBefore + (revoked ? 0U : 1U));
     client::InvitationPreflightObservation publicResult{};
     CHECK(!client::take_invitation_preflight(publicResult));
+    if (revoked) {
+        CHECK(traced == client::InvitationPreflightObservation{});
+        CHECK(!client::validate_traced_invitation_preflight(traced));
+    } else {
+        CHECK(traced.peerSteamId == fixture::remoteId && traced.requestGeneration != 0
+            && traced.ticket.data() == ticket && client::validate_traced_invitation_preflight(traced));
+        CHECK(!client::validate_invitation_preflight(traced));
+        auto changed = traced; ++changed.companionGeneration;
+        CHECK(!client::validate_traced_invitation_preflight(changed));
+        changed = traced; changed.ticket.back() = 'A';
+        CHECK(!client::validate_traced_invitation_preflight(changed));
+        client::service(GetTickCount64(), &changed);
+        CHECK(changed == client::InvitationPreflightObservation{});
+        CHECK(client::validate_traced_invitation_preflight(traced));
+        SetEvent(drained);
+        CHECK(WaitForSingleObject(ready, 5000) == WAIT_OBJECT_0);
+        client::service(GetTickCount64(), &changed);
+        CHECK(changed == client::InvitationPreflightObservation{});
+        CHECK(!client::validate_traced_invitation_preflight(traced));
+    }
     client::shutdown();
+    CHECK(!client::validate_traced_invitation_preflight(traced));
     server.join();
     CloseHandle(drained); CloseHandle(ready); CloseHandle(pipe);
     SetEnvironmentVariableW(L"DAWN_ACTIVITY_BINDING_TRACE", nullptr);

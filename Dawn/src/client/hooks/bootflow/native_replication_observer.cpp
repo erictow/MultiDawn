@@ -26,7 +26,17 @@ std::array<hooking::detour::Handle,3> g_handles{};
 std::atomic_uint32_t g_lines{};
 std::atomic_uint32_t g_worldStacks{};
 namespace roles=state::gameplay::replication;
-struct Context {std::uintptr_t group{};std::uint64_t machine{},epoch{};int member{-1};roles::Address address{};};
+constexpr std::uintptr_t kWorldMemberMachines = 0x2C;
+constexpr int kWorldControlMember = 1;
+struct Context {
+    std::uintptr_t group{};
+    std::uint64_t machine{}, epoch{};
+    int member{-1};
+    roles::Address address{};
+    std::uint64_t creatorMachine{}, observationGeneration{};
+    replication_bindings::Binding observedBinding{};
+    bool ambiguous{};
+};
 thread_local Context g_context;
 std::mutex g_bindingLock;
 replication_bindings::Excluded g_excluded;
@@ -97,13 +107,28 @@ __declspec(noinline) bool __fastcall connect_hook(std::uintptr_t owner,int membe
     const auto original=hooking::await_original(g_connect);
     std::uintptr_t group{};std::uint64_t machine{};std::array<unsigned char,86> net{};
     const bool qualified=scope.accepts_side_effects() && member>=0 && member<31
-        && read(owner+8,group) && read(owner+0x2C+static_cast<std::uintptr_t>(member)*8,machine)
+        && read(owner+8,group) && read(owner+kWorldMemberMachines+static_cast<std::uintptr_t>(member)*8,machine)
         && read(reinterpret_cast<std::uintptr_t>(address),net);
     const auto previous=g_context;
     g_context={};
     if(qualified)g_context={group,machine,roles::control_host_epoch(machine,net),member,net};
     const auto epoch=g_context.epoch;
+    std::uint64_t creator{};
+    if (epoch != 0 && member == kWorldControlMember && binding_trace_requested()
+        && read(owner + kWorldMemberMachines, creator)) g_context.creatorMachine = creator;
     const bool result=original(owner,member,role,address,identity,activate);
+    if (g_context.observationGeneration != 0) {
+        std::uintptr_t liveGroup{};
+        std::uint64_t liveCreator{}, liveControl{};
+        const bool accepted = result && !g_context.ambiguous && scope.accepts_side_effects()
+            && read(owner + 8, liveGroup) && liveGroup == group
+            && read(owner + kWorldMemberMachines, liveCreator) && liveCreator == g_context.creatorMachine
+            && read(owner + kWorldMemberMachines + kWorldControlMember * sizeof(liveControl), liveControl)
+            && liveControl == machine && roles::control_host_epoch(machine, net) == epoch;
+        std::lock_guard lock(g_bindingLock);
+        g_excluded.complete_world(g_context.observedBinding, g_context.observationGeneration,
+            accepted && scope.accepts_side_effects());
+    }
     g_context=previous;
     if(qualified && scope.accepts_side_effects() && changed_connection(group,machine,result)) {
         report("ev=native_replication stage=connect thread=%lu group=%p member=%d machine=%016llX role=%u activate=%u address=%u.%u.%u.%u:%u public=%u.%u.%u.%u:%u method=%u control_epoch=%016llX accepted=%u",
@@ -139,7 +164,18 @@ __declspec(noinline) void __fastcall add_hook(std::uintptr_t manager,std::uint32
         && roles::control_host_epoch(machine,g_context.address)==g_context.epoch
         && read(manager+0x18+static_cast<std::uintptr_t>(index)*8,nativeSlot)) {
         std::lock_guard lock(g_bindingLock);
-        excluded=g_excluded.remember({manager,peer,index},nativeSlot,before);
+        const replication_bindings::Binding binding{manager, peer, index};
+        excluded=g_excluded.remember(binding,nativeSlot,before);
+        if (excluded && scope.accepts_side_effects()) {
+            if (g_context.observedBinding.manager == 0) {
+                g_context.observationGeneration = g_excluded.stage_world(binding, g_context.creatorMachine,
+                    machine, g_context.epoch, g_context.address);
+                g_context.observedBinding = binding;
+            } else if (g_context.observedBinding != binding) {
+                g_context.ambiguous = true;
+                g_excluded.invalidate_world(manager, index);
+            }
+        }
         g_excludedCount.store(g_excluded.size(),std::memory_order_release);
     }
     if(excluded) {
@@ -147,6 +183,10 @@ __declspec(noinline) void __fastcall add_hook(std::uintptr_t manager,std::uint32
             GetCurrentThreadId(),reinterpret_cast<void*>(group),reinterpret_cast<void*>(manager),reinterpret_cast<void*>(peer),
             index,static_cast<unsigned long long>(machine));
         return;
+    }
+    if (index < 31 && scope.accepts_side_effects()) {
+        std::lock_guard lock(g_bindingLock);
+        g_excluded.invalidate_world(manager, index);
     }
     original(manager,index,view);
     if(qualified && scope.accepts_side_effects() && read(manager+0x110,after))
@@ -161,10 +201,14 @@ __declspec(noinline) void __fastcall remove_hook(std::uintptr_t manager,std::uin
     const bool qualified=index<31 && read(manager+0x110,before)
         && read(manager+0x18+static_cast<std::uintptr_t>(index)*8,view);
     bool excluded{};
-    if(qualified) {
+    if(index<31) {
         std::lock_guard lock(g_bindingLock);
-        excluded=g_excluded.remove(manager,index,view,before);
-        g_excludedCount.store(g_excluded.size(),std::memory_order_release);
+        if (qualified) {
+            excluded=g_excluded.remove(manager,index,view,before);
+            g_excludedCount.store(g_excluded.size(),std::memory_order_release);
+        } else {
+            g_excluded.invalidate_world(manager, index);
+        }
     }
     // Honor prior exclusions while quiescing too. Native remove dereferences the
     // slot unconditionally; a slot we never registered has no native teardown.
@@ -183,6 +227,19 @@ void* target(std::uintptr_t image,std::uintptr_t rva,const std::array<unsigned c
 }
 bool idle() noexcept {return g_gate.idle() && g_excludedCount.load(std::memory_order_acquire)==0;}
 }
+bool snapshot_world_connection(std::uint64_t creatorMachineId, std::uint64_t controlMachineId,
+    WorldConnection& output) noexcept {
+    output = {};
+    std::lock_guard lock(g_bindingLock);
+    if (!g_gate.accepting()) return false;
+    WorldConnection current{};
+    roles::Address address{};
+    if (!g_excluded.snapshot_world(creatorMachineId, controlMachineId, current, address)
+        || roles::control_host_epoch(controlMachineId, address) != current.controlEpoch) return false;
+    output = current;
+    return true;
+}
+
 bool install() noexcept {
     if(g_handles[0].attached)return g_gate.accepting();
     const auto image=reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
@@ -199,7 +256,11 @@ bool install() noexcept {
     hooking::publish_original(g_remove,reinterpret_cast<Remove>(g_handles[2].original));
     g_gate.accept();report("ev=native_replication stage=install result=ok mode=qualified_control_hosts");return true;
 }
-void quiesce() noexcept {g_gate.quiesce();}
+void quiesce() noexcept {
+    g_gate.quiesce();
+    std::lock_guard lock(g_bindingLock);
+    g_excluded.clear_world_observations();
+}
 bool uninstall() noexcept {
     quiesce();if(!g_handles[0].attached)return true;
     const std::array<hooking::detour::ProtectedCodeEntry,5> code{{

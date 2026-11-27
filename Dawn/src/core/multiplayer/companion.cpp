@@ -203,6 +203,17 @@ void report(const char* result) noexcept {
     return false;
 }
 
+/** Caller holds g_lock. The controller and diagnostic mailboxes stay independent. */
+[[nodiscard]] bool validate_preflight_locked(InvitationPreflightState& state,
+    const InvitationPreflightObservation& observed, std::uint64_t now) noexcept {
+    return g_pipe != INVALID_HANDLE_VALUE && g_version == protocol::kPreflightVersion
+        && g_peerGameRunning && g_invitations.ready()
+        && observed.companionGeneration == g_companionGeneration && observed.pairGeneration == g_pairGeneration
+        && observed.localEpoch == g_localEpoch
+        && std::string_view(observed.peerEpoch.data(), 32) == g_invitations.epoch()
+        && state.validate(now, observed);
+}
+
 /** Optional child-process pins use bounded positive decimal fields; empty is not absent. */
 [[nodiscard]] bool read_pair_pin(const wchar_t* name, bool& present, std::uint64_t& output) noexcept {
     std::array<wchar_t, 22> text{};
@@ -330,7 +341,8 @@ bool initialize() noexcept {
     return accepted;
 }
 
-void service(std::uint64_t now) noexcept {
+void service(std::uint64_t now, InvitationPreflightObservation* traced) noexcept {
+    if (traced != nullptr) *traced = {};
     if (!TryAcquireSRWLockExclusive(&g_lock)) return;
     bool failed = false;
     std::array<char, 33> traceTicket{};
@@ -435,8 +447,11 @@ void service(std::uint64_t now) noexcept {
     ReleaseSRWLockExclusive(&g_lock);
     if (traceSent) log::write(log::Channel::core, log::Level::info,
                              "ev=multiplayer_companion stage=invitation_preflight result=request_sent");
-    if (traceVerified) log::write(log::Channel::core, log::Level::info,
-                                 "ev=multiplayer_companion stage=invitation_preflight result=accepted_ticket_verified");
+    if (traceVerified) {
+        if (traced != nullptr) *traced = traceObservation;
+        log::write(log::Channel::core, log::Level::info,
+                   "ev=multiplayer_companion stage=invitation_preflight result=accepted_ticket_verified");
+    }
     if (failed) {
         steam::social::set_invite_sender(nullptr, nullptr);
         steam::social::set_invite_accepted_sender(nullptr, nullptr);
@@ -497,12 +512,17 @@ bool take_invitation_preflight(InvitationPreflightObservation& output) noexcept 
 
 bool validate_invitation_preflight(const InvitationPreflightObservation& observed) noexcept {
     AcquireSRWLockExclusive(&g_lock);
-    const bool valid = g_pipe != INVALID_HANDLE_VALUE && g_version == protocol::kPreflightVersion
-        && g_peerGameRunning && g_invitations.ready()
-        && observed.companionGeneration == g_companionGeneration && observed.pairGeneration == g_pairGeneration
-        && observed.localEpoch == g_localEpoch
-        && std::string_view(observed.peerEpoch.data(), 32) == g_invitations.epoch()
-        && g_preflight.validate(GetTickCount64(), observed);
+    const bool valid = validate_preflight_locked(g_preflight, observed, GetTickCount64());
+    ReleaseSRWLockExclusive(&g_lock);
+    return valid;
+}
+
+bool validate_traced_invitation_preflight(const InvitationPreflightObservation& observed) noexcept {
+    AcquireSRWLockExclusive(&g_lock);
+    const auto now = GetTickCount64();
+    const bool valid = g_tracePreflightEnabled
+        && g_invitations.current(g_peer, std::string_view(observed.ticket.data(), 32), now)
+        && validate_preflight_locked(g_tracePreflight, observed, now);
     ReleaseSRWLockExclusive(&g_lock);
     return valid;
 }

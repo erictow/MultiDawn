@@ -181,10 +181,99 @@ void tests() {
     std::array<identity::Observation, 17> tooMany{};
     CHECK(correlation::correlate(creator, group, tooMany, 100, output) == correlation::Result::invalidInput);
 }
+
+identity::Observation local_only(std::int32_t role, std::uintptr_t manager, std::uint64_t sampledAt) {
+    auto observed = fixture();
+    observed.manager = manager;
+    observed.sampledAt = sampledAt;
+    observed.sample.role = role;
+    observed.sample.mode = 6;
+    observed.sample.memberMask = observed.sample.playerMask = 1;
+    observed.sample.members[0] = observed.sample.members[1];
+    observed.sample.members[1] = {};
+    return observed;
+}
+
+void world_human_tests() {
+    constexpr auto matched = correlation::Result::matched;
+    constexpr auto noMatch = correlation::Result::noMatch;
+    constexpr auto invalid = correlation::Result::invalidInput;
+    constexpr auto ambiguous = correlation::Result::ambiguous;
+    const std::array local{local_only(0, 0x10000, 100), local_only(1, 0x20000, 120)};
+    correlation::WorldHuman output{};
+    CHECK(correlation::corroborate_world_human(creator, local, 130, output) == matched);
+    CHECK(output.creatorMachineId == creator && output.playerId == player && output.sampledAt == 100);
+    CHECK(output.witnesses[0].mode == 6 && output.witnesses[1].mode == 6 && output.witnesses[2].manager == 0);
+    CHECK(output.witnesses[0].manager == local[0].manager && output.witnesses[1].manager == local[1].manager);
+    CHECK(output.witnesses[0].incarnation == 17 && output.witnesses[1].generation == 19
+        && output.witnesses[1].sampledAt == 120);
+    CHECK(output.witnesses[0].memberIndex == 0 && output.witnesses[0].member == local[0].sample.members[0]);
+    const auto baseline = output;
+
+    const auto expect = [&](std::span<const identity::Observation> observations, correlation::Result result,
+                            std::uint64_t now = 130) {
+        output = baseline;
+        CHECK(correlation::corroborate_world_human(creator, observations, now, output) == result);
+        if (result != matched) CHECK(output == correlation::WorldHuman{});
+    };
+    std::array reversed{local[1], local[0]};
+    ++reversed[0].sampledAt;
+    ++reversed[1].sampledAt;
+    expect(reversed, matched);
+    CHECK(output != baseline && correlation::same_world_human(output, baseline));
+    ++reversed[0].generation;
+    expect(reversed, matched);
+    CHECK(!correlation::same_world_human(output, baseline));
+    --reversed[0].generation;
+    ++reversed[0].incarnation;
+    expect(reversed, matched);
+    CHECK(!correlation::same_world_human(output, baseline));
+    reversed[0] = local[1];
+    ++reversed[0].sample.members[0].joinId;
+    expect(reversed, matched);
+    CHECK(!correlation::same_world_human(output, baseline));
+    reversed[0] = local[1];
+    reversed[0].sample.role = 6;
+    expect(reversed, matched);
+    CHECK(output.witnesses[1].manager == 0 && output.witnesses[6].manager == local[1].manager
+        && !correlation::same_world_human(output, baseline));
+
+    expect({}, noMatch);
+    expect(std::span(local).first(1), noMatch);
+    expect(local, matched, 1100);
+    expect(local, noMatch, 1101);
+    expect(local, invalid, 119);
+    auto changed = local;
+    changed[1].sample.members[0].playerId += 1;
+    expect(changed, ambiguous);
+    changed = local; changed[1].sample.role = 0;
+    expect(changed, ambiguous);
+    changed = local; changed[1].manager = changed[0].manager;
+    expect(changed, ambiguous);
+    changed = local; changed[1] = changed[0];
+    expect(changed, ambiguous);
+
+    changed = local; changed[1].sample.members[0].machineId = group;
+    expect(changed, noMatch);
+    changed[1].sample.members[31].machineId = creator;
+    expect(changed, invalid);
+    changed = local; changed[1].sample.members[0] = {creator}; changed[1].sample.playerMask = 0;
+    expect(changed, invalid);
+    changed = local; changed[1].incarnation = 0;
+    expect(changed, invalid);
+    changed = local; changed[1].generation = 0;
+    expect(changed, invalid);
+    changed = local; changed[1].sample.role = 7;
+    expect(changed, invalid);
+    std::array<identity::Observation, identity::kManagerCapacity + 1> tooMany{};
+    expect(tooMany, invalid);
+    CHECK(correlation::corroborate_world_human(0, local, 130, output) == invalid);
+}
 } // namespace
 
 int main() {
     tests();
+    world_human_tests();
     std::printf("PASS: %u identity/activity scalar correlation checks; no gameplay admission\n", checks);
     return 0;
 }

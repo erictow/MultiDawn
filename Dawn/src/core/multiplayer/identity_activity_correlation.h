@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <bit>
 #include <span>
 
@@ -25,6 +26,31 @@ struct Correlation final {
 /** Exact copied correspondence except capture time; native generations are never ignored. */
 [[nodiscard]] inline bool same_correspondence(Correlation first, Correlation second) noexcept {
     first.sampledAt = second.sampledAt = 0;
+    return first == second;
+}
+
+struct WorldHumanWitness final {
+    std::uintptr_t manager{};
+    std::uint64_t incarnation{}, generation{}, sampledAt{};
+    identity_observation::Member member{};
+    std::uint32_t memberIndex{};
+    std::int32_t mode{-1};
+    friend constexpr bool operator==(const WorldHumanWitness&, const WorldHumanWitness&) noexcept = default;
+};
+
+/** Independent managed-role observations of the human in an already proven world binding. */
+struct WorldHuman final {
+    std::uint64_t creatorMachineId{}, playerId{}, sampledAt{}; // Oldest supporting sample.
+    // Each native role can support the result once, in its own slot. No role is authoritative.
+    std::array<WorldHumanWitness, 7> witnesses{};
+    friend constexpr bool operator==(const WorldHuman&, const WorldHuman&) noexcept = default;
+};
+
+/** Revalidation ignores only capture times. The participating managers and lifetimes must agree. */
+[[nodiscard]] inline bool same_world_human(WorldHuman first, WorldHuman second) noexcept {
+    first.sampledAt = second.sampledAt = 0;
+    for (std::size_t index = 0; index < first.witnesses.size(); ++index)
+        first.witnesses[index].sampledAt = second.witnesses[index].sampledAt = 0;
     return first == second;
 }
 
@@ -102,6 +128,53 @@ namespace detail {
         found = true;
     }
     if (!found) return Result::noMatch;
+    output = candidate;
+    return Result::matched;
+}
+
+/**
+ * Corroborates the exact world creator's native player using fresh managed tables.
+ * The caller has already matched the world creator and control-host machines. The
+ * managed tables need not contain the control host, but independent roles must
+ * agree on the native player. No activity, route or admission is established here.
+ */
+[[nodiscard]] inline Result corroborate_world_human(std::uint64_t creatorMachineId,
+    std::span<const identity_observation::Observation> observations,
+    std::uint64_t now, WorldHuman& output) noexcept {
+    output = {};
+    if (creatorMachineId == 0 || observations.size() > identity_observation::kManagerCapacity)
+        return Result::invalidInput;
+    WorldHuman candidate{};
+    candidate.creatorMachineId = creatorMachineId;
+    candidate.sampledAt = now;
+    std::size_t witnesses{};
+    for (std::size_t observedIndex = 0; observedIndex < observations.size(); ++observedIndex) {
+        const auto& observed = observations[observedIndex];
+        if (now < observed.sampledAt) return Result::invalidInput;
+        if (now - observed.sampledAt > identity_observation::kMaximumAgeMs) continue;
+        const auto& sample = observed.sample;
+        if (observed.manager == 0 || observed.incarnation == 0 || observed.generation == 0
+            || !detail::consistent(sample)) return Result::invalidInput;
+        for (const auto& earlier : observations.first(observedIndex))
+            if (earlier.manager == observed.manager
+                && now - earlier.sampledAt <= identity_observation::kMaximumAgeMs) return Result::ambiguous;
+
+        for (std::size_t memberIndex = 0; memberIndex < sample.members.size(); ++memberIndex) {
+            const auto& member = sample.members[memberIndex];
+            if (member.machineId != creatorMachineId) continue;
+            if (!member.ownsPlayer) return Result::invalidInput;
+            auto& witness = candidate.witnesses[static_cast<std::size_t>(sample.role)];
+            if (witness.manager != 0 || (candidate.playerId != 0 && candidate.playerId != member.playerId))
+                return Result::ambiguous;
+            candidate.playerId = member.playerId;
+            if (observed.sampledAt < candidate.sampledAt) candidate.sampledAt = observed.sampledAt;
+            witness = {observed.manager, observed.incarnation, observed.generation, observed.sampledAt, member,
+                static_cast<std::uint32_t>(memberIndex), sample.mode};
+            ++witnesses;
+            break;
+        }
+    }
+    if (witnesses < 2) return Result::noMatch;
     output = candidate;
     return Result::matched;
 }

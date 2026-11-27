@@ -42,11 +42,12 @@ before milestone 2. The [activity handoff design](LOCAL-PROFILE-ACTIVITY-HANDOFF
 and [identity correspondence notes](IDENTITY-ACTIVITY-CORRELATION.md) describe the
 current runtime boundary.
 
-For milestone 1, first confirm each game can spawn and control its own Guardian.
-Then correlate the live invitation and guest publication with the host's exact
-world instance and install the recipient-specific membership and routes. Use
-the existing local profile service for each player and validate bidirectional
-movement before extending combat or activity authority.
+For milestone 1, the paired `f89bd0ad` run confirmed each game can spawn and
+control its own Guardian. Next, correlate the live invitation and guest
+publication with the host's exact world instance and install the
+recipient-specific membership and routes. Use the existing local profile
+service for each player and validate bidirectional movement before extending
+combat or activity authority.
 
 For milestone 2, give each guest their own authenticated launcher connection,
 invite and grant lifetime, route, and reliable queues. Keep surviving players'

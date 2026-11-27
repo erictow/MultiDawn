@@ -7,6 +7,7 @@ on:
       - 'Dawn/src/core/multiplayer/**'
       - 'Dawn/src/client/hooks/bootflow/native_identity_observation.*'
       - 'Dawn/src/client/hooks/bootflow/native_replication_observer.*'
+      - 'Dawn/src/client/hooks/bootflow/native_replication_bindings.h'
       - 'Dawn/src/client/hooks/bootflow/towerfall_executor_bootstrap.cpp'
       - 'Dawn/Dawn.vcxproj'
       - 'Dawn/src/middleware/bap/address_resolution.*'
@@ -30,6 +31,8 @@ on:
       - 'Dawn/unit/*shared_membership*'
       - 'Dawn/unit/*steam_social*'
       - 'Dawn/unit/*native_identity_observation*'
+      - 'Dawn/unit/*native_activity_policy*'
+      - 'Dawn/unit/native_replication_role_cases.h'
       - 'Dawn/unit/*identity_activity_correlation*'
       - 'Dawn/unit/*creator_activity_snapshot*'
       - 'Dawn/unit/*activity_binding*'
@@ -47,6 +50,7 @@ on:
       - 'Dawn/src/core/multiplayer/**'
       - 'Dawn/src/client/hooks/bootflow/native_identity_observation.*'
       - 'Dawn/src/client/hooks/bootflow/native_replication_observer.*'
+      - 'Dawn/src/client/hooks/bootflow/native_replication_bindings.h'
       - 'Dawn/src/client/hooks/bootflow/towerfall_executor_bootstrap.cpp'
       - 'Dawn/Dawn.vcxproj'
       - 'Dawn/src/middleware/bap/address_resolution.*'
@@ -70,6 +74,8 @@ on:
       - 'Dawn/unit/*shared_membership*'
       - 'Dawn/unit/*steam_social*'
       - 'Dawn/unit/*native_identity_observation*'
+      - 'Dawn/unit/*native_activity_policy*'
+      - 'Dawn/unit/native_replication_role_cases.h'
       - 'Dawn/unit/*identity_activity_correlation*'
       - 'Dawn/unit/*creator_activity_snapshot*'
       - 'Dawn/unit/*activity_binding*'
@@ -97,7 +103,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          foreach ($suite in @('companion_protocol', 'companion_client', 'steam_social', 'shared_membership', 'address_resolution', 'des_cbc', 'routed_datagram', 'resolution_replay', 'address_resolution_host', 'endpoint_resolution', 'peer_view_echo', 'native_identity_observation', 'identity_activity_correlation', 'creator_activity_snapshot', 'activity_binding', 'advertisement_observation', 'packets_discarded', 'membership_consumer_contract', 'client_identity_receipt', 'remote_human_membership', 'reliable_outbox')) {
+          foreach ($suite in @('companion_protocol', 'companion_client', 'steam_social', 'shared_membership', 'address_resolution', 'des_cbc', 'routed_datagram', 'resolution_replay', 'address_resolution_host', 'endpoint_resolution', 'peer_view_echo', 'native_identity_observation', 'native_activity_policy', 'identity_activity_correlation', 'creator_activity_snapshot', 'activity_binding', 'advertisement_observation', 'packets_discarded', 'membership_consumer_contract', 'client_identity_receipt', 'remote_human_membership', 'reliable_outbox')) {
             $destination = Join-Path $PWD "build/native-ci/$suite/"
             & msbuild "Dawn/unit/$($suite)_tests.vcxproj" /nologo /v:minimal /m:2 /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0 "/p:OutDir=$destination" "/p:IntDir=$($destination)obj/"
             if ($LASTEXITCODE -ne 0) { throw "$suite compilation failed" }

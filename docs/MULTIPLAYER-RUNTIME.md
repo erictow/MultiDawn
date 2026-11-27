@@ -369,7 +369,7 @@ It does not verify the game's friend roster or a shared activity.
 
 Native build instructions are in
 [`tools/build/PORTABLE-WINDOWS.md`](../tools/build/PORTABLE-WINDOWS.md).
-The native GitHub workflow builds and runs twenty-one component test projects;
+The native GitHub workflow builds and runs twenty-two component test projects;
 preparing the workflow does not mean a remote run has passed.
 
 For experimental commit `f60ac62b`, the

@@ -4,6 +4,7 @@
 
 #include "../../../client/content/investment/worker.h"
 #include "../../../core/logging/log.h"
+#include "../../../core/multiplayer/activity_binding.h"
 #include "../../../core/multiplayer/companion.h"
 #include "../../../core/ui/busy/busy.h"
 #include "../../../server/runtime/server_runtime.h"
@@ -99,7 +100,8 @@ namespace dawn::steam {
 
 /** Delivers one batch of queued callbacks on the caller thread. The batch has a size cap. */
 void run_callbacks() noexcept {
-    core::multiplayer::service(GetTickCount64());
+    core::multiplayer::InvitationPreflightObservation traced{};
+    core::multiplayer::service(GetTickCount64(), &traced);
     social::service();
     // Presentation goes in first, so the sweep below has an overlay to draw with. It only hooks
     // Present; the game still decides when a frame is drawn.
@@ -127,6 +129,7 @@ void run_callbacks() noexcept {
     if (mainActive) {
         const auto now = GetTickCount64();
         server::service(now);
+        if (traced.requestGeneration != 0) core::multiplayer::activity_binding::trace_invitation_world(traced);
         client::content::investment::worker::service(now);
     }
 }

@@ -1,4 +1,5 @@
 #include "../src/core/multiplayer/activity_binding.h"
+#include "../src/core/multiplayer/companion.h"
 #include "../src/client/hooks/bootflow/native_identity_observation.h"
 #include "../src/core/logging/log.h"
 #include "../src/server/gameplay/gameplay_advertisement.h"
@@ -13,6 +14,7 @@ namespace binding = mp::activity_binding;
 namespace bap = dawn::server::bap;
 namespace gameplay = dawn::server::gameplay;
 namespace observation = mp::identity_observation;
+namespace world_view = dawn::client::hooks::bootflow::native_replication_observer;
 
 namespace {
 unsigned checks{};
@@ -27,11 +29,14 @@ struct Fixture {
     gameplay::AdvertisedActivityObservation advertisement{};
     gameplay::group::HostActivityLineageLease lineage{};
     gameplay::resolution::AuthenticatedRoute route{};
+    world_view::WorldConnection world{};
     std::array<observation::Observation, 2> observations{};
     std::size_t count{1};
     bool enabled{true}, creatorAvailable{true}, advertisementAvailable{true}, routeAvailable{true};
     bool creatorChanges{}, nativeChanges{}, routeChanges{}, lineageChanges{}, collectFails{};
-    unsigned creatorCalls{}, collectCalls{}, lineageChecks{}, pins{}, releases{}, logs{};
+    bool worldChanges{}, invalidateInviteDuringCapture{};
+    bool sawWorldInvite{};
+    unsigned creatorCalls{}, collectCalls{}, lineageChecks{}, worldReads{}, inviteChecks{}, pins{}, releases{}, logs{};
 
     Fixture() {
         using namespace dawn::state::activity;
@@ -48,6 +53,10 @@ struct Fixture {
         advertisement.regionIndex = 4; advertisement.readiness = gameplay::AdvertisementReadiness::ready;
         lineage = {0x2001, host, source, 4, 9, 2, true};
         route = {{creator.binding.authentication, 10}, {0x7F000001, 45000}};
+        world.creatorMachineId = creator.memberKey;
+        world.controlMachineId = advertisement.groupMachineId;
+        world.controlEpoch = 31;
+        world.generation = 17;
         auto& row = observations[0];
         row.manager = 0x10000; row.incarnation = 1; row.generation = 2; row.sampledAt = 100;
         row.sample.role = 4; row.sample.mode = 4; row.sample.hostMemberIndex = 0;
@@ -128,6 +137,82 @@ void lifetime_tests() {
     CHECK(fixture.pins == fixture.releases);
     CHECK(!binding::validate({}, 150));
 }
+
+void world_fixture(std::uint64_t now) {
+    reset();
+    fixture.count = 2;
+    auto& local = fixture.observations[0];
+    local.sampledAt = now;
+    local.sample.role = 0;
+    local.sample.mode = 6;
+    local.sample.memberMask = 1;
+    local.sample.members[0] = local.sample.members[1];
+    local.sample.members[1] = {};
+    fixture.observations[1] = local;
+    auto& second = fixture.observations[1];
+    second.sample.role = 1;
+    second.manager += 0x10000;
+    second.incarnation += 3;
+    second.generation += 3;
+}
+
+void world_rejected(binding::Result expected, std::uint64_t now) {
+    binding::WorldObservation output{};
+    output.world.generation = 500;
+    CHECK(binding::inspect_world(now, output) == expected);
+    CHECK(!static_cast<bool>(output.creator.binding) && output.world.generation == 0 && output.human.playerId == 0);
+    CHECK(fixture.pins == fixture.releases);
+}
+
+void world_binding_tests() {
+    constexpr std::uint64_t now = 100;
+    world_fixture(now);
+    binding::Observation managed{};
+    CHECK(binding::inspect(now, managed) == binding::Result::noManagedGroup);
+    binding::WorldObservation output{};
+    CHECK(binding::inspect_world(now, output) == binding::Result::observed);
+    CHECK(output.creator == fixture.creator && output.host == fixture.advertisement.host);
+    CHECK(output.world == fixture.world && output.human.playerId == 0x3001);
+    CHECK(output.lineageGeneration == fixture.lineage.rowGeneration && output.route.handle == fixture.route.handle);
+    CHECK(fixture.pins == fixture.releases && binding::validate_world(output, now));
+    for (auto& row : fixture.observations) row.sampledAt = now + 25;
+    CHECK(binding::validate_world(output, now + 25));
+    ++fixture.world.generation;
+    CHECK(!binding::validate_world(output, now + 25));
+    CHECK(!binding::validate_world(output, now + observation::kMaximumAgeMs + 1));
+
+    world_fixture(now); fixture.world.controlMachineId++;
+    world_rejected(binding::Result::noWorldConnection, now);
+    world_fixture(now); fixture.count = 1;
+    world_rejected(binding::Result::noWorldHuman, now);
+    world_fixture(now); fixture.observations[1].sample.members[0].playerId++;
+    world_rejected(binding::Result::ambiguousWorldHuman, now);
+    world_fixture(now); fixture.observations[0].sample.members[0].playerId = 0;
+    world_rejected(binding::Result::malformedWorldHuman, now);
+    world_fixture(now); fixture.routeAvailable = false;
+    world_rejected(binding::Result::noAuthenticatedRoute, now);
+    world_fixture(now); fixture.worldChanges = true;
+    world_rejected(binding::Result::changed, now);
+    world_fixture(now); fixture.nativeChanges = true;
+    world_rejected(binding::Result::changed, now);
+    world_fixture(now); fixture.creatorChanges = true;
+    world_rejected(binding::Result::changed, now);
+    world_fixture(now); fixture.routeChanges = true;
+    world_rejected(binding::Result::changed, now);
+    world_fixture(now); fixture.lineageChanges = true;
+    world_rejected(binding::Result::changed, now);
+
+    CHECK(!binding::validate_world({}, now));
+    world_fixture(GetTickCount64());
+    mp::InvitationPreflightObservation invitation{};
+    invitation.requestGeneration = 10;
+    binding::trace_invitation_world(invitation);
+    CHECK(fixture.logs == 1 && fixture.inviteChecks == 2 && fixture.sawWorldInvite);
+    world_fixture(GetTickCount64());
+    fixture.invalidateInviteDuringCapture = true;
+    binding::trace_invitation_world(invitation);
+    CHECK(fixture.logs == 0 && fixture.inviteChecks == 2);
+}
 } // namespace
 
 namespace dawn::server::bap {
@@ -183,12 +268,32 @@ bool collect(std::span<observation::Observation> output, std::uint64_t, std::siz
     return true;
 }
 }
+namespace dawn::client::hooks::bootflow::native_replication_observer {
+bool snapshot_world_connection(std::uint64_t creator, std::uint64_t control, WorldConnection& output) noexcept {
+    output = {};
+    if (creator != fixture.world.creatorMachineId || control != fixture.world.controlMachineId) return false;
+    output = fixture.world;
+    ++fixture.worldReads;
+    if (fixture.worldChanges && fixture.worldReads >= 2) ++output.generation;
+    return true;
+}
+}
+namespace dawn::core::multiplayer {
+bool validate_traced_invitation_preflight(const InvitationPreflightObservation& observed) noexcept {
+    ++fixture.inviteChecks;
+    return observed.requestGeneration == 10 && !(fixture.invalidateInviteDuringCapture && fixture.inviteChecks == 2);
+}
+}
 namespace dawn::core::log {
-void write(Channel, Level, std::string_view) noexcept { ++fixture.logs; }
+void write(Channel, Level, std::string_view line) noexcept {
+    ++fixture.logs;
+    if (line == "ev=world_activity_binding stage=accepted_invite result=observed admission=0")
+        fixture.sawWorldInvite = true;
+}
 }
 
 int main() {
-    boundary_tests(); lifetime_tests();
+    boundary_tests(); lifetime_tests(); world_binding_tests();
     CHECK(SetEnvironmentVariableW(L"DAWN_ACTIVITY_BINDING_TRACE", nullptr) != FALSE);
     reset(); binding::service(100); binding::reset();
     CHECK(fixture.creatorCalls == 0 && fixture.logs == 0);
