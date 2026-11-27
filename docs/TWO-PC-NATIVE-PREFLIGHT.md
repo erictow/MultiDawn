@@ -156,8 +156,26 @@ invitation reached the host after the spawn failure.
 
 The paired test now keeps the same in-process Steam identity as solo for
 the local player and loopback lobby. Pairing continues to use the launcher's
-separate identity for friends and invitations. A matched paired launch must
-verify whether this restores control on both PCs.
+separate identity for friends and invitations.
+
+### Paired run with local identity preserved
+
+On November 27, 2026, both logs matched the runtime hash from the `f89bd0ad`
+kit. The host reported `controlled=1` 47 ms after Tower fly-in. The guest
+reported it 141 ms after fly-in and again after fast travel. Neither log
+reported a sustained missing Guardian. The guest also verified an accepted
+invite ticket. These observations confirm local Guardian control and invite
+delivery in the same paired run. Shared membership and movement between the
+two games remain unverified.
+
+The guest's character screen displayed `Player` and three 1060 Human Male
+characters. This matches the kit's default persona and character presentation.
+If the source of a test profile is unclear, check `playerState` in that PC's
+`native-test-install.json`. A value of `copied-local-offline` records that the
+helper copied at least one database from the selected local install. For a
+dual-layout install, check the database beside the DLL that produced the log.
+The Friends roster can independently display the saved nickname for the
+paired player.
 
 For a controlled solo comparison, close the game and launcher on one PC after
 saving its log. Run these commands in PowerShell from its extracted kit:
