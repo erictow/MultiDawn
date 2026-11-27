@@ -92,7 +92,8 @@ public:
         document_=&document;return true;
     }
     [[nodiscard]] OpeningFrame update(std::uint32_t bubble,bool arrived,const adventure_start::wire::Request& selected) noexcept {
-        if(!adventure_start::kLaunchesEnabled || !owner_)return {};
+        if constexpr (!adventure_start::kLaunchesEnabled) return {};
+        if (!owner_) return {};
         if(!binding_) {
             if(!arrived || selected.selection.reason!=1 || selected.selection.activityIndex!=selected.selection.sourceActivityIndex
                 || !selected.hasAccount || !selected.hasNonce || !selected.revision
