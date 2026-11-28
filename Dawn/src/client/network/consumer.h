@@ -45,6 +45,8 @@ struct BapRequest {
     std::uint32_t connectionId{};
     std::span<const std::byte> frame{};
     std::span<std::byte> response{};
+    /** Local listener observation on open only. Never supplied by the remote peer. */
+    bool peerInCurrentProcess{};
 };
 
 /** BAP completion fields written by the Server consumer. */

@@ -186,7 +186,7 @@ void report_matchmaking_retirement_failure(const Session& session,
                                            const char* boundary) noexcept;
 
 /** @param id Session-slot id. @return True when the slot is opened. */
-[[nodiscard]] bool open_session(std::uint32_t id) noexcept {
+[[nodiscard]] bool open_session(std::uint32_t id, bool peerInCurrentProcess) noexcept {
     if (id == 0 || id > g_sessions.size()) {
         return false;
     }
@@ -207,6 +207,7 @@ void report_matchmaking_retirement_failure(const Session& session,
     }
     session.id = id;
     session.connectionKey = connectionKey;
+    session.peerInCurrentProcess = peerInCurrentProcess;
     return true;
 }
 
@@ -668,6 +669,29 @@ bool snapshot_current_creator_activity(CreatorActivitySnapshot& output) noexcept
     return copied;
 }
 
+bool snapshot_creator_control_route(state::activity::BindingKey requested,
+                                    gameplay::resolution::AuthenticatedRoute& output) noexcept {
+    output = {};
+    AcquireSRWLockShared(&g_lock);
+    const Session* creator = current_creator_locked(requested);
+    bool copied = false;
+    if (creator != nullptr && creator->peerInCurrentProcess) {
+        std::array<state::activity::AuthenticationKey, kSessionCount> owners{};
+        std::size_t count{};
+        for (const auto& session : g_sessions) {
+            if (session.peerInCurrentProcess && session.authenticated && !session.matchmakingRetirementPending
+                && session.connectionKey.connectionId == session.id
+                && lifecycle::authentication_key_is_current(session)) {
+                owners[count++] = session.authenticationKey;
+            }
+        }
+        copied = gameplay::resolution::lookup_unique_authenticated_route(
+            std::span(owners).first(count), output);
+    }
+    ReleaseSRWLockShared(&g_lock);
+    return copied;
+}
+
 bool snapshot_creator_client_identity(state::activity::BindingKey requested,
                                        LocalClientIdentitySnapshot& output) noexcept {
     output = {};
@@ -790,7 +814,7 @@ bool consume(const client::network::BapRequest& request,
     // Hold the session lock across cryptographic counter reads and updates.
     switch (request.event) {
     case client::network::BapEvent::open:
-        success = open_session(request.connectionId);
+        success = open_session(request.connectionId, request.peerInCurrentProcess);
         break;
     case client::network::BapEvent::frame:
         success = consume_frame(request, response);

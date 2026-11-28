@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdio>
 
+#include "../../server/transport/process_socket.h"
 #include "companion.h"
 #include "../logging/log.h"
 #include "../../client/hooks/bootflow/native_identity_observation.h"
@@ -45,7 +46,8 @@ struct Source final {
 
 [[nodiscard]] bool same_route(const gameplay::resolution::AuthenticatedRoute& a,
                                const gameplay::resolution::AuthenticatedRoute& b) noexcept {
-    return a.handle == b.handle && a.source.address == b.source.address && a.source.port == b.source.port;
+    return a.handle == b.handle && a.source.address == b.source.address && a.source.port == b.source.port
+        && a.purpose == b.purpose && a.peerAddress == b.peerAddress;
 }
 
 [[nodiscard]] bool trace_requested() noexcept {
@@ -72,6 +74,7 @@ struct Source final {
     case Result::noWorldHuman: return "no_corroborated_world_human";
     case Result::ambiguousWorldHuman: return "ambiguous_world_human";
     case Result::malformedWorldHuman: return "malformed_world_human";
+    case Result::noLocalRouteSource: return "no_local_route_source";
     }
     return "unknown";
 }
@@ -131,6 +134,14 @@ DiagnosticHistory g_managedHistory{}, g_worldHistory{};
         && route.source.address != 0 && route.source.port != 0;
 }
 
+[[nodiscard]] bool read_world_route(const Source& source, gameplay::resolution::AuthenticatedRoute& route) noexcept {
+    // The primary BAP channel can own the transport while the FAH channel owns the current world.
+    return server::bap::snapshot_creator_control_route(source.creator.binding, route)
+        && static_cast<bool>(route.handle)
+        && route.purpose == gameplay::resolution::RoutePurpose::control
+        && route.peerAddress == gameplay::resolution::PeerAddressHandle{};
+}
+
 [[nodiscard]] bool current_creator(const Source& source) noexcept {
     server::bap::CreatorActivitySnapshot latest{};
     return server::bap::snapshot_creator_activity(source.creator.binding, latest) && latest == source.creator;
@@ -172,14 +183,18 @@ DiagnosticHistory g_managedHistory{}, g_worldHistory{};
     WorldObservation candidate{};
     if (!read_world(source, candidate.world)) return Result::noWorldConnection;
     if (const auto result = read_world_human(source, now, candidate.human); result != Result::observed) return result;
-    if (!read_route(source, candidate.route)) return Result::noAuthenticatedRoute;
+    if (!read_world_route(source, candidate.route)) return Result::noAuthenticatedRoute;
+    if (!server::transport::process_socket::udp_source_in_current_process(candidate.route.source))
+        return Result::noLocalRouteSource;
 
     world_view::WorldConnection currentWorld{};
     identity_activity::WorldHuman currentHuman{};
+    gameplay::resolution::AuthenticatedRoute currentRoute{};
     if (!current_creator(source)
         || read_world_human(source, now, currentHuman) != Result::observed
         || !identity_activity::same_world_human(candidate.human, currentHuman)
         || !read_world(source, currentWorld) || currentWorld != candidate.world
+        || !read_world_route(source, currentRoute) || !same_route(currentRoute, candidate.route)
         || !current_route_and_lineage(source, candidate.route)) return Result::changed;
 
     candidate.creator = source.creator;

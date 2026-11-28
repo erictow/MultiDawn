@@ -35,7 +35,24 @@ bool consume(Session&, Scratch&, const middleware::bap::OuterFrame&, std::span<s
 bool consume_deferred(Session&, Scratch&, std::span<std::byte>, std::size_t&, bool&) noexcept { return false; }
 }
 namespace dawn::state::matchmaking { bool release_context(ContextHandle) noexcept { return true; } }
-namespace dawn::server::gameplay::resolution { void release_owner(state::activity::AuthenticationKey) noexcept {} }
+namespace dawn::server::gameplay::resolution {
+namespace {
+std::array<state::activity::AuthenticationKey, client::network::kBapConnectionCount> observedOwners{};
+std::size_t observedCount{};
+AuthenticatedRoute fixtureRoute{};
+}
+void release_owner(state::activity::AuthenticationKey) noexcept {}
+bool lookup_unique_authenticated_route(std::span<const state::activity::AuthenticationKey> owners,
+    AuthenticatedRoute& output) noexcept {
+    observedCount = owners.size();
+    std::copy(owners.begin(), owners.end(), observedOwners.begin());
+    output = {};
+    if (!fixtureRoute.handle || std::find(owners.begin(), owners.end(), fixtureRoute.handle.owner)
+        == owners.end()) return false;
+    output = fixtureRoute;
+    return true;
+}
+}
 namespace dawn::server::gameplay::group {
 bool acquire_host_activity_lineage(state::activity::ActivityInstanceKey, HostActivityLineageLease& output) noexcept { output = {}; return false; }
 bool validate_host_activity_lineage(const HostActivityLineageLease&) noexcept { return false; }
@@ -52,6 +69,7 @@ namespace membership = activity::membership;
 namespace storage = dawn::state::runtime::storage;
 namespace bap = dawn::server::bap;
 namespace fixture = bap::test_support;
+namespace resolution = dawn::server::gameplay::resolution;
 using Snapshot = bap::CreatorActivitySnapshot;
 constexpr activity::ActivityInstanceKey kActivity{0x1234, {9}};
 constexpr std::uint64_t kMember = 0x1234567887654321ULL, kJoin = 0x2345678987654321ULL;
@@ -97,9 +115,10 @@ bool select_creator(bap::Session& session) noexcept {
     return true;
 }
 
-activity::BindingKey open_creator(std::uint32_t id = 1) {
+activity::BindingKey open_creator(std::uint32_t id = 1, bool localProcess = false) {
     dawn::client::network::BapResponse response{};
-    check(bap::consume({dawn::client::network::BapEvent::open, id, {}, {}}, response), "production BAP connection opens");
+    check(bap::consume({dawn::client::network::BapEvent::open, id, {}, {}, localProcess}, response),
+        "production BAP connection opens");
     check(fixture::configure_session(id, kActivity, true), "fixture authenticates an exact creator binding");
     check(fixture::with_session_locked(id, select_creator), "production publisher selects committed creator anchor");
     bap::Session session{};
@@ -229,6 +248,60 @@ void anchor_selection() {
     bap::shutdown(); fixture::reset_storage();
 }
 
+void creator_control_route() {
+    using Event = dawn::client::network::BapEvent;
+    install_state();
+    const auto creator = open_creator(2, true);
+    dawn::client::network::BapResponse response{};
+    const auto connect = [&](std::uint32_t id, bool local) {
+        check(bap::consume({Event::open, id, {}, {}, local}, response)
+            && fixture::configure_session(id, {}, false), "open and authenticate independent channel");
+        bap::Session session{};
+        check(fixture::snapshot_session(id, session), "capture exact authentication");
+        return session.authenticationKey;
+    };
+    const auto primary = connect(1, true);
+    const auto other = connect(3, false);
+    resolution::fixtureRoute = {{primary, 17}, {0x7F000001, 41230}};
+    resolution::AuthenticatedRoute route{};
+    check(bap::snapshot_creator_control_route(creator, route) && route.handle.owner == primary
+        && route.handle.generation == 17 && resolution::observedCount == 2
+        && resolution::observedOwners[0] == primary && resolution::observedOwners[1] == creator.authentication,
+        "creator and separate verified primary channel retain their exact connection epochs");
+
+    resolution::fixtureRoute.handle.owner = other;
+    check(!bap::snapshot_creator_control_route(creator, route) && !route.handle,
+        "an outside-process BAP owner is never a route candidate");
+    resolution::fixtureRoute.handle.owner = primary;
+    auto stale = creator;
+    ++stale.authentication.generation.value;
+    resolution::observedCount = 0;
+    check(!bap::snapshot_creator_control_route(stale, route) && resolution::observedCount == 0,
+        "the current creator must match the exact requested lifetime before consulting the resolver");
+
+    check(fixture::reset_authentication(1), "retire the separate primary authentication");
+    check(!bap::snapshot_creator_control_route(creator, route) && resolution::observedCount == 1
+        && resolution::observedOwners[0] == creator.authentication,
+        "an unauthenticated primary cannot qualify with an older resolver context");
+    bap::Session retired{};
+    check(fixture::snapshot_session(1, retired) && retired.peerInCurrentProcess && !retired.authenticated,
+        "same-process proof belongs to the connection and survives authentication reset");
+
+    const auto replacement = connect(1, false);
+    resolution::fixtureRoute.handle.owner = replacement;
+    check(replacement.connection != primary.connection && !bap::snapshot_creator_control_route(creator, route)
+        && resolution::observedCount == 1, "an unverified replacement socket cannot inherit the previous process proof");
+    check(fixture::with_session_locked(2, [](bap::Session& session) noexcept {
+        session.peerInCurrentProcess = false;
+        return true;
+    }), "clear process provenance from the creator");
+    resolution::observedCount = 0;
+    check(!bap::snapshot_creator_control_route(creator, route) && resolution::observedCount == 0,
+        "an outside-process creator is rejected regardless of control route");
+    resolution::fixtureRoute = {};
+    bap::shutdown(); fixture::reset_storage();
+}
+
 void concurrent_query() {
     install_state();
     std::atomic_bool ready{}, done{}, mismatch{};
@@ -317,6 +390,6 @@ void local_client_identity() {
 
 int main() {
     static_assert(std::is_trivially_copyable_v<Snapshot> && sizeof(Snapshot) < 256);
-    state_queries(); bap_queries(); anchor_selection(); concurrent_query(); local_client_identity();
+    state_queries(); bap_queries(); anchor_selection(); creator_control_route(); concurrent_query(); local_client_identity();
     std::printf("PASS %u creator snapshot checks with production BAP coordinator and State query; no game or save\n", checks);
 }

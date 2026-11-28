@@ -5,7 +5,9 @@
 
 #include "../../core/logging/log.h"
 #include "../bap/runtime.h"
+#include "../gameplay/resolution/address_resolution_host.h"
 #include "internal.h"
+#include "process_socket.h"
 
 namespace dawn::server::transport {
 namespace {
@@ -35,7 +37,11 @@ bool offer(std::size_t slot,
         return false;
     }
     client::network::BapResponse response{};
-    const client::network::BapRequest request{event, connection_id(slot), frame, peer.output};
+    const bool peerInCurrentProcess = event == client::network::BapEvent::open
+        && gameplay::resolution::enabled()
+        && process_socket::tcp_peer_in_current_process(peer.socket);
+    const client::network::BapRequest request{
+        event, connection_id(slot), frame, peer.output, peerInCurrentProcess};
     if (!bap::consume(request, response) || response.size == 0) {
         return true;
     }

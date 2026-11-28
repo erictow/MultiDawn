@@ -1,17 +1,21 @@
 #include <WinSock2.h>
 #include <WS2tcpip.h>
+#include <Windows.h>
 #include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "core/logging/log.h"
 #include "core/settings/settings.h"
 #include "server/bap/runtime.h"
+#include "server/gameplay/resolution/address_resolution_host.h"
 #include "server/transport/bap_listener.h"
 #include "server/transport/internal.h"
+#include "server/transport/process_socket.h"
 
 namespace {
 using namespace dawn;
@@ -19,6 +23,8 @@ namespace transport = server::transport;
 std::vector<std::uint32_t> received;
 unsigned checks{};
 unsigned polls{};
+unsigned processOpens{};
+bool captureProvenance{};
 
 void require(bool condition, const char* label) {
     ++checks;
@@ -126,14 +132,126 @@ SOCKET connect_peer(std::uint16_t port) {
     return socket;
 }
 
+struct BoundUdp {
+    SOCKET socket{};
+    std::uint16_t port{};
+};
+
+BoundUdp bind_udp(std::uint32_t address, std::uint16_t port = 0) {
+    const SOCKET udp = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    require(udp != INVALID_SOCKET, "create UDP test source");
+    const BOOL reuse = TRUE;
+    require(setsockopt(udp, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof reuse) == 0,
+            "allow overlapping test binds");
+    sockaddr_in bindAddress{};
+    bindAddress.sin_family = AF_INET;
+    bindAddress.sin_addr.s_addr = htonl(address);
+    bindAddress.sin_port = htons(port);
+    require(bind(udp, reinterpret_cast<const sockaddr*>(&bindAddress), sizeof bindAddress) == 0,
+            "bind UDP test source");
+    int length = sizeof bindAddress;
+    require(getsockname(udp, reinterpret_cast<sockaddr*>(&bindAddress), &length) == 0,
+            "find UDP test source port");
+    return {udp, ntohs(bindAddress.sin_port)};
+}
+
+void udp_provenance() {
+    const auto wildcard = bind_udp(INADDR_ANY);
+    const state::gameplay::Endpoint source{INADDR_LOOPBACK, wildcard.port};
+    require(transport::process_socket::udp_source_in_current_process(source),
+            "wildcard socket proves its IPv4 loopback source belongs to this process");
+    require(!transport::process_socket::udp_source_in_current_process({0xC0A80101, source.port}),
+            "the same bound port cannot prove a non-loopback source");
+    require(!transport::process_socket::udp_source_in_current_process({INADDR_LOOPBACK, 0}),
+            "a missing port cannot prove source ownership");
+    const auto overlapping = bind_udp(INADDR_LOOPBACK, wildcard.port);
+    require(!transport::process_socket::udp_source_in_current_process(source),
+            "overlapping binds remain ambiguous even within this process");
+    closesocket(wildcard.socket);
+    require(transport::process_socket::udp_source_in_current_process(source),
+            "a unique explicit loopback bind proves its source");
+    closesocket(overlapping.socket);
+    require(!transport::process_socket::udp_source_in_current_process(source),
+            "closing the UDP source retires its ownership");
+}
+
+void provenance_child(std::uint16_t tcpPort, std::uint16_t udpPort) {
+    WSADATA data{};
+    require(WSAStartup(MAKEWORD(2, 2), &data) == 0, "initialize child Winsock");
+    const SOCKET tcp = connect_peer(tcpPort);
+    u_long blocking = 0;
+    const DWORD timeout = 8000;
+    require(ioctlsocket(tcp, FIONBIO, &blocking) == 0
+            && setsockopt(tcp, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof timeout) == 0,
+            "hold child connection until parent finishes");
+    const auto udp = bind_udp(INADDR_ANY);
+    sockaddr_in target{};
+    target.sin_family = AF_INET;
+    target.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    target.sin_port = htons(udpPort);
+    char message = 'x';
+    require(sendto(udp.socket, &message, 1, 0, reinterpret_cast<const sockaddr*>(&target), sizeof target) == 1,
+            "send from the foreign UDP source");
+    require(recv(tcp, &message, 1, 0) == 0, "parent releases the test connection");
+    closesocket(udp.socket);
+    closesocket(tcp);
+    WSACleanup();
+}
+
+void foreign_process_provenance(SOCKET listener, std::uint16_t tcpPort) {
+    const auto receiver = bind_udp(INADDR_LOOPBACK);
+    const DWORD timeout = 8000;
+    require(setsockopt(receiver.socket, SOL_SOCKET, SO_RCVTIMEO,
+                       reinterpret_cast<const char*>(&timeout), sizeof timeout) == 0, "bound UDP test wait");
+    std::array<wchar_t, 32768> executable{};
+    const auto length = GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
+    require(length != 0 && length < executable.size(), "find the test executable for a foreign PID");
+    auto command = std::wstring(L"\"") + executable.data() + L"\" --provenance-child "
+        + std::to_wstring(tcpPort) + L" " + std::to_wstring(receiver.port);
+    STARTUPINFOW startup{};
+    startup.cb = sizeof startup;
+    PROCESS_INFORMATION child{};
+    require(CreateProcessW(executable.data(), command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                           nullptr, nullptr, &startup, &child) != FALSE,
+            "start another process on local test sockets");
+    CloseHandle(child.hThread);
+    fd_set readers{};
+    FD_SET(listener, &readers);
+    timeval deadline{8, 0};
+    require(select(0, &readers, nullptr, nullptr, &deadline) == 1, "wait for foreign TCP connection");
+    const SOCKET accepted = accept(listener, nullptr, nullptr);
+    require(accepted != INVALID_SOCKET && !transport::process_socket::tcp_peer_in_current_process(accepted),
+            "the accepted socket cannot prove another process's TCP peer");
+    char message{};
+    sockaddr_in source{};
+    int sourceLength = sizeof source;
+    require(recvfrom(receiver.socket, &message, 1, 0, reinterpret_cast<sockaddr*>(&source), &sourceLength) == 1,
+            "read a packet from the foreign UDP socket");
+    require(!transport::process_socket::udp_source_in_current_process(
+                {ntohl(source.sin_addr.s_addr), ntohs(source.sin_port)}),
+            "a loopback datagram cannot prove another process's UDP source");
+    closesocket(accepted);
+    closesocket(receiver.socket);
+    DWORD exitCode{};
+    require(WaitForSingleObject(child.hProcess, timeout) == WAIT_OBJECT_0
+            && GetExitCodeProcess(child.hProcess, &exitCode) != FALSE && exitCode == 0,
+            "foreign test process exits cleanly");
+    CloseHandle(child.hProcess);
+}
+
 void socket_burst() {
     reset();
+    captureProvenance = true;
     require(transport::initialize_on_port(0), "start real listener on ephemeral port");
+    udp_provenance();
+    require(!transport::process_socket::tcp_peer_in_current_process(transport::g_listener.acceptor),
+            "a listener has no established peer to prove");
     sockaddr_in address{};
     int length = sizeof address;
     require(getsockname(transport::g_listener.acceptor,
                         reinterpret_cast<sockaddr*>(&address), &length) == 0,
             "resolve ephemeral listener port");
+    foreign_process_provenance(transport::g_listener.acceptor, ntohs(address.sin_port));
     const SOCKET client = connect_peer(ntohs(address.sin_port));
     const SOCKET other = connect_peer(ntohs(address.sin_port));
     std::uint64_t tick = 1;
@@ -180,6 +298,8 @@ void socket_burst() {
         if (sequence != 1000) require(sequence == next++, "socket order exactly preserved");
     }
     require(next == 400, "all heartbeat-sized frames delivered once");
+    require(processOpens == 2,
+            "both accepted BAP peers prove their complete reversed TCP tuple at open");
     closesocket(client);
     closesocket(other);
     transport::shutdown();
@@ -192,10 +312,17 @@ void write(Channel, Level, std::string_view) noexcept {}
 namespace dawn::core::settings {
 const Settings& get() noexcept { static Settings settings{}; return settings; }
 }
+namespace dawn::server::gameplay::resolution {
+bool enabled() noexcept { return captureProvenance; }
+}
 namespace dawn::server::bap {
 bool consume(const client::network::BapRequest& request,
              client::network::BapResponse& response) noexcept {
     response.size = 0;
+    if (request.peerInCurrentProcess) {
+        require(request.event == client::network::BapEvent::open, "only an open carries TCP provenance");
+        ++processOpens;
+    }
     if (request.event == client::network::BapEvent::poll) ++polls;
     if (request.event != client::network::BapEvent::frame) return true;
     require(request.frame.size() >= 11, "route receives complete fixture");
@@ -210,6 +337,14 @@ bool consume(const client::network::BapRequest& request,
 }
 
 int main(int argc, char** argv) {
+    if (argc == 4 && std::strcmp(argv[1], "--provenance-child") == 0) {
+        const auto tcpPort = std::strtoul(argv[2], nullptr, 10);
+        const auto udpPort = std::strtoul(argv[3], nullptr, 10);
+        require(tcpPort > 0 && tcpPort <= UINT16_MAX && udpPort > 0 && udpPort <= UINT16_MAX,
+                "child sockets require valid ports");
+        provenance_child(static_cast<std::uint16_t>(tcpPort), static_cast<std::uint16_t>(udpPort));
+        return 0;
+    }
     if (argc != 2 || std::strcmp(argv[1], "--socket-only") != 0) buffered_contract();
     socket_burst();
     std::printf("PASS: %u transport checks; coalesced ingress, reply ordering, partial frames, "

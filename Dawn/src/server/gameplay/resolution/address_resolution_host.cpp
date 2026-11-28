@@ -467,6 +467,24 @@ bool lookup_authenticated_route(state::activity::AuthenticationKey owner,
     return true;
 }
 
+bool lookup_unique_authenticated_route(std::span<const state::activity::AuthenticationKey> owners,
+                                       AuthenticatedRoute& output) noexcept {
+    output = {};
+    if (!enabled() || owners.empty()) return false;
+    const Lock lock;
+    const Context* selected = nullptr;
+    for (const auto& context : g_contexts) {
+        if (!context.occupied || !context.bound || context.purpose != RoutePurpose::control
+            || std::find(owners.begin(), owners.end(), context.owner) == owners.end()
+            || selected_for_endpoint(context.peer) != &context) continue;
+        if (selected != nullptr) return false;
+        selected = &context;
+    }
+    if (selected == nullptr || selected_for_owner(selected->owner) != selected) return false;
+    output = {{selected->owner, selected->generation}, selected->peer};
+    return true;
+}
+
 bool validate_authenticated_route(const AuthenticatedRoute& observed) noexcept {
     if (!enabled() || !static_cast<bool>(observed.handle)
         || observed.source.address == 0 || observed.source.port == 0

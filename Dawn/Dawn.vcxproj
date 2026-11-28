@@ -57,7 +57,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>kernel32.lib;bcrypt.lib;user32.lib;gdi32.lib;dwmapi.lib;d3dcompiler.lib;shell32.lib;ws2_32.lib;synchronization.lib;ole32.lib;windowscodecs.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>kernel32.lib;bcrypt.lib;user32.lib;gdi32.lib;dwmapi.lib;d3dcompiler.lib;shell32.lib;ws2_32.lib;iphlpapi.lib;synchronization.lib;ole32.lib;windowscodecs.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
@@ -855,6 +855,7 @@
     <ClCompile Include="src\middleware\signon\config\signon_config_blob.cpp" />
     <ClCompile Include="src\middleware\signon\ownership\signon_ownership_encoder.cpp" />
     <ClCompile Include="src\server\transport\bap_peer_session.cpp" />
+    <ClCompile Include="src\server\transport\process_socket.cpp" />
     <ClCompile Include="src\client\hooks\queuez\family0\family0_source_seed.cpp" />
     <ClCompile Include="src\middleware\content\packages\reader\package_locator_cache.cpp" />
     <ClCompile Include="src\middleware\content\packages\reader\package_block_cache.cpp" />
@@ -1248,6 +1249,7 @@
     <ClInclude Include="src\state\build_data\runtime\build_data_catalog_runtime.h" />
     <ClInclude Include="src\state\build_data\runtime\domain_markers.h" />
     <ClInclude Include="src\server\transport\bap_listener.h" />
+    <ClInclude Include="src\server\transport\process_socket.h" />
     <ClInclude Include="src\server\runtime\server_runtime.h" />
     <ClInclude Include="src\server\ui\runtime\server_ui_module_runtime.h" />
     <ClInclude Include="src\server\ui\activity_override\activity_override_panel.h" />

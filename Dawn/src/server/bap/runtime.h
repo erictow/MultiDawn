@@ -6,6 +6,8 @@
 #include "../../state/activity/definition.h"
 #include "region_lineage.h"
 
+namespace dawn::server::gameplay::resolution { struct AuthenticatedRoute; }
+
 namespace dawn::server::bap {
 
 /** One owner-validated, exact destination/region tuple for the diagnostic HUD. */
@@ -54,6 +56,14 @@ struct CreatorActivitySnapshot final {
 
 /** Atomically selects and observes that same current creator; never chooses the newest session. */
 [[nodiscard]] bool snapshot_current_creator_activity(CreatorActivitySnapshot& output) noexcept;
+
+/**
+ * Observes a unique authenticated control route across the verified same-process BAP
+ * connections of the current creator. Keeps the exact resolver owner and grants no access.
+ * The caller separately checks the UDP socket provenance and native world lifetime.
+ */
+[[nodiscard]] bool snapshot_creator_control_route(state::activity::BindingKey requested,
+    gameplay::resolution::AuthenticatedRoute& output) noexcept;
 
 /** Applies one connection-scoped BAP lifecycle event. */
 [[nodiscard]] bool consume(const client::network::BapRequest& request,

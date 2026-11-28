@@ -202,6 +202,8 @@ struct Session {
     std::uint32_t id{};
     /** Exact process-unique lifetime currently occupying this transport slot. */
     state::activity::ConnectionKey connectionKey{};
+    /** True when the listener verified the client socket belongs to this process. */
+    bool peerInCurrentProcess{};
     /** Exact authentication lifetime currently published on this connection. */
     state::activity::AuthenticationKey authenticationKey{};
     /** Connection-local allocator clock retained across successful reauthentication. */
@@ -318,6 +320,7 @@ struct ConnectionOwnedState final {
     state::activity::ConnectionKey connectionKey{};
     state::activity::AuthenticationGeneration authenticationClock{};
     bool authenticationGenerationExhausted{};
+    bool peerInCurrentProcess{};
 };
 
 /** Non-secret evidence retained after a close whose matchmaking release failed. */
@@ -334,6 +337,7 @@ struct DeferredMatchmakingRetirement final {
         session.connectionKey,
         session.authenticationClock,
         session.authenticationGenerationExhausted,
+        session.peerInCurrentProcess,
     };
 }
 
@@ -349,6 +353,7 @@ inline void restore_connection_owned_state(Session& session,
     session.authenticationClock = connection.authenticationClock;
     session.authenticationGenerationExhausted =
         connection.authenticationGenerationExhausted;
+    session.peerInCurrentProcess = connection.peerInCurrentProcess;
 }
 
 /** Captures the only values retained when failed context cleanup quarantines a transport. */

@@ -408,6 +408,45 @@ static void absent_metadata(const host::AuthenticatedRoute& matched) {
     CHECK(matched.purpose == host::RoutePurpose::control && matched.peerAddress == host::PeerAddressHandle{});
 }
 
+static void unique_control_route() {
+    configure();
+    const auto primary = owner(1);
+    const auto creator = owner(2);
+    const auto foreign = owner(3);
+    const std::array eligible{creator, primary};
+    const auto first = resolve(primary);
+    const auto plain = payload();
+    const Endpoint local{0x7F000001, 45000};
+    const Endpoint alternate{0x7F000001, 45001};
+    host::AuthenticatedRoute result{};
+    CHECK(!host::lookup_unique_authenticated_route(eligible, result));
+    accepted(local, client_packet(first, counter(first.material.b) + 1, plain), plain);
+    CHECK(host::lookup_unique_authenticated_route(eligible, result));
+    const auto observed = result;
+    CHECK(observed.handle.owner == primary && host::validate_authenticated_route(observed));
+    CHECK(!host::lookup_unique_authenticated_route(std::array{creator, owner(1, 2)}, result));
+    absent_metadata(result);
+
+    const auto other = resolve(foreign);
+    accepted(alternate, client_packet(other, counter(other.material.b) + 1, plain), plain);
+    CHECK(host::lookup_unique_authenticated_route(eligible, result) && result.handle == observed.handle);
+    CHECK(!host::lookup_unique_authenticated_route(std::array{creator, primary, foreign}, result));
+    absent_metadata(result);
+
+    const auto second = resolve(primary);
+    const Endpoint third{0x7F000001, 45002};
+    accepted(third, client_packet(second, counter(second.material.b) + 1, plain), plain);
+    CHECK(!host::lookup_unique_authenticated_route(eligible, result));
+    absent_metadata(result);
+    const auto replacement = resolve(foreign);
+    accepted(third, client_packet(replacement, counter(replacement.material.b) + 1, plain), plain);
+    CHECK(!host::lookup_unique_authenticated_route(eligible, result));
+    absent_metadata(result);
+    host::release_owner(primary);
+    CHECK(!host::lookup_unique_authenticated_route(eligible, result));
+    CHECK(!host::validate_authenticated_route(observed));
+}
+
 static host::AuthenticatedRoute accepted_with_metadata(
     Endpoint source, const std::vector<std::byte>& encoded,
     std::span<const std::byte> expected, Owner who,
@@ -953,6 +992,9 @@ static void human_context_isolation_and_retirement() {
         client_packet(response, counter(response.material.b) + 1, plain), plain, b,
         host::RoutePurpose::human, onlyHuman);
     unavailable_route(b);
+    host::AuthenticatedRoute selected{};
+    CHECK(!host::lookup_unique_authenticated_route(std::array{b}, selected));
+    absent_metadata(selected);
     std::array<std::byte, packet::kMaximumDatagram> bytes{}; bytes.fill(std::byte{0xA5});
     const auto before = bytes; std::size_t written = 999;
     CHECK(host::wrap(source, plain, bytes, written) == host::PacketResult::rejected);
@@ -999,6 +1041,7 @@ int main(int argc, char** argv) {
         outbound_and_rekey();
         owner_lifecycle_and_capacity();
         authenticated_route_observation();
+        unique_control_route();
         exact_ingress_and_reply_routes();
         exact_route_retirement();
         peer_registration_policy();

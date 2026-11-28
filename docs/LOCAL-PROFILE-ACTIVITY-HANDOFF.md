@@ -129,20 +129,32 @@ process-local observation with no remote admission. The next integration is to
 use the verified local bindings to exchange the two players' scoped handoff
 information and install the host's activity routes.
 
-In the November 27 host run on `5e5d067c`, the embedded resolver authenticated
-its control datagram at 115.156 seconds. The Guardian had control at 122.859
-seconds. At 384.093 seconds the host verified the accepted invitation and
-reported `stage=accepted_invite result=no_authenticated_route`. Reaching
-that result requires both the native world connection and the corroborated
-local player to have passed. The resolver created its route on BAP connection
-1. The activity-host connection had opened separately on connection 2.
+In the November 27 paired run on `5e5d067c`, each PC authenticated a control
+route on its primary BAP connection after its separate activity-host connection
+opened. Both Guardians gained control. Each PC then reported
+`no_authenticated_route` on its local world check, and the host recorded that
+same result after verifying the accepted invitation. The lookup reached that
+stage after confirming the native connection and the local human. It had
+queried the activity creator's BAP authentication for a route issued to the
+primary connection.
 
-The current lookup asks for the activity creator's exact authentication
-lifetime. No matching control route was returned at acceptance. The next
-transport check is how the game associates its primary BAP channel with
-its activity-host channel and retains or replaces that association on travel.
-A route observed on a different channel needs that relationship before it
-can be used for an activity handoff.
+The world check now verifies both sides of an embedded loopback BAP connection
+against the Windows TCP owner table at accept time. The BAP coordinator checks
+the creator's connection lifetime and asks the resolver for the sole selected
+authenticated control route among current in-process BAP authentications. The
+UDP owner table must also identify a unique socket in this process for the
+route's loopback source. Both the creator and route retain their original
+authentication generations. Revalidation requires the same creator, region,
+native world, player and route. Tower regions can share one control transport
+while retaining separate world observations.
+
+Use the next paired run to confirm `stage=local_world result=observed` on each
+PC after landing and `stage=accepted_invite result=observed` on the inviter
+after acceptance. `no_authenticated_route` indicates the BAP and resolver
+checks found no eligible unique route. `no_local_route_source` indicates the
+selected UDP source failed the socket ownership check. The observations have
+`admission=0`. Exchanging the two players' handoff information and installing
+their shared activity routes are subsequent steps.
 
 ## Recipient roster projection
 

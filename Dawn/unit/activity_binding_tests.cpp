@@ -34,9 +34,11 @@ struct Fixture {
     std::size_t count{1};
     bool enabled{true}, creatorAvailable{true}, advertisementAvailable{true}, routeAvailable{true};
     bool creatorChanges{}, nativeChanges{}, routeChanges{}, lineageChanges{}, collectFails{};
+    bool localSource{true}, replaceRouteDuringCapture{};
     bool worldChanges{}, invalidateInviteDuringCapture{};
     bool sawWorldInvite{};
-    unsigned creatorCalls{}, collectCalls{}, lineageChecks{}, worldReads{}, inviteChecks{}, pins{}, releases{}, logs{};
+    unsigned creatorCalls{}, collectCalls{}, lineageChecks{}, worldReads{}, worldRouteReads{}, inviteChecks{};
+    unsigned pins{}, releases{}, logs{};
 
     Fixture() {
         using namespace dawn::state::activity;
@@ -141,6 +143,8 @@ void lifetime_tests() {
 void world_fixture(std::uint64_t now) {
     reset();
     fixture.count = 2;
+    // The resolver belongs to the primary BAP channel, separate from the Tower creator.
+    fixture.route.handle.owner.connection = {1, {1}};
     auto& local = fixture.observations[0];
     local.sampledAt = now;
     local.sample.role = 0;
@@ -174,6 +178,7 @@ void world_binding_tests() {
     CHECK(output.creator == fixture.creator && output.host == fixture.advertisement.host);
     CHECK(output.world == fixture.world && output.human.playerId == 0x3001);
     CHECK(output.lineageGeneration == fixture.lineage.rowGeneration && output.route.handle == fixture.route.handle);
+    CHECK(output.route.handle.owner != output.creator.binding.authentication);
     CHECK(fixture.pins == fixture.releases && binding::validate_world(output, now));
     for (auto& row : fixture.observations) row.sampledAt = now + 25;
     CHECK(binding::validate_world(output, now + 25));
@@ -191,6 +196,12 @@ void world_binding_tests() {
     world_rejected(binding::Result::malformedWorldHuman, now);
     world_fixture(now); fixture.routeAvailable = false;
     world_rejected(binding::Result::noAuthenticatedRoute, now);
+    world_fixture(now); fixture.route.purpose = gameplay::resolution::RoutePurpose::human;
+    world_rejected(binding::Result::noAuthenticatedRoute, now);
+    world_fixture(now); fixture.localSource = false;
+    world_rejected(binding::Result::noLocalRouteSource, now);
+    world_fixture(now); fixture.replaceRouteDuringCapture = true;
+    world_rejected(binding::Result::changed, now);
     world_fixture(now); fixture.worldChanges = true;
     world_rejected(binding::Result::changed, now);
     world_fixture(now); fixture.nativeChanges = true;
@@ -227,6 +238,20 @@ bool snapshot_creator_activity(state::activity::BindingKey requested, CreatorAct
     output = fixture.creator;
     if (fixture.creatorChanges) ++output.destination.activityIndex;
     return true;
+}
+bool snapshot_creator_control_route(state::activity::BindingKey creator,
+    gameplay::resolution::AuthenticatedRoute& output) noexcept {
+    output = {};
+    if (!fixture.routeAvailable || creator != fixture.creator.binding) return false;
+    output = fixture.route;
+    ++fixture.worldRouteReads;
+    if (fixture.replaceRouteDuringCapture && fixture.worldRouteReads >= 2) ++output.handle.generation;
+    return true;
+}
+}
+namespace dawn::server::transport::process_socket {
+bool udp_source_in_current_process(const state::gameplay::Endpoint& source) noexcept {
+    return fixture.localSource && source.address == 0x7F000001 && source.port != 0;
 }
 }
 namespace dawn::server::gameplay {

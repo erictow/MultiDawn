@@ -128,6 +128,15 @@ struct AuthenticatedRoute {
                                              AuthenticatedRoute& output) noexcept;
 
 /**
+ * Observes the sole selected control route across the supplied exact authentication owners.
+ * The caller proves owner eligibility. Each distinct current endpoint counts separately,
+ * and multiple matches clear output even when they have the same owner.
+ */
+[[nodiscard]] bool lookup_unique_authenticated_route(
+    std::span<const state::activity::AuthenticationKey> owners,
+    AuthenticatedRoute& output) noexcept;
+
+/**
  * Rechecks exact ownership, context generation, pinned source and current route
  * selection. Release, reset and slot reuse invalidate handles without reuse.
  * The result is an observation under the resolver lock, not a retained lease.

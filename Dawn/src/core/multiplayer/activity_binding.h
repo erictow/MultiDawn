@@ -25,6 +25,7 @@ enum class Result : std::uint8_t {
     noWorldHuman,
     ambiguousWorldHuman,
     malformedWorldHuman,
+    noLocalRouteSource,
 };
 
 /** Public copied observations only. No row pin, account data, descriptor or grant is retained. */
@@ -56,7 +57,7 @@ struct WorldObservation final {
     server::gameplay::resolution::AuthenticatedRoute route{};
 };
 
-/** Requires the current native world link and independently corroborated local player ownership. */
+/** Observes the current native world, corroborated human and this process's control route. */
 [[nodiscard]] Result inspect_world(std::uint64_t now, WorldObservation& output) noexcept;
 [[nodiscard]] bool validate_world(const WorldObservation& previous, std::uint64_t now) noexcept;
 
