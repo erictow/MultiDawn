@@ -297,10 +297,20 @@ $global:NativePreflightLogProcess = [pscustomobject]@{
 }
 try {
     Assert ((& $findLog -KitRoot $kit -PathOnly) -ieq $liveLog) 'Running game must use its loaded DLL, even if the pointer or another layout is newer'
+    Assert ((& $findLog -SourceCommit $commit -PathOnly) -ieq $liveLog) 'Standalone collection must discover the running fixture'
     $global:NativePreflightLogProcess.Path = Join-Path $source 'destiny2.exe'
     Refuses { & $findLog -KitRoot $kit -PathOnly } '*running Destiny 2 from this kit*'
 } finally { $global:NativePreflightLogProcess = $null }
 Pass 'Running game log follows the loaded DLL and refuses an unrelated game'
+$priorLocalData = $env:LOCALAPPDATA
+try {
+    $env:LOCALAPPDATA = Join-Path $testRoot 'isolated launcher settings'
+    Write-File (Join-Path $env:LOCALAPPDATA 'MultiDawn/launcher-path.txt') $emptyOutput
+    Write-File $closedLog $identity
+    Assert ((& $findLog -SourceCommit $commit -PathOnly) -ieq $closedLog) 'Standalone collector must find the matching kit after game exit'
+    Refuses { & $findLog -KitRoot $kit -SourceCommit ('b' * 40) -PathOnly } '*needs the LAN kit from the paired test run*'
+} finally { $env:LOCALAPPDATA = $priorLocalData }
+Pass 'Standalone collector finds the closed game through launcher settings and refuses other releases'
 Remove-Item -LiteralPath $manifestPath
 $calls = Calls
 Refuses { & $prepare -SourceGame $noDatabase } '*Supply ExpectedRuntimeSha256*'

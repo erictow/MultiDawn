@@ -2,12 +2,38 @@
 <# Collects the current kit's Dawn log in a ZIP. PathOnly returns the verified source path. #>
 [CmdletBinding()]
 param(
-    [string] $KitRoot = (Join-Path $PSScriptRoot '../..'),
+    [string] $KitRoot,
+    [ValidatePattern('^[0-9a-fA-F]{40}$')][string] $SourceCommit,
     [switch] $PathOnly,
     [switch] $NoExplorer
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$games = @(Get-Process -Name destiny2 -ErrorAction SilentlyContinue)
+if (-not $KitRoot -and $env:MULTIDAWN_LOG_KIT) { $KitRoot = $env:MULTIDAWN_LOG_KIT }
+if (-not $KitRoot -and $SourceCommit) {
+    # The standalone collector can live outside an already extracted LAN kit.
+    $folders = @($games | Where-Object Path | ForEach-Object { [IO.Path]::GetDirectoryName($_.Path) })
+    $saved = Join-Path $env:LOCALAPPDATA 'MultiDawn/launcher-path.txt'
+    if (Test-Path -LiteralPath $saved -PathType Leaf) { $folders += ([IO.File]::ReadAllText($saved)).Trim() }
+    $candidates = @(foreach ($folder in $folders) {
+        if ($folder -and [IO.Path]::IsPathRooted($folder) -and [IO.Path]::GetFileName($folder) -match '^session-[0-9a-f]{32}$') {
+            [IO.Path]::GetFullPath((Join-Path $folder '../../..'))
+        }
+    })
+    $kitName = 'MultiDawn-Native-LAN-' + $SourceCommit.Substring(0,8)
+    $download = Join-Path (Join-Path $env:USERPROFILE 'Downloads') $kitName
+    foreach ($candidate in @($candidates) + @($download, (Join-Path $download $kitName))) {
+        $record = Join-Path $candidate 'native-lan-test.json'
+        if ((Test-Path -LiteralPath $record -PathType Leaf) -and
+            (Get-Content -LiteralPath $record -Raw | ConvertFrom-Json).sourceCommit -ieq $SourceCommit) {
+            $KitRoot = $candidate
+            break
+        }
+    }
+    if (-not $KitRoot) { throw "Drag the extracted $kitName folder onto Collect-Test-Log.cmd." }
+}
+if (-not $KitRoot) { $KitRoot = Join-Path $PSScriptRoot '../..' }
 $kit = (Get-Item -LiteralPath $KitRoot).FullName.TrimEnd('\')
 $sessions = Join-Path $kit 'build\gameplay-tests'
 
@@ -29,7 +55,7 @@ $manifest = Get-Content -Raw -LiteralPath (Get-KitFile (Join-Path $kit 'native-l
 if ($manifest.schema -ne 1 -or $manifest.runtimeSha256 -notmatch '^[0-9a-f]{64}$' -or $manifest.sourceCommit -notmatch '^[0-9a-f]{40}([0-9a-f]{24})?$') {
     throw 'This folder needs the native LAN test kit manifest.'
 }
-$games = @(Get-Process -Name destiny2 -ErrorAction SilentlyContinue)
+if ($SourceCommit -and $manifest.sourceCommit -ine $SourceCommit) { throw 'This collector needs the LAN kit from the paired test run.' }
 $loadedDll = $null
 if ($games.Count) {
     $matching = @($games | Where-Object { $_.Path -and (Test-SessionPath ([IO.Path]::GetDirectoryName($_.Path))) })
