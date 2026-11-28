@@ -2,7 +2,9 @@
 #include "../src/core/multiplayer/companion.h"
 #include "../src/client/hooks/bootflow/native_identity_observation.h"
 #include "../src/core/logging/log.h"
+#include "../src/server/bap/local_identity_snapshot.h"
 #include "../src/server/gameplay/gameplay_advertisement.h"
+#include "../src/server/gameplay/peer/peer_transport.h"
 
 #include <Windows.h>
 #include <array>
@@ -38,9 +40,12 @@ struct Fixture {
     bool worldChanges{}, invalidateInviteDuringCapture{};
     bool sawWorldInvite{};
     bool worldProbeEnabled{}, sawBothWorlds{}, guestReplied{}, guestReady{};
+    bool sourceConnect{true}, wrongSourceReceipt{}, missingAccount{};
+    bool playerSourceObserved{}, missingIdentityObserved{}, incompleteIdentityObserved{}, missingConnectObserved{};
+    bool replaceSourceReceipt{}, changedSourceObserved{};
     mp::WorldProbeToken probe{};
     unsigned creatorCalls{}, collectCalls{}, lineageChecks{}, worldReads{}, worldRouteReads{}, inviteChecks{};
-    unsigned pins{}, releases{}, logs{};
+    unsigned pins{}, releases{}, logs{}, sourceReceiptReads{};
 
     Fixture() {
         using namespace dawn::state::activity;
@@ -252,6 +257,7 @@ void world_probe_tests() {
     reply.token = fixture.probe;
     binding::service_world_probe(reply);
     CHECK(fixture.sawBothWorlds);
+    CHECK(fixture.playerSourceObserved);
 
     fixture.sawBothWorlds = false;
     binding::trace_invitation_world(invitation);
@@ -267,6 +273,24 @@ void world_probe_tests() {
     ++incoming.destination.region;
     binding::service_world_probe(incoming);
     CHECK(fixture.guestReplied && !fixture.guestReady);
+
+    --incoming.destination.region;
+    fixture.wrongSourceReceipt = true;
+    binding::service_world_probe(incoming);
+    CHECK(fixture.missingIdentityObserved);
+    fixture.wrongSourceReceipt = false;
+    fixture.missingAccount = true;
+    binding::service_world_probe(incoming);
+    CHECK(fixture.incompleteIdentityObserved);
+    fixture.missingAccount = false;
+    fixture.sourceConnect = false;
+    binding::service_world_probe(incoming);
+    CHECK(fixture.missingConnectObserved);
+    fixture.sourceConnect = true;
+    fixture.replaceSourceReceipt = true;
+    fixture.sourceReceiptReads = 0;
+    binding::service_world_probe(incoming);
+    CHECK(fixture.changedSourceObserved);
 }
 } // namespace
 
@@ -290,6 +314,22 @@ bool snapshot_creator_control_route(state::activity::BindingKey creator,
     output = fixture.route;
     ++fixture.worldRouteReads;
     if (fixture.replaceRouteDuringCapture && fixture.worldRouteReads >= 2) ++output.handle.generation;
+    return true;
+}
+bool snapshot_creator_client_identity(state::activity::BindingKey creator,
+                                      LocalClientIdentitySnapshot& output) noexcept {
+    output = {};
+    if (creator != fixture.creator.binding) return false;
+    output.binding = creator;
+    output.lineage = fixture.creator.lineage;
+    auto& publication = output.publication;
+    publication.activity = fixture.creator.lineage.bound;
+    publication.hostRegion = fixture.creator.hostRegion;
+    publication.receipt.revision = 1;
+    publication.receipt.raw = {fixture.creator.memberKey, -1, -1, 2, 3, 4, 5};
+    if (++fixture.sourceReceiptReads > 1 && fixture.replaceSourceReceipt) ++publication.receipt.revision;
+    if (fixture.wrongSourceReceipt) ++publication.hostRegion.generation.value;
+    if (fixture.missingAccount) publication.receipt.raw.accountSoid = 0;
     return true;
 }
 }
@@ -323,6 +363,14 @@ bool lookup_authenticated_route(state::activity::AuthenticationKey, Authenticate
     output = fixture.route; return true;
 }
 bool validate_authenticated_route(const AuthenticatedRoute&) noexcept { return !fixture.routeChanges; }
+}
+namespace dawn::server::gameplay::peer {
+bool snapshot_resolved_connect(const resolution::AuthenticatedRoute& route, ResolvedConnectObservation& output) noexcept {
+    output = {};
+    if (!fixture.sourceConnect || route.handle != fixture.route.handle) return false;
+    output.remoteAddress.back() = std::byte{6};
+    return true;
+}
 }
 namespace dawn::client::hooks::bootflow::native_identity_observation {
 bool enabled() noexcept { return fixture.enabled; }
@@ -373,6 +421,16 @@ void write(Channel, Level, std::string_view line) noexcept {
         fixture.sawWorldInvite = true;
     if (line == "ev=world_probe stage=host result=both_worlds_observed admission=0")
         fixture.sawBothWorlds = true;
+    if (line.starts_with("ev=world_player_source stage=host result=observed netaddr_method=6"))
+        fixture.playerSourceObserved = true;
+    if (line.starts_with("ev=world_player_source stage=guest result=no_identity_receipt"))
+        fixture.missingIdentityObserved = true;
+    if (line.starts_with("ev=world_player_source stage=guest result=incomplete_identity"))
+        fixture.incompleteIdentityObserved = true;
+    if (line.starts_with("ev=world_player_source stage=guest result=no_resolved_connect"))
+        fixture.missingConnectObserved = true;
+    if (line.starts_with("ev=world_player_source stage=guest result=changed_during_capture"))
+        fixture.changedSourceObserved = true;
 }
 }
 

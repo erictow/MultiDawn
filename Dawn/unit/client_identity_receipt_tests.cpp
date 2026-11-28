@@ -92,10 +92,12 @@ membership::ClientIdentityPublication publication() {
 void refuses_query(activity::ActivityInstanceKey key, activity::HostRegionKey expected) {
     membership::ClientIdentityPublication result{};
     result.receipt.raw = identity(); result.receipt.revision = 99;
+    result.region.hasTransitionToken = true;
     CHECK(!membership::snapshot_client_identity(key, expected, result));
     CHECK(!static_cast<bool>(result.activity) && !static_cast<bool>(result.hostRegion)
         && result.receipt.revision == 0 && result.receipt.raw == Identity{}
-        && result.stateRevision == 0 && result.recordRevision == 0);
+        && result.stateRevision == 0 && result.recordRevision == 0
+        && result.region == membership::MemberRegionState{});
 }
 void receipt_without_wire_change() {
     reset(); const auto raw = identity(); seed(raw);
@@ -226,8 +228,15 @@ void merge_and_revision_limits() {
     CHECK(membership::prepare_client_identity(kActivity, raw, raw, pending) && membership::commit(pending));
     const auto initial = publication().receipt;
     membership::AuthoritativeUpdate update{}; update.hasRegion = true; update.region = {64, 0xABCDEF};
+    update.hasTransitionToken = true;
+    update.transitionToken = 0;
+    update.hasSynchronizationToken = true;
+    update.synchronizationToken = 71;
     CHECK(membership::prepare_authoritative(kActivity, update, pending) && membership::commit(pending));
-    CHECK(publication().receipt == initial && region().generation.value == 4);
+    const auto withRegion = publication();
+    CHECK(withRegion.receipt == initial && region().generation.value == 4);
+    CHECK(withRegion.region.hasTransitionToken && withRegion.region.transitionToken == 0
+        && withRegion.region.hasSynchronizationToken && withRegion.region.synchronizationToken == 71);
     CHECK(publication().receipt.revision < publication().recordRevision);
     const auto merged = membership::transactions::merge(record().membership, {});
     CHECK(merged.clientIdentityReceipt == initial);

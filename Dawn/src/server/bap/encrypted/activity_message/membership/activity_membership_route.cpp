@@ -123,15 +123,11 @@ void report_identity(const service::client_identity::ClientIdentity& parsed) noe
     const int written =
         std::snprintf(line.data(),
                       line.size(),
-                      "ev=activity stage=identity result=ok key=0x%llX field1=%d field2=%d "
-                      "field3=0x%llX acct=0x%llX field5=0x%llX field6=0x%llX",
-                      static_cast<unsigned long long>(parsed.memberKey),
-                      static_cast<int>(parsed.field1),
-                      static_cast<int>(parsed.field2),
-                      static_cast<unsigned long long>(parsed.field3),
-                      static_cast<unsigned long long>(parsed.accountSoid),
-                      static_cast<unsigned long long>(parsed.field5),
-                      static_cast<unsigned long long>(parsed.field6));
+                      "ev=activity stage=identity result=ok join_identity_present=%u "
+                      "account_present=%u field5_present=%u",
+                      parsed.field3 != 0 ? 1U : 0U,
+                      parsed.accountSoid != 0 ? 1U : 0U,
+                      parsed.field5 != 0 ? 1U : 0U);
     if (written > 0) {
         core::log::write(core::log::Channel::server,
                          core::log::Level::info,

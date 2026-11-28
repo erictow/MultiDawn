@@ -415,18 +415,20 @@ bool live_address(roster::resolver::PeerAddressHandle handle, std::span<const st
 
 void projection_lifecycle() {
     auto source = with_humans(5);
+    source.epoch = 0; // The runtime uses zero for Tower on the wire.
     auto base = source;
     base.remoteHumans = {};
     base.remoteHumanCount = 0;
-    const roster::Recipient recipient{{{{1, {2}}, {3}}, {4}}, {{800, {5}}, {6}},
-        base.identity.memberKey, base.citizen.memberKey, base.epoch, base.citizen.regionIndex};
+    // The activity creator uses FAH while address resolution uses primary BAP.
+    const roster::Recipient recipient{{{{2, {2}}, {3}}, {4}}, {{1, {1}}, {2}}, {{800, {5}}, {6}},
+        base.identity.memberKey, base.citizen.memberKey, 10, base.epoch, base.citizen.regionIndex};
     roster::Projection rosterView;
     CHECK(!rosterView.open({}) && rosterView.open(recipient));
     CHECK(rosterView.open(recipient));
 
     std::array<roster::SlotHandle, membership::kMaximumRemoteHumans> handles{};
     for (std::size_t index = 0; index < handles.size(); ++index) {
-        registrations[index] = {source.remoteHumans[index], {recipient.binding.authentication, 20 + index}, 80 + index, 1000};
+        registrations[index] = {source.remoteHumans[index], {recipient.resolverOwner, 20 + index}, 80 + index, 1000};
     }
     auto refused = [&](const roster::Peer& peer) {
         roster::SlotHandle handle{999, 2};
@@ -435,6 +437,18 @@ void projection_lifecycle() {
     };
     auto wrong = registrations[0]; wrong.registeredAddress.owner.generation.value++;
     refused(wrong);
+    const auto primaryRegistration = registrations[0];
+    // Even a live, exact address registration on the FAH authentication is the wrong owner.
+    registrations[0].registeredAddress.owner = recipient.binding.authentication;
+    CHECK(live_address(registrations[0].registeredAddress, registrations[0].human.address));
+    refused(registrations[0]);
+    registrations[0] = primaryRegistration;
+    auto missingResolverOwner = recipient;
+    missingResolverOwner.resolverOwner = {};
+    CHECK(!rosterView.open(missingResolverOwner));
+    auto missingTable = recipient;
+    missingTable.tableGeneration = 0;
+    CHECK(!rosterView.open(missingTable));
     wrong = registrations[0]; wrong.deadline = 100;
     refused(wrong);
     wrong = registrations[0]; wrong.human.address[60] ^= std::byte{1};
@@ -469,21 +483,39 @@ void projection_lifecycle() {
     CHECK(inspect(output) == inspect(sparse));
     refused(registrations[0]);
 
-    auto newEpoch = other; ++newEpoch.epoch;
-    CHECK(!rosterView.open(newEpoch));
+    auto reauthenticated = recipient;
+    ++reauthenticated.resolverOwner.generation.value;
+    CHECK(!rosterView.open(reauthenticated));
+    CHECK(!rosterView.project(reauthenticated, base, 999, &live_address, output));
+    CHECK(!rosterView.retire(reauthenticated, handles[0], revoke) && !revoke);
+
+    auto changedWire = reauthenticated;
+    ++changedWire.wireEpoch;
+    auto newTable = reauthenticated;
+    ++newTable.tableGeneration;
+    CHECK(!rosterView.open(newTable));
     for (std::size_t index : {0U, 1U, 3U, 4U}) {
         CHECK(rosterView.retire(recipient, handles[index], revoke) && revoke == registrations[index].registeredAddress);
     }
-    CHECK(!rosterView.open(other) && rosterView.open(newEpoch));
-    base.epoch = newEpoch.epoch;
+    CHECK(!rosterView.open(other) && !rosterView.open(reauthenticated) && !rosterView.open(changedWire));
+    CHECK(rosterView.open(newTable));
     roster::SlotHandle fresh{};
-    CHECK(rosterView.add(newEpoch, base, registrations[0], 100, &live_address, fresh));
+    // Reauthentication of the same primary socket never reuses the previous registration.
+    CHECK(live_address(registrations[0].registeredAddress, registrations[0].human.address));
+    CHECK(!rosterView.add(newTable, base, registrations[0], 100, &live_address, fresh) && !fresh);
+    registrations[0].registeredAddress = {newTable.resolverOwner, 100};
+    CHECK(rosterView.add(newTable, base, registrations[0], 100, &live_address, fresh));
     CHECK(fresh.nativeSlot == handles[0].nativeSlot && fresh.generation != handles[0].generation);
-    CHECK(!rosterView.retire(newEpoch, handles[0], revoke) && !revoke);
+    CHECK(!rosterView.retire(newTable, handles[0], revoke) && !revoke);
     CHECK(!rosterView.project(recipient, base, 100, &live_address, output));
-    CHECK(rosterView.project(newEpoch, base, 100, &live_address, output));
+    CHECK(rosterView.project(newTable, base, 100, &live_address, output));
     CHECK(output.remoteHumanCount == 1);
     same_identity(output.remoteHumans[0].identity, registrations[0].human.identity);
+    auto wrongWire = base;
+    ++wrongWire.epoch;
+    CHECK(!rosterView.project(newTable, wrongWire, 100, &live_address, output));
+    CHECK(rosterView.retire(newTable, fresh, revoke) && revoke == registrations[0].registeredAddress);
+    CHECK(!rosterView.open(recipient)); // An empty new table still cannot reopen an old generation.
 }
 
 } // namespace

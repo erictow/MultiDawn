@@ -21,7 +21,8 @@ bool snapshot_client_identity(ActivityInstanceKey key, HostRegionKey expected,
     if (slot != kInvalidSessionSlot) {
         const SessionRecord& record = state.sessions[slot];
         const auto hostRegion = activity::transactions::host_region_key(record);
-        const auto& receipt = record.membership.clientIdentityReceipt;
+        const auto& membership = record.membership;
+        const auto& receipt = membership.clientIdentityReceipt;
         if (record.joined && record.joinedRevision != kInvalidRevision
             && record.recordRevision != kInvalidRevision && hostRegion == expected
             && record.membership.hasIdentity
@@ -31,7 +32,10 @@ bool snapshot_client_identity(ActivityInstanceKey key, HostRegionKey expected,
             && record.recordRevision <= state.stateRevision && record.memberKey != 0
             && receipt.raw.memberKey == record.memberKey && receipt.raw.smallOpaque >= -1
             && receipt.raw.smallOpaque <= 1022) {
-            selected = {key, hostRegion, receipt, state.stateRevision, record.recordRevision};
+            selected = {key, hostRegion, receipt, state.stateRevision, record.recordRevision,
+                {membership.transitionToken, membership.synchronizationToken,
+                 membership.hasTransitionToken, membership.hasSynchronizationToken,
+                 membership.currentLeg, membership.pendingLeg}};
             found = true;
         }
     }

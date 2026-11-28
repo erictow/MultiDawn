@@ -42,6 +42,14 @@ struct RegionView final {
     bool identityMatchesMemberKey{};
 };
 
+/** Current region synchronization state, copied with the raw identity publication. */
+struct MemberRegionState final {
+    std::uint8_t transitionToken{}, synchronizationToken{};
+    bool hasTransitionToken{}, hasSynchronizationToken{};
+    RegionLeg currentLeg{}, pendingLeg{};
+    friend constexpr bool operator==(const MemberRegionState&, const MemberRegionState&) noexcept = default;
+};
+
 /** Local-only raw client publication. Contains account fields; never a public routing snapshot. */
 struct ClientIdentityPublication final {
     ActivityInstanceKey activity{};
@@ -50,6 +58,7 @@ struct ClientIdentityPublication final {
     ClientIdentityReceipt receipt{};
     std::uint64_t stateRevision{};
     std::uint64_t recordRevision{};
+    MemberRegionState region{};
 };
 
 /**

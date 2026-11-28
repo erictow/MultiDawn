@@ -24,6 +24,7 @@
 #include "../src/server/gameplay/endpoint/gameplay_endpoint.h"
 #include "../src/server/gameplay/gameplay_log.h"
 #include "../src/server/gameplay/peer/peer_transport.h"
+#include "../src/server/gameplay/peer/resolved_connect_receipt.h"
 #include "../src/server/gameplay/resolution/address_resolution_host.h"
 #include "../src/state/gameplay/replication_roles.h"
 
@@ -45,6 +46,7 @@ static unsigned checks{};
 static dawn::core::settings::Settings testSettings{};
 static unsigned peerCalls{}, dtlsCalls{}, associationCalls{}, receiveReports{};
 static Endpoint lastPeer{};
+static host::AuthenticatedRoute lastPeerRoute{};
 static Bytes lastPeerPayload, lastLegacyPayload, automaticReply;
 static bool consumeLegacyDtls{};
 static endpoint::RoutedSendResult replyResult = endpoint::RoutedSendResult::notRouted;
@@ -100,10 +102,12 @@ void report(core::log::Level, const char* format, ...) noexcept {
 }
 }
 namespace dawn::server::gameplay::peer {
-void deliver_resolved(const state::gameplay::Endpoint& from, std::span<const std::byte> payload,
+void deliver_resolved(const resolution::AuthenticatedRoute& route, std::span<const std::byte> payload,
              std::uint64_t) noexcept {
+    const auto& from = route.source;
     ++peerCalls;
     lastPeer = from;
+    lastPeerRoute = route;
     lastPeerPayload.assign(payload.begin(), payload.end());
     if (!automaticReply.empty()) {
         // A handler may reply synchronously. The endpoint and resolver locks
@@ -350,6 +354,12 @@ static void exercise_endpoint() {
     send(client, first);
     pump_until([] { return peerCalls == 1; });
     CHECK(lastPeer.address == client.local.address && lastPeer.port == client.local.port);
+    host::AuthenticatedRoute expectedRoute{};
+    CHECK(host::lookup_authenticated_route(owner, expectedRoute));
+    CHECK(lastPeerRoute.handle == expectedRoute.handle
+        && lastPeerRoute.source.address == client.local.address
+        && lastPeerRoute.source.port == client.local.port
+        && lastPeerRoute.purpose == host::RoutePurpose::control);
     CHECK(lastPeerPayload == request && dtlsCalls == 0 && associationCalls == 0);
     CHECK(replyResult == endpoint::RoutedSendResult::sent);
     verify_reply(client, response, counter(response.material.e), reply);
@@ -669,6 +679,44 @@ static void exercise_human_routes() {
     endpoint::shutdown(); host::reset();
 }
 
+static void exercise_connect_receipt() {
+    using namespace dawn::server::gameplay::peer;
+    const Owner owner{{4, {2}}, {7}};
+    ResolvedConnectObservation initial{{owner, 3}, {0x7F000001u, 45000}, 14, 0, 37, 112, {}};
+    initial.remoteAddress[84] = std::byte{0xFA};
+    detail::ResolvedConnectReceipt receipt;
+    receipt.connect_request(initial, true);
+    CHECK(!receipt.snapshot(initial.route).route);
+    receipt.established(initial.route, false);
+    CHECK(!receipt.snapshot(initial.route).route);
+    receipt.established(initial.route, true);
+    CHECK(receipt.snapshot(initial.route) == initial);
+    receipt.connect_request(initial, false);
+    CHECK(receipt.snapshot(initial.route) == initial);
+
+    auto replacement = initial;
+    ++replacement.route.generation;
+    CHECK(!receipt.snapshot(replacement.route).route);
+    receipt.established(replacement.route, true);
+    CHECK(!receipt.snapshot(initial.route).route);
+    receipt.connect_request(initial, false);
+    receipt.established(initial.route, true);
+    CHECK(!receipt.snapshot(initial.route).route); // An old retransmission cannot restore proof.
+
+    ++replacement.localChannelId;
+    receipt.connect_request(replacement, true);
+    receipt.established(replacement.route, true);
+    CHECK(receipt.snapshot(replacement.route) == replacement);
+    CHECK(!receipt.snapshot(initial.route).route);
+    auto changedAddress = replacement;
+    changedAddress.remoteAddress[84] = std::byte{0xFB};
+    receipt.connect_request(changedAddress, false);
+    CHECK(!receipt.snapshot(replacement.route).route);
+    receipt.connect_request(replacement, true);
+    receipt.established({}, true);
+    CHECK(!receipt.snapshot(replacement.route).route);
+}
+
 int main() {
     CHECK(SetEnvironmentVariableW(L"DAWN_NATIVE_ADDRESS_RESOLUTION", L"1") != 0);
     WSADATA data{};
@@ -676,6 +724,7 @@ int main() {
     exercise_endpoint();
     exercise_explicit_routes();
     exercise_human_routes();
+    exercise_connect_receipt();
     host::reset();
     CHECK(WSACleanup() == 0);
     std::printf("endpoint_resolution_tests: PASS %u checks (real loopback UDP, production routing/crypto)\n", checks);

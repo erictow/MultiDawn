@@ -315,7 +315,7 @@ void service(std::uint64_t now) noexcept {
             }
             // Native relay security already protects the engine container or
             // fragment. It is not a Demonware/SRP handshake nested inside it.
-            peer::deliver_resolved(from, payload, now);
+            peer::deliver_resolved(route, payload, now);
             continue;
         } else if (size > kInnerDatagramCapacity) {
             continue;

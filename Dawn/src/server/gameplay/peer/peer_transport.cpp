@@ -2,6 +2,7 @@
 #include "traffic_log_repetition.h"
 #include "peer_link_lookup.h"
 #include "peer_view_echo.h"
+#include "resolved_connect_receipt.h"
 
 #include <Windows.h>
 
@@ -86,6 +87,17 @@ std::atomic<std::uint64_t> g_publicationCaptureId{0};
 
 SRWLOCK g_lock = SRWLOCK_INIT;
 std::array<state::gameplay::PeerLink, state::gameplay::kAssociationCapacity> g_peers;
+std::array<detail::ResolvedConnectReceipt, state::gameplay::kAssociationCapacity> g_resolvedConnects{};
+
+[[nodiscard]] detail::ResolvedConnectReceipt& receipt_for(const state::gameplay::PeerLink& link) noexcept {
+    return g_resolvedConnects[static_cast<std::size_t>(&link - g_peers.data())];
+}
+
+[[nodiscard]] bool control_context(const resolution::AuthenticatedRoute* route) noexcept {
+    return route != nullptr && route->handle && route->purpose == resolution::RoutePurpose::control
+        && route->peerAddress == resolution::PeerAddressHandle{};
+}
+
 /** Channel ids this host hands out. The peer refuses one that does not increase. */
 std::uint32_t g_channelId{0};
 /** Reporting state is independent of transport state and uses its own short-held lock. */
@@ -308,7 +320,8 @@ void answer_establish(const state::gameplay::Endpoint& to,
  */
 void answer_connect(const state::gameplay::Endpoint& from,
                     const wire::ConnectRequest& request,
-                    std::uint64_t now) noexcept {
+                    std::uint64_t now,
+                    const resolution::AuthenticatedRoute* resolvedRoute) noexcept {
     wire::ConnectResponse response{};
     // The peer checks both echoed fields and closes the connection on a wrong sequence.
     response.remoteChannelId = request.channelId;
@@ -355,6 +368,13 @@ void answer_connect(const state::gameplay::Endpoint& from,
         // The membership update must name the peer's own address, so its own blob is kept.
         peer->remoteAddress = request.address;
         peer->remoteAddressPresent = true;
+        ResolvedConnectObservation observed{};
+        if (control_context(resolvedRoute)) {
+            observed = {
+                resolvedRoute->handle, from, peer->localConnectionSequence, request.channelId,
+                peer->localTransportSequence, request.sequence, request.address};
+        }
+        receipt_for(*peer).connect_request(observed, fresh);
         // A retransmission must not move an established link back a stage.
         if (fresh) {
             peer->stage = state::gameplay::PeerStage::connecting;
@@ -520,7 +540,8 @@ void answer_join(const state::gameplay::Endpoint& from, const wire::JoinRequest&
  */
 void consume_container(const state::gameplay::Endpoint& from,
                        std::span<const std::byte> payload,
-                       std::uint64_t now) noexcept {
+                       std::uint64_t now,
+                       const resolution::AuthenticatedRoute* resolvedRoute) noexcept {
     bits::Reader reader(payload);
     if (!wire::read_marker(reader)) {
         return;
@@ -540,7 +561,7 @@ void consume_container(const state::gameplay::Endpoint& from,
             if (!wire::read_request(reader, request)) {
                 return;
             }
-            answer_connect(from, request, now);
+            answer_connect(from, request, now, resolvedRoute);
             continue;
         }
         if (header.id == static_cast<std::uint8_t>(wire::JoinId::request)) {
@@ -650,7 +671,7 @@ std::size_t apply_acknowledgement(state::gameplay::PeerLink& peer,
 void consume_established(const state::gameplay::Endpoint& from,
                          std::span<const std::byte> payload,
                          std::uint64_t now,
-                         bool resolvedNative) noexcept {
+                         const resolution::AuthenticatedRoute* resolvedRoute) noexcept {
     wire::EstablishedPacket packet{};
     if (!wire::decode_established(payload, false, packet)) {
         report(core::log::Level::warn, "ev=gameplay stage=packet result=drop reason=grammar");
@@ -677,6 +698,8 @@ void consume_established(const state::gameplay::Endpoint& from,
     std::array<wire::AssembledMessage, kMessageReportCapacity> bodies{};
     if (peer != nullptr) {
         const bool wasConnected = peer->stage == state::gameplay::PeerStage::connected;
+        const auto route = control_context(resolvedRoute) ? resolvedRoute->handle : resolution::RouteHandle{};
+        receipt_for(*peer).established(route, wasConnected);
         // Preserve the establishment gate: only a subsequent connected packet
         // may publish application replies, including the native view echo.
         if (wasConnected) { peer->applicationReady = true; }
@@ -696,7 +719,7 @@ void consume_established(const state::gameplay::Endpoint& from,
         wire::AssembledMessage assembled{};
         const auto acceptMessage = [&](const wire::AssembledMessage& message) noexcept {
             apply_message(*peer, message);
-            if (resolvedNative && message.id == middleware::gameplay::group::kViewMessageId
+            if (resolvedRoute != nullptr && message.id == middleware::gameplay::group::kViewMessageId
                 && view_echo::unaffiliated(*peer)) {
                 const auto result = view_echo::queue(*peer, view_echo::key_for(*peer), message);
                 if (result == view_echo::Result::queued) { ++viewsQueued; }
@@ -861,22 +884,45 @@ void deliver(const state::gameplay::Endpoint& from,
         return;
     }
     if ((std::to_integer<unsigned>(payload[0]) >> kMarkerShift) != 0) {
-        consume_container(from, payload, now);
+        consume_container(from, payload, now, nullptr);
         return;
     }
-    consume_established(from, payload, now, false);
+    consume_established(from, payload, now, nullptr);
 }
 
 /** Authenticated native routes may establish a link view before a group join. */
-void deliver_resolved(const state::gameplay::Endpoint& from,
+void deliver_resolved(const resolution::AuthenticatedRoute& route,
                       std::span<const std::byte> payload,
                       std::uint64_t now) noexcept {
     if (payload.empty()) { return; }
     if ((std::to_integer<unsigned>(payload[0]) >> kMarkerShift) != 0) {
-        consume_container(from, payload, now);
+        consume_container(route.source, payload, now, &route);
         return;
     }
-    consume_established(from, payload, now, true);
+    consume_established(route.source, payload, now, &route);
+}
+
+bool snapshot_resolved_connect(const resolution::AuthenticatedRoute& route,
+                               ResolvedConnectObservation& output) noexcept {
+    output = {};
+    if (!resolution::validate_authenticated_route(route)) return false;
+    const auto collect = [&]() noexcept {
+        ResolvedConnectObservation value{};
+        AcquireSRWLockShared(&g_lock);
+        const auto* link = find_locked(route.source);
+        if (link != nullptr && link->stage == state::gameplay::PeerStage::connected
+            && link->applicationReady) {
+            value = receipt_for(*link).snapshot(route.handle);
+        }
+        ReleaseSRWLockShared(&g_lock);
+        return value;
+    };
+    // The peer and resolver have independent locks. Re-read the link after
+    // validation rather than imposing a cross-layer lock order.
+    const auto observed = collect();
+    if (!observed.route || !resolution::validate_authenticated_route(route) || collect() != observed) return false;
+    output = observed;
+    return true;
 }
 
 /** Sends one already-encoded out-of-band body in its own container. */
@@ -1102,6 +1148,7 @@ void drop_endpoint(const state::gameplay::Endpoint& endpoint) noexcept {
     for (state::gameplay::PeerLink& peer : g_peers) {
         if (peer.stage != state::gameplay::PeerStage::absent
             && same_endpoint(peer.endpoint, endpoint)) {
+            receipt_for(peer) = {};
             peer = {};
         }
     }
@@ -1114,6 +1161,7 @@ void reset() noexcept {
     for (state::gameplay::PeerLink& peer : g_peers) {
         peer = {};
     }
+    g_resolvedConnects = {};
     ReleaseSRWLockExclusive(&g_lock);
     AcquireSRWLockExclusive(&g_trafficReportLock);
     g_trafficReports.clear();

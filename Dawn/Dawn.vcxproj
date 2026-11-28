@@ -1527,6 +1527,7 @@
     <ClInclude Include="src\server\gameplay\resolution\replay_window.h" />
     <ClInclude Include="src\server\gameplay\association\association_host.h" />
     <ClInclude Include="src\server\gameplay\peer\peer_transport.h" />
+    <ClInclude Include="src\server\gameplay\peer\resolved_connect_receipt.h" />
     <ClInclude Include="src\middleware\gameplay\descriptor\join_descriptor.h" />
     <ClInclude Include="src\server\gameplay\gameplay_advertisement.h" />
     <ClInclude Include="src\middleware\web_service\messages\opcode901\opcode901_codec.h" />

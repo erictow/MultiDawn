@@ -1,8 +1,8 @@
 # Local profiles and shared activity handoff
 
-The public activity observation is implemented. The typed activity proxy,
-gameplay grant, and endpoint handoff below remain planned. Each PC
-keeps its own saves and profile service; the host owns the shared activity.
+Each PC keeps its own saves and profile service. The shared activity design
+uses the pairing host's world, with a typed activity proxy, gameplay grant
+and endpoint handoff still to implement.
 
 ## Existing observations
 
@@ -170,6 +170,29 @@ is `both_worlds_observed`. The result establishes readiness for a handoff
 between two local worlds. Publishing the guest to the host activity and
 replicating the Guardians' gameplay remain the next runtime integration.
 
+The paired `3ded7bce` run verified the destination, local Guardian and gameplay
+route on both PCs. The host recorded `both_worlds_observed` after the first and
+last host-to-guest accepts. The reverse invitation delivered consent and stopped
+at the pairing-host direction check. Both Guardians gained control in their
+local Courtyards.
+
+### Prepare the local player publication
+
+The next member row needs the receiving PC's exact current BAP creator and
+resolver authentication, plus the other player's real identity and an
+authenticated human route. The local source now checks the committed raw
+type-23 receipt in the same activity and region as the corroborated native
+player. It also verifies the connect request that arrived on the exact live
+control route. The snapshot copies region synchronization state with its
+identity receipt and rechecks both boundaries before reporting success.
+
+`ev=world_player_source` reports availability, address method and presence of
+stored synchronization fields when a host-to-guest probe completes. The
+associated identity and connect address remain local. The paired capture
+contained different machine and join identities and the same default account
+identifier. The eventual shared member and player keys must distinguish the
+two Guardians even when the games use the same local profile identifier.
+
 ## Recipient roster projection
 
 `world_roster::Projection` prepares a BAP membership snapshot for one exact
@@ -180,13 +203,15 @@ and the grant deadline. The projection checks the registration again before it
 copies the row into a snapshot. The host control row and local player's row
 remain those of the recipient's existing BAP snapshot.
 
-The projection assigns each human one native slot for the epoch. Revoking a
+The projection uses the recipient's exact BAP creator binding and the
+separately authenticated resolver owner. It assigns each human one native
+slot for the proven native table lifetime. Revoking a
 row leaves a gap and returns the exact address registration to its owner for
 revocation. The projector refuses stale scopes, expired grants, retired
 registrations and conflicting snapshots without changing the caller's output.
-It refuses to recycle a slot under the same epoch because optional native
-fields can retain the former occupant's data. Moving to a new projection scope
-requires retiring the old rows and proving a new native epoch.
+Optional native fields can retain the former occupant's data. Reusing a slot
+requires retiring the old rows and proving a newer native table lifetime.
+Tower's wire epoch is zero and may repeat across table lifetimes.
 
 The resolver's `validate_peer_address` checks all 86 bytes with the exact
 registration handle under its own lock. This is a point-in-time check. A

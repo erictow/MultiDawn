@@ -16,14 +16,19 @@ namespace resolver = server::gameplay::resolution;
 /** One recipient's exact local activity and native membership table lifetime. */
 struct Recipient final {
     state::activity::BindingKey binding{};
+    /** Exact owner from the authenticated control route. The primary BAP channel can differ from the creator. */
+    state::activity::AuthenticationKey resolverOwner{};
     state::activity::HostRegionKey region{};
     std::uint64_t localMachine{}, controlMachine{};
-    std::uint32_t epoch{};
+    /** Monotonic native table lifetime proven by its owner. Region/facet changes alone are insufficient. */
+    std::uint64_t tableGeneration{};
+    /** The current on-wire epoch may be zero or repeat across different native tables. */
+    std::uint32_t wireEpoch{};
     std::int32_t regionIndex{-1};
 
     [[nodiscard]] explicit constexpr operator bool() const noexcept {
-        return binding && region && localMachine != 0 && controlMachine != 0
-            && localMachine != controlMachine && epoch != 0
+        return binding && resolverOwner && region && localMachine != 0 && controlMachine != 0
+            && localMachine != controlMachine && tableGeneration != 0
             && regionIndex >= 0 && regionIndex <= bap::kMaximumRegionIndex;
     }
     friend constexpr bool operator==(Recipient, Recipient) noexcept = default;
@@ -50,7 +55,8 @@ using CheckAddress = bool (*)(resolver::PeerAddressHandle, std::span<const std::
  * Projects admitted rows for one recipient. This owns no resolver registrations,
  * invitation tickets, BAP connections or network callbacks. The caller serializes
  * use, revalidates grant/binding/lineage before each operation and owns cleanup.
- * Retired slots cannot be reused until a new native epoch clears cached fields.
+ * Retired slots cannot be reused until the caller has verified a fresh native table.
+ * Changing a wire value, resolver authentication, region or facet does not supply that proof.
  */
 class Projection final {
 public:
@@ -61,7 +67,7 @@ public:
     [[nodiscard]] bool open(Recipient current) noexcept {
         if (!current) return false;
         if (current == recipient_) return true;
-        if (current.epoch == recipient_.epoch
+        if (current.tableGeneration <= recipient_.tableGeneration
             || std::any_of(rows_.begin(), rows_.end(), [](const Row& row) { return row.active; })) {
             return false;
         }
@@ -77,7 +83,7 @@ public:
                            SlotHandle& added) noexcept {
         added = {};
         if (extent_ == rows_.size() || nextGeneration_ == UINT64_MAX || !peer.human.present
-            || !peer.registeredAddress || peer.registeredAddress.owner != current.binding.authentication
+            || !peer.registeredAddress || peer.registeredAddress.owner != current.resolverOwner
             || peer.grantGeneration == 0 || peer.deadline <= now || checkAddress == nullptr) return false;
 
         for (std::size_t index = 0; index < extent_; ++index) {
@@ -101,7 +107,7 @@ public:
     [[nodiscard]] bool project(Recipient current, const bap::MembershipSnapshot& base,
                                std::uint64_t now, CheckAddress checkAddress,
                                bap::MembershipSnapshot& output) const noexcept {
-        if (!current || current != recipient_ || base.epoch != current.epoch
+        if (!current || current != recipient_ || base.epoch != current.wireEpoch
             || base.identity.memberKey != current.localMachine || !base.citizen.present
             || base.citizen.memberKey != current.controlMachine || base.citizen.regionIndex != current.regionIndex
             || base.remoteHumanCount != 0) return false;

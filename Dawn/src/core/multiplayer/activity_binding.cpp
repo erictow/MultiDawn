@@ -9,7 +9,9 @@
 #include "companion.h"
 #include "../logging/log.h"
 #include "../../client/hooks/bootflow/native_identity_observation.h"
+#include "../../server/bap/local_identity_snapshot.h"
 #include "../../server/gameplay/gameplay_advertisement.h"
+#include "../../server/gameplay/peer/peer_transport.h"
 
 namespace dawn::core::multiplayer::activity_binding {
 namespace {
@@ -109,6 +111,78 @@ struct PendingWorldProbe {
 };
 
 PendingWorldProbe g_pendingWorldProbe{};
+
+enum class PlayerSourceResult {
+    observed,
+    noIdentityReceipt,
+    incompleteIdentity,
+    noResolvedConnect,
+    changed,
+};
+
+struct LocalPlayerSource {
+    server::bap::LocalClientIdentitySnapshot identity{};
+    gameplay::peer::ResolvedConnectObservation connect{};
+};
+
+[[nodiscard]] bool read_identity(const WorldObservation& world,
+                                 server::bap::LocalClientIdentitySnapshot& out) noexcept {
+    return server::bap::snapshot_creator_client_identity(world.creator.binding, out)
+        && out.binding == world.creator.binding && out.lineage == world.creator.lineage
+        && out.publication.activity == world.creator.lineage.bound
+        && out.publication.hostRegion == world.creator.hostRegion
+        && out.publication.receipt.revision != 0
+        && out.publication.receipt.raw.memberKey == world.human.creatorMachineId;
+}
+
+[[nodiscard]] PlayerSourceResult read_local_player_source(const WorldObservation& world,
+                                                          LocalPlayerSource& output) noexcept {
+    output = {};
+    LocalPlayerSource candidate{};
+    if (!read_identity(world, candidate.identity)) return PlayerSourceResult::noIdentityReceipt;
+    const auto& identity = candidate.identity.publication.receipt.raw;
+    if (identity.joinIdentity == 0 || identity.accountSoid == 0 || identity.opaqueSoid == 0)
+        return PlayerSourceResult::incompleteIdentity;
+    if (!gameplay::peer::snapshot_resolved_connect(world.route, candidate.connect))
+        return PlayerSourceResult::noResolvedConnect;
+
+    // The BAP receipt and gameplay transport are observed under separate locks.
+    server::bap::LocalClientIdentitySnapshot current{};
+    gameplay::peer::ResolvedConnectObservation connect{};
+    if (!validate_world(world, GetTickCount64()) || !read_identity(world, current)
+        || current.publication.receipt != candidate.identity.publication.receipt
+        || current.publication.region != candidate.identity.publication.region
+        || !gameplay::peer::snapshot_resolved_connect(world.route, connect)
+        || connect != candidate.connect) return PlayerSourceResult::changed;
+
+    candidate.identity = current;
+    output = candidate;
+    return PlayerSourceResult::observed;
+}
+
+void trace_local_player_source(const char* stage, const WorldObservation& world) noexcept {
+    LocalPlayerSource player{};
+    const auto result = read_local_player_source(world, player);
+    const char* label = "changed_during_capture";
+    switch (result) {
+    case PlayerSourceResult::observed: label = "observed"; break;
+    case PlayerSourceResult::noIdentityReceipt: label = "no_identity_receipt"; break;
+    case PlayerSourceResult::incompleteIdentity: label = "incomplete_identity"; break;
+    case PlayerSourceResult::noResolvedConnect: label = "no_resolved_connect"; break;
+    case PlayerSourceResult::changed: break;
+    }
+    // Report readiness and wire shape only. Raw receipts and addresses stay in this process.
+    const bool observed = result == PlayerSourceResult::observed;
+    const int method = observed ? std::to_integer<int>(player.connect.remoteAddress.back()) : -1;
+    std::array<char, 152> line{};
+    const int size = std::snprintf(line.data(), line.size(),
+        "ev=world_player_source stage=%s result=%s netaddr_method=%d transition=%u synchronization=%u",
+        stage, label, method,
+        observed && player.identity.publication.region.hasTransitionToken ? 1U : 0U,
+        observed && player.identity.publication.region.hasSynchronizationToken ? 1U : 0U);
+    if (size > 0 && static_cast<std::size_t>(size) < line.size())
+        log::write(log::Channel::core, log::Level::info, {line.data(), static_cast<std::size_t>(size)});
+}
 
 [[nodiscard]] WorldDestination destination_of(const server::bap::CreatorActivitySnapshot& creator) noexcept {
     WorldDestination destination{};
@@ -350,7 +424,10 @@ void service_world_probe(const WorldProbeEvent& event) noexcept {
         const bool ready = matching && validate_world(guest, GetTickCount64());
         const char* reason = result != Result::observed ? name(result)
             : !matching ? "different_destination" : ready ? "observed" : "changed_during_capture";
-        if (respond_world_probe(event, ready)) report_world_probe("guest", reason);
+        if (respond_world_probe(event, ready)) {
+            report_world_probe("guest", reason);
+            if (ready) trace_local_player_source("guest", guest);
+        }
         return;
     }
 
@@ -367,7 +444,10 @@ void service_world_probe(const WorldProbeEvent& event) noexcept {
     const bool current = inspect_world(now, host) == Result::observed && same_world(host, pending.world)
         && validate_traced_invitation_preflight(pending.invitation);
     if (!current) report_world_probe("host", "world_changed");
-    else report_world_probe("host", event.kind == WorldProbeKind::ready ? "both_worlds_observed" : "guest_unavailable");
+    else if (event.kind == WorldProbeKind::ready) {
+        report_world_probe("host", "both_worlds_observed");
+        trace_local_player_source("host", host);
+    } else report_world_probe("host", "guest_unavailable");
 }
 
 void service(std::uint64_t now) noexcept {

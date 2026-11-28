@@ -7,6 +7,7 @@
 
 #include "../../../middleware/encoding/bit_writer.h"
 #include "../../../state/gameplay/definition.h"
+#include "../resolution/address_resolution_host.h"
 
 namespace dawn::server::gameplay::peer {
 
@@ -22,9 +23,31 @@ void deliver(const state::gameplay::Endpoint& from,
              std::uint64_t now) noexcept;
 
 /** Only the native endpoint's successful authenticated/replay-checked unwrap calls this. */
-void deliver_resolved(const state::gameplay::Endpoint& from,
+void deliver_resolved(const resolution::AuthenticatedRoute& route,
                       std::span<const std::byte> payload,
                       std::uint64_t now) noexcept;
+
+/** Local receipt from one exact authenticated control context. The captured
+ * NetAddr is opaque and must not be logged or exported as a public endpoint. */
+struct ResolvedConnectObservation final {
+    resolution::RouteHandle route{};
+    state::gameplay::Endpoint source{};
+    std::uint32_t localChannelId{}, remoteChannelId{}, localSequence{}, remoteSequence{};
+    std::array<std::byte, state::gameplay::kNetAddrBlobSize> remoteAddress{};
+
+    friend constexpr bool operator==(const ResolvedConnectObservation& a,
+                                     const ResolvedConnectObservation& b) noexcept {
+        return a.route == b.route && a.source.address == b.source.address && a.source.port == b.source.port
+            && a.localChannelId == b.localChannelId && a.remoteChannelId == b.remoteChannelId
+            && a.localSequence == b.localSequence && a.remoteSequence == b.remoteSequence
+            && a.remoteAddress == b.remoteAddress;
+    }
+};
+
+/** Observes the application-ready link built on the selected control route.
+ * Failure clears output. This does not grant admission or retain a link. */
+[[nodiscard]] bool snapshot_resolved_connect(const resolution::AuthenticatedRoute& route,
+                                             ResolvedConnectObservation& output) noexcept;
 
 /**
  * Queues one reliable message for a peer.
