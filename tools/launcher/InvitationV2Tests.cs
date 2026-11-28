@@ -19,7 +19,7 @@ namespace MultiDawn.Launcher
         private static string Ticket(int value) { return value.ToString("X32", CultureInfo.InvariantCulture); }
         private static void Check(bool condition, string label)
         { report.AppendLine((condition ? "PASS: " : "FAIL: ") + label); if (!condition) throw new IOException("Invitation v2 test failed: " + label); }
-        internal static string Run() { report.Clear(); Ledger(); NetworkAsync().GetAwaiter().GetResult(); PreflightAsync().GetAwaiter().GetResult(); PreflightCompatibilityAsync().GetAwaiter().GetResult(); LegacyAsync().GetAwaiter().GetResult(); NoDowngradeAsync().GetAwaiter().GetResult(); return report.ToString(); }
+        internal static string Run() { report.Clear(); Ledger(); NetworkAsync().GetAwaiter().GetResult(); PreflightAsync().GetAwaiter().GetResult(); PreflightCompatibilityAsync().GetAwaiter().GetResult(); WorldProbeAsync().GetAwaiter().GetResult(); LegacyAsync().GetAwaiter().GetResult(); NoDowngradeAsync().GetAwaiter().GetResult(); return report.ToString(); }
 
         private static void Ledger()
         {
@@ -428,6 +428,102 @@ namespace MultiDawn.Launcher
                 }
             }
         }
+        private static async Task<string> AcceptWorldInviteAsync(FakeNative alice, FakeNative bob, int index)
+        {
+            await alice.SendAsync("INVITE " + Number(Bob) + " " + RuntimeBridge.Hex("world-test")).ConfigureAwait(false);
+            string ticket = (await bob.WaitAsync("INVITEFROM2 ", index).ConfigureAwait(false)).Split(' ')[2];
+            await bob.SendAsync("ACCEPT " + Number(Alice) + " " + ticket).ConfigureAwait(false);
+            await alice.WaitAsync("ACCEPTED " + Number(Bob) + " " + ticket + " ", 0).ConfigureAwait(false);
+            return ticket;
+        }
+
+        private static async Task WorldProbeAsync()
+        {
+            using (Fixture test = new Fixture()) {
+                await test.StartAsync().ConfigureAwait(false);
+                using (FakeNative alice = await FakeNative.OpenAsync(test.A, 3, Alice, Bob).ConfigureAwait(false))
+                using (FakeNative bob = await FakeNative.OpenAsync(test.B, 3, Bob, Alice).ConfigureAwait(false)) {
+                    await test.ReadyAsync().ConfigureAwait(false);
+                    string hostEpoch = test.A.NativeEpochForTest, guestEpoch = test.B.NativeEpochForTest;
+                    string destination = RuntimeBridge.Hex("city_tower_social_d2");
+                    await alice.SendAsync("WORLD1_CAP").ConfigureAwait(false);
+                    await UntilAsync(delegate { return test.B.PeerSupportsWorldProbeForTest; }, "Guest launcher sees the host runtime's exact world capability epoch").ConfigureAwait(false);
+                    await test.ProcessAsync(true, "WORLD1 CAP " + Ticket(999)).ConfigureAwait(false);
+                    string ticket = await AcceptWorldInviteAsync(alice, bob, 0).ConfigureAwait(false);
+                    string nonce = Ticket(1300);
+                    await alice.SendAsync("WORLD1_PROBE " + ticket + " " + nonce + " " + destination + " 20 56").ConfigureAwait(false);
+                    await alice.WaitAsync("WORLD1_NO " + ticket + " " + nonce, 0).ConfigureAwait(false);
+                    Check(!test.A.PeerSupportsWorldProbeForTest && test.Controls(false, "WORLD1 PROBE ") == 0
+                        && bob.Count("WORLD1_") == 0 && test.Host.IsPaired,
+                        "A previous capability epoch or legacy runtime receives no probe and keeps its invitation connection");
+
+                    await bob.SendAsync("WORLD1_CAP").ConfigureAwait(false);
+                    await UntilAsync(delegate { return test.A.PeerSupportsWorldProbeForTest; }, "Host launcher sees the guest runtime's exact world capability epoch").ConfigureAwait(false);
+                    nonce = Ticket(1301);
+                    string localFields = ticket + " " + nonce;
+                    string wirePrefix = ticket + " " + hostEpoch + " " + guestEpoch + " ";
+                    string wireFields = wirePrefix + nonce;
+                    string probe = "WORLD1_PROBE " + localFields + " " + destination + " 20 56";
+                    await test.ProcessAsync(false, "WORLD1 PROBE " + ticket + " " + guestEpoch + " " + hostEpoch + " "
+                        + nonce + " " + destination + " 20.56").ConfigureAwait(false);
+                    await test.ProcessAsync(true, "WORLD1 PROBE " + wireFields + " " + destination + " 20.56").ConfigureAwait(false);
+                    Check(bob.Count("WORLD1_PROBE ") == 0 && alice.Count("WORLD1_PROBE ") == 0,
+                        "The pairing host only initiates probes and swapped epochs are refused");
+                    await alice.SendAsync(probe).ConfigureAwait(false);
+                    Check(await bob.WaitAsync("WORLD1_PROBE " + localFields, 0).ConfigureAwait(false) == probe,
+                        "The private exchange preserves the accepted ticket, nonce and public Tower selectors");
+                    await test.ProcessAsync(false, "WORLD1 PROBE " + wireFields + " " + destination + " 20.56").ConfigureAwait(false);
+                    await bob.SendAsync("WORLD1_READY " + ticket + " " + Ticket(1302)).ConfigureAwait(false);
+                    await test.ProcessAsync(true, "WORLD1 READY " + wirePrefix + Ticket(1302)).ConfigureAwait(false);
+                    Check(bob.Count("WORLD1_PROBE ") == 1 && alice.Count("WORLD1_READY ") == 0,
+                        "The same protected probe cannot restart guest capture, and an unrelated nonce cannot complete it");
+                    await bob.SendAsync("WORLD1_READY " + localFields).ConfigureAwait(false);
+                    await alice.WaitAsync("WORLD1_READY " + localFields, 0).ConfigureAwait(false);
+                    await test.ProcessAsync(true, "WORLD1 READY " + wireFields).ConfigureAwait(false);
+                    await alice.SendAsync("WORLD1_PROBE " + ticket + " " + Ticket(1303) + " " + destination + " 20 56").ConfigureAwait(false);
+                    await alice.WaitAsync("WORLD1_NO " + ticket + " " + Ticket(1303), 0).ConfigureAwait(false);
+                    Check(alice.Count("WORLD1_READY ") == 1 && bob.Count("WORLD1_PROBE ") == 1,
+                        "Exactly one attempt and one authenticated response can complete for a live accepted ticket");
+
+                    ticket = await AcceptWorldInviteAsync(alice, bob, 1).ConfigureAwait(false);
+                    nonce = Ticket(1304);
+                    localFields = ticket + " " + nonce;
+                    wireFields = ticket + " " + hostEpoch + " " + guestEpoch + " " + nonce;
+                    await alice.SendAsync("WORLD1_PROBE " + localFields + " " + destination + " 20 56").ConfigureAwait(false);
+                    await bob.WaitAsync("WORLD1_PROBE " + localFields, 0).ConfigureAwait(false);
+                    TaskCompletionSource<bool> release = new TaskCompletionSource<bool>(), entered = new TaskCompletionSource<bool>();
+                    Task hold = test.A.HoldNativeWritesForTest(release.Task, entered);
+                    await entered.Task.ConfigureAwait(false);
+                    try {
+                        await bob.SendAsync("WORLD1_READY " + localFields).ConfigureAwait(false);
+                        await UntilAsync(delegate { return test.Controls(true, "WORLD1 READY " + wireFields) > 0; },
+                            "The protected readiness result reaches the host while its native writer is held").ConfigureAwait(false);
+                        Interlocked.Exchange(ref test.Now, 10000);
+                    } finally { release.TrySetResult(true); }
+                    await hold.ConfigureAwait(false);
+                    await test.A.DrainControlsForTest().ConfigureAwait(false);
+                    Check(alice.Count("WORLD1_READY " + localFields) == 0 && test.A.AcceptedIntentForTest && test.Host.IsPaired,
+                        "The probe deadline expires independently of the invitation while a native send is queued");
+
+                    ticket = await AcceptWorldInviteAsync(alice, bob, 2).ConfigureAwait(false);
+                    localFields = ticket + " " + Ticket(1305);
+                    int receivedFromGuest = test.Controls(true, "WORLD1 PROBE ");
+                    await bob.SendAsync("WORLD1_PROBE " + localFields + " " + destination + " 20 56").ConfigureAwait(false);
+                    await bob.WaitAsync("WORLD1_NO " + localFields, 0).ConfigureAwait(false);
+                    Check(test.Controls(true, "WORLD1 PROBE ") == receivedFromGuest,
+                        "The guest's native runtime cannot start an exchange");
+
+                    localFields = ticket + " " + Ticket(1306);
+                    await alice.SendAsync("WORLD1_PROBE " + localFields + " " + destination + " 20 56").ConfigureAwait(false);
+                    await bob.WaitAsync("WORLD1_PROBE " + localFields, 0).ConfigureAwait(false);
+                    await bob.SendAsync("WORLD1_NO " + localFields).ConfigureAwait(false);
+                    await alice.WaitAsync("WORLD1_NO " + localFields, 0).ConfigureAwait(false);
+                    Check(test.Host.IsPaired && test.A.AcceptedIntentForTest,
+                        "The guest's native refusal reaches the exact host request and preserves pairing and the invitation");
+                }
+            }
+        }
+
         private static async Task NoDowngradeAsync()
         {
             using (Fixture test = new Fixture()) {

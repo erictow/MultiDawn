@@ -6,6 +6,7 @@
 namespace dawn::core::multiplayer {
 
 struct InvitationPreflightObservation;
+struct WorldProbeEvent;
 
 /**
  * Optional authenticated launcher IPC; absent configuration keeps direct solo launch.
@@ -13,7 +14,8 @@ struct InvitationPreflightObservation;
  */
 [[nodiscard]] bool initialize() noexcept;
 /** Polls bounded local IPC work and optionally copies the one-shot private trace receipt. */
-void service(std::uint64_t now, InvitationPreflightObservation* traced = nullptr) noexcept;
+void service(std::uint64_t now, InvitationPreflightObservation* traced = nullptr,
+             WorldProbeEvent* world = nullptr) noexcept;
 void shutdown() noexcept;
 [[nodiscard]] bool connected() noexcept;
 /** True only when both current runtimes support ticketed intent exchange, not gameplay joining. */
@@ -45,5 +47,34 @@ struct InvitationPreflightObservation {
 [[nodiscard]] bool validate_invitation_preflight(const InvitationPreflightObservation& observed) noexcept;
 /** Rechecks the private trace receipt and its current accepted intent after local observation. */
 [[nodiscard]] bool validate_traced_invitation_preflight(const InvitationPreflightObservation& observed) noexcept;
+
+/** Public destination selectors. No native handles or private player identity. */
+struct WorldDestination {
+    std::array<char, 41> package{};
+    std::int32_t activity{-1}, region{-1};
+    friend constexpr bool operator==(const WorldDestination&, const WorldDestination&) noexcept = default;
+};
+
+struct WorldProbeToken {
+    std::array<char, 33> ticket{}, nonce{};
+    friend constexpr bool operator==(const WorldProbeToken&, const WorldProbeToken&) noexcept = default;
+};
+
+enum class WorldProbeKind : std::uint8_t { none, request, ready, unavailable };
+inline constexpr std::uint64_t kWorldProbeTimeoutMs = 5'000;
+
+struct WorldProbeEvent {
+    WorldProbeKind kind{};
+    WorldProbeToken token{};
+    WorldDestination destination{};
+    std::uint64_t generation{}, deadline{};
+    friend constexpr bool operator==(const WorldProbeEvent&, const WorldProbeEvent&) noexcept = default;
+};
+
+/** Asks the invite recipient to verify its own world, through the opt-in protected bridge. */
+[[nodiscard]] bool request_world_probe(const InvitationPreflightObservation& invitation,
+                                      const WorldDestination& destination, WorldProbeToken& output) noexcept;
+/** Responds once to a copied request for the guest's still-current accepted invite. */
+[[nodiscard]] bool respond_world_probe(const WorldProbeEvent& request, bool ready) noexcept;
 
 } // namespace dawn::core::multiplayer

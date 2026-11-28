@@ -101,7 +101,8 @@ namespace dawn::steam {
 /** Delivers one batch of queued callbacks on the caller thread. The batch has a size cap. */
 void run_callbacks() noexcept {
     core::multiplayer::InvitationPreflightObservation traced{};
-    core::multiplayer::service(GetTickCount64(), &traced);
+    core::multiplayer::WorldProbeEvent world{};
+    core::multiplayer::service(GetTickCount64(), &traced, &world);
     social::service();
     // Presentation goes in first, so the sweep below has an overlay to draw with. It only hooks
     // Present; the game still decides when a frame is drawn.
@@ -129,6 +130,7 @@ void run_callbacks() noexcept {
     if (mainActive) {
         const auto now = GetTickCount64();
         server::service(now);
+        core::multiplayer::activity_binding::service_world_probe(world);
         if (traced.requestGeneration != 0) core::multiplayer::activity_binding::trace_invitation_world(traced);
         client::content::investment::worker::service(now);
     }

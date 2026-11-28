@@ -134,10 +134,12 @@ namespace MultiDawn.Launcher
                             && info.EnvironmentVariables["DAWN_COMPANION_ID"] == first.PipeId && info.EnvironmentVariables["DAWN_SESSION_MODE"] == "solo",
                             "Native test child uses protocol three with exact expected pair and peer pins while keeping local solo services");
                         Check(info.EnvironmentVariables["DAWN_NATIVE_ADDRESS_RESOLUTION"] == "1" && info.EnvironmentVariables["DAWN_NATIVE_SESSION_TRACE"] == "1"
-                            && info.EnvironmentVariables["DAWN_NATIVE_IDENTITY_OBSERVATION"] == "1" && info.EnvironmentVariables["DAWN_ACTIVITY_BINDING_TRACE"] == "1",
-                            "Only the explicit native test environment enables the bounded Tower observation flags");
+                            && info.EnvironmentVariables["DAWN_NATIVE_IDENTITY_OBSERVATION"] == "1" && info.EnvironmentVariables["DAWN_ACTIVITY_BINDING_TRACE"] == "1"
+                            && info.EnvironmentVariables["DAWN_COMPANION_WORLD_PROBE"] == "1",
+                            "Only the explicit native test environment enables the bounded Tower observation and readiness flags");
                         ProcessStartInfo normal = GameLaunch.CreateStartInfo(Path.GetTempPath()); first.ApplyEnvironment(normal);
                         Check(normal.EnvironmentVariables["DAWN_COMPANION_PROTOCOL"] == "2"
+                            && !normal.EnvironmentVariables.ContainsKey("DAWN_COMPANION_WORLD_PROBE")
                             && !normal.EnvironmentVariables.ContainsKey("DAWN_COMPANION_PAIR_GENERATION") && !normal.EnvironmentVariables.ContainsKey("DAWN_COMPANION_PEER_ID"),
                             "Existing companion setup remains protocol two without native game pins");
                         foreach (GamePreflightLaunchContext forged in new[] {

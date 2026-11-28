@@ -37,6 +37,8 @@ struct Fixture {
     bool localSource{true}, replaceRouteDuringCapture{};
     bool worldChanges{}, invalidateInviteDuringCapture{};
     bool sawWorldInvite{};
+    bool worldProbeEnabled{}, sawBothWorlds{}, guestReplied{}, guestReady{};
+    mp::WorldProbeToken probe{};
     unsigned creatorCalls{}, collectCalls{}, lineageChecks{}, worldReads{}, worldRouteReads{}, inviteChecks{};
     unsigned pins{}, releases{}, logs{};
 
@@ -224,6 +226,48 @@ void world_binding_tests() {
     binding::trace_invitation_world(invitation);
     CHECK(fixture.logs == 0 && fixture.inviteChecks == 2);
 }
+
+void world_probe_tests() {
+    const auto now = GetTickCount64();
+    world_fixture(now);
+    fixture.worldProbeEnabled = true;
+    fixture.creator.destination.packageName[0] = 't';
+    fixture.creator.destination.packageNameLength = 1;
+    fixture.creator.destination.activityIndex = 7;
+    mp::InvitationPreflightObservation invitation{};
+    invitation.requestGeneration = 10;
+    invitation.companionGeneration = 11;
+    invitation.deadline = now + mp::kWorldProbeTimeoutMs;
+    binding::trace_invitation_world(invitation);
+    CHECK(fixture.probe.nonce[0] != '\0');
+
+    mp::WorldProbeEvent reply{};
+    reply.kind = mp::WorldProbeKind::ready;
+    reply.token = fixture.probe;
+    reply.generation = invitation.companionGeneration;
+    reply.deadline = invitation.deadline;
+    ++reply.token.nonce[0];
+    binding::service_world_probe(reply);
+    CHECK(!fixture.sawBothWorlds);
+    reply.token = fixture.probe;
+    binding::service_world_probe(reply);
+    CHECK(fixture.sawBothWorlds);
+
+    fixture.sawBothWorlds = false;
+    binding::trace_invitation_world(invitation);
+    ++fixture.world.generation;
+    binding::service_world_probe(reply);
+    CHECK(!fixture.sawBothWorlds);
+
+    mp::WorldProbeEvent incoming = reply;
+    incoming.kind = mp::WorldProbeKind::request;
+    incoming.destination = {{'t'}, 7, fixture.creator.reportedRegion};
+    binding::service_world_probe(incoming);
+    CHECK(fixture.guestReplied && fixture.guestReady);
+    ++incoming.destination.region;
+    binding::service_world_probe(incoming);
+    CHECK(fixture.guestReplied && !fixture.guestReady);
+}
 } // namespace
 
 namespace dawn::server::bap {
@@ -308,17 +352,32 @@ bool validate_traced_invitation_preflight(const InvitationPreflightObservation& 
     ++fixture.inviteChecks;
     return observed.requestGeneration == 10 && !(fixture.invalidateInviteDuringCapture && fixture.inviteChecks == 2);
 }
+bool request_world_probe(const InvitationPreflightObservation&, const WorldDestination& destination,
+                         WorldProbeToken& output) noexcept {
+    if (!fixture.worldProbeEnabled || destination.package[0] != 't') return false;
+    fixture.probe.ticket[0] = 'A';
+    fixture.probe.nonce[0] = 'B';
+    output = fixture.probe;
+    return true;
+}
+bool respond_world_probe(const WorldProbeEvent&, bool ready) noexcept {
+    fixture.guestReplied = true;
+    fixture.guestReady = ready;
+    return true;
+}
 }
 namespace dawn::core::log {
 void write(Channel, Level, std::string_view line) noexcept {
     ++fixture.logs;
     if (line == "ev=world_activity_binding stage=accepted_invite result=observed admission=0")
         fixture.sawWorldInvite = true;
+    if (line == "ev=world_probe stage=host result=both_worlds_observed admission=0")
+        fixture.sawBothWorlds = true;
 }
 }
 
 int main() {
-    boundary_tests(); lifetime_tests(); world_binding_tests();
+    boundary_tests(); lifetime_tests(); world_binding_tests(); world_probe_tests();
     CHECK(SetEnvironmentVariableW(L"DAWN_ACTIVITY_BINDING_TRACE", nullptr) != FALSE);
     reset(); binding::service(100); binding::reset();
     CHECK(fixture.creatorCalls == 0 && fixture.logs == 0);

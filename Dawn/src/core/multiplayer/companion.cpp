@@ -4,6 +4,7 @@
 
 #include <Windows.h>
 #include <bcrypt.h>
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstring>
@@ -26,10 +27,30 @@ InvitationIntentState g_invitations{};
 InvitationPreflightState g_preflight{};
 InvitationPreflightState g_tracePreflight{};
 bool g_tracePreflightEnabled{};
+bool g_worldProbeEnabled{};
+constexpr std::uint64_t kGuestTicketLifetime = 60'000;
+std::array<char, 33> g_guestWorldTicket{};
+std::uint64_t g_guestWorldDeadline{}, g_hostProbeDeadline{};
+WorldProbeToken g_hostProbe{};
+WorldProbeEvent g_guestProbe{};
+bool g_guestProbeAvailable{};
 std::array<char, 33> g_localEpoch{};
 std::uint64_t g_pairGeneration{}, g_companionGeneration{};
 // These counters survive teardown; stale copied observations cannot revive after slot reuse.
 std::uint64_t g_companionGenerationClock{}, g_requestGenerationClock{};
+
+void clear_guest_probe() noexcept {
+    g_guestWorldTicket = {};
+    g_guestWorldDeadline = 0;
+    g_guestProbe = {};
+    g_guestProbeAvailable = false;
+}
+
+void reset_world_probe() noexcept {
+    clear_guest_probe();
+    g_hostProbeDeadline = 0;
+    g_hostProbe = {};
+}
 
 void clear_ticketed_invitation() noexcept {
     steam::social::PendingInvitation pending{};
@@ -101,6 +122,8 @@ void close_locked() noexcept {
     g_preflight = {};
     g_tracePreflight = {};
     g_tracePreflightEnabled = false;
+    g_worldProbeEnabled = false;
+    reset_world_probe();
     g_localEpoch = {};
     g_pairGeneration = g_companionGeneration = 0;
 }
@@ -117,6 +140,13 @@ void close_locked() noexcept {
     AcquireSRWLockExclusive(&g_lock);
     const bool sent = g_version >= protocol::kIntentVersion && from == g_peer
         && g_peerGameRunning && g_invitations.ready() && send_locked(message);
+    if (sent && g_worldProbeEnabled && ticket != g_guestWorldTicket.data()) {
+        g_guestWorldTicket = {};
+        std::memcpy(g_guestWorldTicket.data(), ticket.data(), ticket.size());
+        g_guestWorldDeadline = GetTickCount64() + kGuestTicketLifetime;
+        g_guestProbe = {};
+        g_guestProbeAvailable = false;
+    }
     ReleaseSRWLockExclusive(&g_lock);
     return sent;
 }
@@ -155,6 +185,7 @@ void close_locked() noexcept {
         g_invitations = {};
         g_preflight = {};
         g_tracePreflight = {};
+        reset_world_probe();
         clear_ticketed_invitation();
     }
     return true;
@@ -168,11 +199,7 @@ void report(const char* result) noexcept {
         log::write(log::Channel::core, log::Level::info, {line.data(), static_cast<std::size_t>(count)});
 }
 
-/** Builds the request before either mailbox is changed. */
-[[nodiscard]] bool make_preflight_request(std::uint64_t peer, std::string_view ticket,
-                                           std::array<char, 33>& nonce,
-                                           protocol::Message& request) noexcept {
-    if (!protocol::steam_identity(peer) || !protocol::ticket(ticket)) return false;
+[[nodiscard]] bool make_nonce(std::array<char, 33>& nonce) noexcept {
     std::array<unsigned char, 16> random{};
     if (BCryptGenRandom(nullptr, random.data(), static_cast<ULONG>(random.size()), BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) return false;
     constexpr char digits[] = "0123456789ABCDEF";
@@ -180,6 +207,14 @@ void report(const char* result) noexcept {
         nonce[index * 2] = digits[random[index] >> 4U];
         nonce[index * 2 + 1] = digits[random[index] & 15U];
     }
+    return true;
+}
+
+/** Builds the request before either mailbox is changed. */
+[[nodiscard]] bool make_preflight_request(std::uint64_t peer, std::string_view ticket,
+                                           std::array<char, 33>& nonce,
+                                           protocol::Message& request) noexcept {
+    if (!protocol::steam_identity(peer) || !protocol::ticket(ticket) || !make_nonce(nonce)) return false;
     std::array<char, 32> peerText{};
     const int count = std::snprintf(peerText.data(), peerText.size(), "%llu", static_cast<unsigned long long>(peer));
     return count > 0 && static_cast<std::size_t>(count) < peerText.size()
@@ -212,6 +247,58 @@ void report(const char* result) noexcept {
         && observed.localEpoch == g_localEpoch
         && std::string_view(observed.peerEpoch.data(), 32) == g_invitations.epoch()
         && state.validate(now, observed);
+}
+
+[[nodiscard]] bool world_number(std::string_view text, std::uint64_t maximum,
+                                std::int32_t& output) noexcept {
+    std::uint64_t value{};
+    if ((text.size() > 1 && text.front() == '0') || !protocol::decimal(text, value)
+        || value > maximum) return false;
+    output = static_cast<std::int32_t>(value);
+    return true;
+}
+
+[[nodiscard]] bool world_context_locked() noexcept {
+    return g_worldProbeEnabled && g_pipe != INVALID_HANDLE_VALUE && g_peerGameRunning && g_invitations.ready();
+}
+
+[[nodiscard]] bool receive_world_locked(const protocol::Fields& fields, std::uint64_t now,
+                                        WorldProbeEvent& event) noexcept {
+    const bool request = fields.values[0] == "WORLD1_PROBE";
+    if (fields.count != (request ? 6U : 3U) || !protocol::ticket(fields.values[1])
+        || !protocol::ticket(fields.values[2])) return false;
+    WorldProbeEvent candidate{};
+    std::memcpy(candidate.token.ticket.data(), fields.values[1].data(), fields.values[1].size());
+    std::memcpy(candidate.token.nonce.data(), fields.values[2].data(), fields.values[2].size());
+    candidate.generation = g_companionGeneration;
+    if (request) {
+        if (!protocol::decode_text(fields.values[3], candidate.destination.package)
+            || candidate.destination.package[0] == '\0'
+            || !world_number(fields.values[4], 32767, candidate.destination.activity)
+            || !world_number(fields.values[5], 2147483647, candidate.destination.region)) return false;
+        if (!world_context_locked() || now >= g_guestWorldDeadline
+            || candidate.token.ticket != g_guestWorldTicket
+            || g_guestProbe.kind != WorldProbeKind::none) return true;
+        candidate.kind = WorldProbeKind::request;
+        candidate.deadline = (std::min)(g_guestWorldDeadline, now + kWorldProbeTimeoutMs);
+        g_guestProbe = candidate;
+        g_guestProbeAvailable = true;
+    } else {
+        if (!world_context_locked() || now >= g_hostProbeDeadline || candidate.token != g_hostProbe
+            || !g_invitations.current(g_peer, candidate.token.ticket.data(), now)) return true;
+        candidate.kind = fields.values[0] == "WORLD1_READY" ? WorldProbeKind::ready : WorldProbeKind::unavailable;
+        candidate.deadline = g_hostProbeDeadline;
+        g_hostProbeDeadline = 0;
+    }
+    event = candidate;
+    return true;
+}
+
+void revoke_world_probe_locked(std::string_view ticket) noexcept {
+    if (ticket == g_guestWorldTicket.data()) {
+        clear_guest_probe();
+    }
+    if (ticket == g_hostProbe.ticket.data()) g_hostProbeDeadline = 0;
 }
 
 /** Optional child-process pins use bounded positive decimal fields; empty is not absent. */
@@ -329,6 +416,13 @@ bool initialize() noexcept {
         g_tracePreflightEnabled = selectedVersion == protocol::kPreflightVersion
             && GetEnvironmentVariableW(L"DAWN_ACTIVITY_BINDING_TRACE", trace.data(), static_cast<DWORD>(trace.size())) == 1
             && trace[0] == L'1';
+        const bool worldRequested = selectedVersion == protocol::kPreflightVersion
+            && GetEnvironmentVariableW(L"DAWN_COMPANION_WORLD_PROBE", trace.data(), static_cast<DWORD>(trace.size())) == 1
+            && trace[0] == L'1';
+        if (worldRequested) {
+            protocol::Message capability{};
+            g_worldProbeEnabled = protocol::append(capability, "WORLD1_CAP") && send_locked(capability);
+        }
     }
     else close_locked();
     ReleaseSRWLockExclusive(&g_lock);
@@ -341,11 +435,13 @@ bool initialize() noexcept {
     return accepted;
 }
 
-void service(std::uint64_t now, InvitationPreflightObservation* traced) noexcept {
+void service(std::uint64_t now, InvitationPreflightObservation* traced, WorldProbeEvent* world) noexcept {
     if (traced != nullptr) *traced = {};
+    if (world != nullptr) *world = {};
     if (!TryAcquireSRWLockExclusive(&g_lock)) return;
     bool failed = false;
     std::array<char, 33> traceTicket{};
+    WorldProbeEvent worldEvent{};
     for (unsigned budget = 0; g_pipe != INVALID_HANDLE_VALUE && budget < 8; ++budget) {
         std::array<unsigned char, 4> peek{};
         DWORD copied = 0, available = 0;
@@ -372,7 +468,7 @@ void service(std::uint64_t now, InvitationPreflightObservation* traced) noexcept
                 || !protocol::decimal(fields.values[3], version)
                 || version > (g_version == protocol::kPreflightVersion ? 3U : 2U)
                 || !g_invitations.runtime(fields.values[2], version > 2 ? 2 : version, changed)) { failed = true; break; }
-            if (changed) { clear_ticketed_invitation(); g_preflight = {}; g_tracePreflight = {}; }
+            if (changed) { clear_ticketed_invitation(); g_preflight = {}; g_tracePreflight = {}; reset_world_probe(); worldEvent = {}; }
             g_peerGameRunning = version != 0;
             g_profile.gameRunning = g_peerGameRunning;
             if (!steam::social::set_peer(g_profile)) { failed = true; break; }
@@ -387,6 +483,7 @@ void service(std::uint64_t now, InvitationPreflightObservation* traced) noexcept
                 || !steam::social::receive_invitation(sender, connect.data(), fields.values[2])) { failed = true; break; }
             g_preflight.replace(fields.values[2]);
             g_tracePreflight.replace(fields.values[2]);
+            if (fields.values[2] != g_guestWorldTicket.data()) clear_guest_probe();
             continue;
         }
         if (g_version >= protocol::kIntentVersion && fields.values[0] == "ACCEPTED") {
@@ -407,6 +504,8 @@ void service(std::uint64_t now, InvitationPreflightObservation* traced) noexcept
             g_invitations.revoke(fields.values[1]);
             g_preflight.revoke(fields.values[1]);
             g_tracePreflight.revoke(fields.values[1]);
+            revoke_world_probe_locked(fields.values[1]);
+            if (fields.values[1] == worldEvent.token.ticket.data()) worldEvent = {};
             (void)steam::social::revoke_invitation(fields.values[1]);
             continue;
         }
@@ -414,6 +513,11 @@ void service(std::uint64_t now, InvitationPreflightObservation* traced) noexcept
             && (fields.values[0] == "PREFLIGHT_OK" || fields.values[0] == "PREFLIGHT_NO")) {
             if (!g_preflight.response(fields, now)
                 || (g_tracePreflightEnabled && !g_tracePreflight.response(fields, now))) { failed = true; break; }
+            continue;
+        }
+        if (g_worldProbeEnabled && (fields.values[0] == "WORLD1_PROBE"
+            || fields.values[0] == "WORLD1_READY" || fields.values[0] == "WORLD1_NO")) {
+            if (!receive_world_locked(fields, now, worldEvent)) { failed = true; break; }
             continue;
         }
         if (g_version == protocol::kVersion && fields.values[0] == "INVITEFROM" && fields.count == 3) {
@@ -444,6 +548,7 @@ void service(std::uint64_t now, InvitationPreflightObservation* traced) noexcept
             && begin_preflight_locked(g_tracePreflight, g_peer, traceTicket.data(), nonce.data(), request, 50);
     }
     if (failed) close_locked();
+    if (!failed && world != nullptr && world_context_locked() && now < worldEvent.deadline) *world = worldEvent;
     ReleaseSRWLockExclusive(&g_lock);
     if (traceSent) log::write(log::Channel::core, log::Level::info,
                              "ev=multiplayer_companion stage=invitation_preflight result=request_sent");
@@ -525,6 +630,62 @@ bool validate_traced_invitation_preflight(const InvitationPreflightObservation& 
         && validate_preflight_locked(g_tracePreflight, observed, now);
     ReleaseSRWLockExclusive(&g_lock);
     return valid;
+}
+
+bool request_world_probe(const InvitationPreflightObservation& invitation,
+                         const WorldDestination& destination, WorldProbeToken& output) noexcept {
+    output = {};
+    const auto end = std::find(destination.package.begin(), destination.package.end(), '\0');
+    if (end == destination.package.begin() || end == destination.package.end()
+        || destination.activity < 0 || destination.activity > 32767 || destination.region < 0
+        || !protocol::ticket({invitation.ticket.data(), 32}) || invitation.ticket.back() != '\0') return false;
+    WorldProbeToken request{};
+    request.ticket = invitation.ticket;
+    if (!make_nonce(request.nonce)) return false;
+    protocol::Message message{};
+    std::array<char, 32> indexes{};
+    const int count = std::snprintf(indexes.data(), indexes.size(), " %d %d",
+                                    destination.activity, destination.region);
+    const auto length = static_cast<std::size_t>(end - destination.package.begin());
+    if (count <= 0 || static_cast<std::size_t>(count) >= indexes.size()
+        || !protocol::append(message, "WORLD1_PROBE ") || !protocol::append(message, request.ticket.data())
+        || !protocol::append(message, " ") || !protocol::append(message, request.nonce.data())
+        || !protocol::append(message, " ") || !protocol::append_hex(message, {destination.package.data(), length})
+        || !protocol::append(message, {indexes.data(), static_cast<std::size_t>(count)})) return false;
+    AcquireSRWLockExclusive(&g_lock);
+    const auto now = GetTickCount64();
+    const bool current = world_context_locked()
+        && g_invitations.current(g_peer, request.ticket.data(), now)
+        && (validate_preflight_locked(g_tracePreflight, invitation, now)
+            || validate_preflight_locked(g_preflight, invitation, now));
+    // One challenge is issued for this accepted ticket. A new acceptance may replace it.
+    const bool sent = current && request.ticket != g_hostProbe.ticket && send_locked(message, 50);
+    if (sent) {
+        g_hostProbe = request;
+        g_hostProbeDeadline = (std::min)(invitation.deadline, now + kWorldProbeTimeoutMs);
+        output = request;
+    }
+    ReleaseSRWLockExclusive(&g_lock);
+    return sent;
+}
+
+bool respond_world_probe(const WorldProbeEvent& request, bool ready) noexcept {
+    protocol::Message message{};
+    if (request.kind != WorldProbeKind::request || request.token.ticket.back() != '\0'
+        || request.token.nonce.back() != '\0'
+        || !protocol::ticket({request.token.ticket.data(), 32}) || !protocol::ticket({request.token.nonce.data(), 32})
+        || !protocol::append(message, ready ? "WORLD1_READY " : "WORLD1_NO ")
+        || !protocol::append(message, request.token.ticket.data()) || !protocol::append(message, " ")
+        || !protocol::append(message, request.token.nonce.data())) return false;
+    AcquireSRWLockExclusive(&g_lock);
+    const auto now = GetTickCount64();
+    const bool current = world_context_locked() && g_guestProbeAvailable && request == g_guestProbe
+        && request.generation == g_companionGeneration && now < request.deadline && now < g_guestWorldDeadline
+        && request.token.ticket == g_guestWorldTicket;
+    if (current) g_guestProbeAvailable = false;
+    const bool sent = current && send_locked(message, 50);
+    ReleaseSRWLockExclusive(&g_lock);
+    return sent;
 }
 
 } // namespace dawn::core::multiplayer

@@ -23,6 +23,7 @@ namespace MultiDawn.Launcher
             internal bool Authenticated;
             internal long Generation;
             internal int Protocol;
+            internal bool WorldProbeCapable;
             internal readonly string Epoch = Guid.NewGuid().ToString("N").ToUpperInvariant();
             internal NativeConnection(string name)
             {
@@ -38,12 +39,32 @@ namespace MultiDawn.Launcher
             }
         }
 
+        private sealed class WorldProbe
+        {
+            internal readonly NativeConnection Connection;
+            internal readonly InviteRecord Invite;
+            internal readonly string Nonce;
+            internal readonly long Started;
+            internal bool Delivered, Complete;
+
+            internal WorldProbe(NativeConnection connection, InviteRecord invite, string nonce, long started)
+            { Connection = connection; Invite = invite; Nonce = nonce; Started = started; }
+
+            internal string ProtectedFields
+            { get { return Invite.Ticket + " " + Invite.HostEpoch + " " + Invite.GuestEpoch + " " + Nonce; } }
+
+            internal string NativeFields
+            { get { return Invite.Ticket + " " + Nonce; } }
+        }
+
+        private const int WorldProbeLifetimeMilliseconds = 10000;
         private readonly object sync = new object(), queueLock = new object();
         private readonly PairSession session;
         private readonly CancellationTokenSource lifetime = new CancellationTokenSource();
         private readonly CancellationToken cancellation;
         private readonly ulong localId;
         private readonly InviteLedger invitations;
+        private readonly Func<long> clock;
         private static readonly Stopwatch monotonic = Stopwatch.StartNew();
         private readonly string localName;
         private readonly Task listenerWorker, presenceWorker;
@@ -51,6 +72,7 @@ namespace MultiDawn.Launcher
         private int queuedCount;
         private int pendingPreflights;
         private NativeConnection native;
+        private WorldProbe worldProbe;
         private Dictionary<string, string> savedNicknames = new Dictionary<string, string>(StringComparer.Ordinal);
         private string boundPeer = "", remoteName = "Paired player";
         private ulong remoteId;
@@ -58,6 +80,7 @@ namespace MultiDawn.Launcher
         private bool remoteRunning, disposed;
         private int remoteProtocol;
         private string remoteEpoch = "-";
+        private string remoteWorldEpoch = "-";
         private ulong runtimeRevision = 1, remoteRevision;
         private bool remoteRuntimeKnown;
         internal readonly string PipeId = Guid.NewGuid().ToString("N");
@@ -70,7 +93,7 @@ namespace MultiDawn.Launcher
             if (paired == null || !ValidSteamId(identity)) throw new ArgumentException("Invalid native session identity.");
             ValidateText(persona, 127, false);
             session = paired; localId = identity; localName = persona;
-            invitations = new InviteLedger(clock);
+            invitations = new InviteLedger(clock); this.clock = clock;
             cancellation = lifetime.Token;
             session.ConnectionControlReceived += ControlReceived;
             session.PeerChanged += PeerChanged;
@@ -149,6 +172,7 @@ namespace MultiDawn.Launcher
                 info.EnvironmentVariables["DAWN_COMPANION_PROTOCOL"] = "3";
                 info.EnvironmentVariables["DAWN_COMPANION_PAIR_GENERATION"] = context.PairGeneration.ToString(CultureInfo.InvariantCulture);
                 info.EnvironmentVariables["DAWN_COMPANION_PEER_ID"] = context.PeerSteamId.ToString(CultureInfo.InvariantCulture);
+                info.EnvironmentVariables["DAWN_COMPANION_WORLD_PROBE"] = "1";
                 info.EnvironmentVariables["DAWN_NATIVE_ADDRESS_RESOLUTION"] = "1";
                 info.EnvironmentVariables["DAWN_NATIVE_SESSION_TRACE"] = "1";
                 info.EnvironmentVariables["DAWN_NATIVE_IDENTITY_OBSERVATION"] = "1";
@@ -175,6 +199,7 @@ namespace MultiDawn.Launcher
         internal string NativeEpochForTest { get { lock (sync) return native != null && native.Authenticated ? native.Epoch : "-"; } }
         internal string PeerEpochForTest { get { lock (sync) return remoteEpoch; } }
         internal int PeerProtocolForTest { get { lock (sync) return remoteProtocol; } }
+        internal bool PeerSupportsWorldProbeForTest { get { lock (sync) return remoteRunning && remoteProtocol >= 2 && remoteWorldEpoch == remoteEpoch; } }
         internal bool AcceptedIntentForTest { get { lock (sync) return invitations.Outgoing != null && invitations.Outgoing.Accepted; } }
         internal string IncomingTicketForTest { get { lock (sync) return invitations.Incoming == null ? "" : invitations.Incoming.Ticket; } }
         internal Task ExpireForTest() { return ExpireInvitationsAsync(); }
@@ -241,6 +266,7 @@ namespace MultiDawn.Launcher
                 if (generation == boundGeneration && boundPeer == peerKey) return;
                 boundGeneration = generation; boundPeer = peerKey; remoteId = 0; remoteRunning = false; remoteName = "Paired player";
                 remoteProtocol = 0; remoteEpoch = "-"; remoteRevision = 0; remoteRuntimeKnown = false;
+                remoteWorldEpoch = "-"; worldProbe = null;
                 close = native; native = null;
                 if (close != null && close.Authenticated) AdvanceRuntimeLocked();
                 invitations.SetContext(null);
@@ -254,10 +280,16 @@ namespace MultiDawn.Launcher
         private async Task ReceiveControlAsync(long generation, string source, string message)
         {
             lock (sync) if (!CurrentControl(generation, source)) return;
-            if (!message.StartsWith("SOCIAL1 ", StringComparison.Ordinal) && !message.StartsWith("SOCIAL2 ", StringComparison.Ordinal)) return;
+            if (!message.StartsWith("SOCIAL1 ", StringComparison.Ordinal) && !message.StartsWith("SOCIAL2 ", StringComparison.Ordinal)
+                && !message.StartsWith("WORLD1 ", StringComparison.Ordinal)) return;
             try
             {
                 string[] fields = Split(message);
+                if (fields[0] == "WORLD1")
+                {
+                    await ReceiveWorldControlAsync(generation, source, fields).ConfigureAwait(false);
+                    return;
+                }
                 if (fields[0] == "SOCIAL2")
                 {
                     await ReceiveVersionTwoAsync(generation, source, fields).ConfigureAwait(false);
@@ -327,6 +359,154 @@ namespace MultiDawn.Launcher
             return invitations.SetContext(context);
         }
 
+        private InviteRecord WorldInviteLocked(NativeConnection connection, string ticket, bool outgoing)
+        {
+            if (!CurrentNativeLocked(connection) || connection.Protocol != 3 || !connection.WorldProbeCapable
+                || !remoteRunning || remoteProtocol < 2 || remoteWorldEpoch != remoteEpoch
+                || connection.Generation <= 0) return null;
+            InviteRecord record = invitations.Accepted(remoteId, ticket);
+            return record != null && record.Outgoing == outgoing && record.Context.Generation == connection.Generation
+                && record.Context.Launcher == boundPeer && record.Context.LocalEpoch == connection.Epoch
+                && record.Context.PeerEpoch == remoteEpoch ? record : null;
+        }
+
+        private WorldProbe StartWorldProbeLocked(NativeConnection connection, InviteRecord record, string nonce)
+        {
+            if (record == null) return null;
+            // Keep even a completed attempt until its accepted ticket is retired.
+            if (worldProbe != null && WorldInviteLocked(worldProbe.Connection, worldProbe.Invite.Ticket,
+                    worldProbe.Invite.Outgoing) == worldProbe.Invite) return null;
+            worldProbe = new WorldProbe(connection, record, nonce, clock());
+            return worldProbe;
+        }
+
+        private bool CurrentWorldProbeLocked(WorldProbe attempt)
+        {
+            if (attempt == null || worldProbe != attempt || attempt.Complete
+                || WorldInviteLocked(attempt.Connection, attempt.Invite.Ticket, attempt.Invite.Outgoing) != attempt.Invite)
+                return false;
+            long now = clock();
+            return now >= attempt.Started && now - attempt.Started < WorldProbeLifetimeMilliseconds;
+        }
+
+        private static void CheckWorldIndex(string text, int maximum)
+        {
+            int value;
+            if (!Int32.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out value) || value > maximum
+                || text != value.ToString(CultureInfo.InvariantCulture))
+                throw new IOException("Invalid world destination selector.");
+        }
+
+        private async Task ReceiveWorldControlAsync(long generation, string source, string[] fields)
+        {
+            if (fields.Length == 3 && fields[1] == "CAP") {
+                if (!InviteLedger.Token(fields[2])) throw new IOException("Invalid world capability epoch.");
+                lock (sync) {
+                    if (CurrentControl(generation, source) && remoteRunning && remoteProtocol >= 2 && remoteEpoch == fields[2])
+                        remoteWorldEpoch = fields[2];
+                }
+                return;
+            }
+
+            bool probe = fields.Length == 8 && fields[1] == "PROBE";
+            bool result = fields.Length == 6 && (fields[1] == "READY" || fields[1] == "NO");
+            if ((!probe && !result) || !InviteLedger.Token(fields[2]) || !InviteLedger.Token(fields[3])
+                || !InviteLedger.Token(fields[4]) || !InviteLedger.Token(fields[5]))
+                throw new IOException("Invalid world control message.");
+            string[] selectors = null;
+            if (probe) {
+                Unhex(fields[6], 40, false);
+                selectors = fields[7].Split('.');
+                if (selectors.Length != 2) throw new IOException("Invalid world destination selectors.");
+                CheckWorldIndex(selectors[0], Int16.MaxValue);
+                CheckWorldIndex(selectors[1], Int32.MaxValue);
+            }
+
+            // PairSession callbacks may hold their lock while acquiring sync.
+            bool pairingHost = session.IsHost;
+            WorldProbe attempt;
+            lock (sync) {
+                if (!CurrentControl(generation, source) || probe == pairingHost) return;
+                InviteRecord record = WorldInviteLocked(native, fields[2], pairingHost);
+                if (record == null || record.HostEpoch != fields[3] || record.GuestEpoch != fields[4]) return;
+                if (probe) attempt = StartWorldProbeLocked(native, record, fields[5]);
+                else {
+                    attempt = worldProbe;
+                    if (!CurrentWorldProbeLocked(attempt) || attempt.Invite != record || attempt.Nonce != fields[5]) return;
+                }
+            }
+            if (attempt == null) return;
+            string message = "WORLD1_" + fields[1] + " " + attempt.NativeFields;
+            if (probe) message += " " + fields[6] + " " + selectors[0] + " " + selectors[1];
+            await SendWorldNativeAsync(attempt, message, result).ConfigureAwait(false);
+        }
+
+        private async Task ReceiveNativeWorldAsync(NativeConnection connection, string[] fields)
+        {
+            if (fields.Length == 1 && fields[0] == "WORLD1_CAP") {
+                lock (sync) {
+                    if (!CurrentNativeLocked(connection) || connection.WorldProbeCapable) return;
+                    connection.WorldProbeCapable = true;
+                }
+                await PublishProfileAsync().ConfigureAwait(false);
+                return;
+            }
+
+            bool probe = fields.Length == 6 && fields[0] == "WORLD1_PROBE";
+            bool result = fields.Length == 3 && (fields[0] == "WORLD1_READY" || fields[0] == "WORLD1_NO");
+            if ((!probe && !result) || !InviteLedger.Token(fields[1]) || !InviteLedger.Token(fields[2]))
+                throw new IOException("Invalid native world message.");
+            if (probe) {
+                Unhex(fields[3], 40, false);
+                CheckWorldIndex(fields[4], Int16.MaxValue);
+                CheckWorldIndex(fields[5], Int32.MaxValue);
+            }
+
+            bool pairingHost = session.IsHost;
+            WorldProbe attempt;
+            lock (sync) {
+                if (!CurrentNativeLocked(connection) || !connection.WorldProbeCapable) return;
+                if (probe) {
+                    InviteRecord record = pairingHost ? WorldInviteLocked(connection, fields[1], true) : null;
+                    if (worldProbe != null && worldProbe.Invite == record && worldProbe.Nonce == fields[2]) return;
+                    attempt = StartWorldProbeLocked(connection, record, fields[2]);
+                } else {
+                    attempt = worldProbe;
+                    if (pairingHost || !CurrentWorldProbeLocked(attempt) || !attempt.Delivered
+                        || attempt.Connection != connection || attempt.Invite.Outgoing
+                        || attempt.Invite.Ticket != fields[1] || attempt.Nonce != fields[2]) return;
+                    attempt.Complete = true;
+                }
+            }
+            if (attempt == null) {
+                await TrySendNativeAsync(connection, "WORLD1_NO " + fields[1] + " " + fields[2]).ConfigureAwait(false);
+                return;
+            }
+            string message = "WORLD1 " + fields[0].Substring("WORLD1_".Length) + " " + attempt.ProtectedFields;
+            if (probe) message += " " + fields[3] + " " + fields[4] + "." + fields[5];
+            await TrySendControlAsync(message, connection.Generation).ConfigureAwait(false);
+        }
+
+        private async Task SendWorldNativeAsync(WorldProbe attempt, string message, bool finish)
+        {
+            NativeConnection target = attempt.Connection;
+            await target.Writes.WaitAsync(cancellation).ConfigureAwait(false);
+            try {
+                Task write;
+                lock (sync) {
+                    if (!CurrentWorldProbeLocked(attempt)) return;
+                    if (finish) attempt.Complete = true;
+                    else attempt.Delivered = true;
+                    // Start the exact native write after revalidating the accepted ticket and lane.
+                    write = WriteFrameCoreAsync(target.Pipe, message, cancellation);
+                }
+                await write.ConfigureAwait(false);
+            }
+            catch (IOException) { target.Pipe.Dispose(); }
+            catch (ObjectDisposedException) { target.Pipe.Dispose(); }
+            finally { target.Writes.Release(); }
+        }
+
         private async Task PublishPeerToNativeAsync(NativeConnection connection)
         {
             ulong id; string name, epoch; int protocol; bool running;
@@ -380,6 +560,7 @@ namespace MultiDawn.Launcher
                         return;
                     }
                     remoteId = id; remoteName = name; remoteRunning = protocol != 0;
+                    if (remoteEpoch != epoch || protocol < 2) remoteWorldEpoch = "-";
                     remoteRuntimeKnown = true; remoteRevision = revision; remoteEpoch = epoch; remoteProtocol = protocol;
                     revoked = UpdateInvitationsLocked(); destination = CurrentNativeLocked(native) ? native : null;
                 }
@@ -425,6 +606,10 @@ namespace MultiDawn.Launcher
 
         private async Task ReceiveNativeAsync(NativeConnection connection, string[] fields)
         {
+            if (connection.Protocol == 3 && fields[0].StartsWith("WORLD1_", StringComparison.Ordinal)) {
+                await ReceiveNativeWorldAsync(connection, fields).ConfigureAwait(false);
+                return;
+            }
             if (connection.Protocol == 3 && fields.Length == 4 && fields[0] == "PREFLIGHT") {
                 if (!InviteLedger.Token(fields[1]) || !InviteLedger.Token(fields[3])) throw new IOException("Invalid preflight token.");
                 ulong peer = Identity(fields[2]);
@@ -490,16 +675,18 @@ namespace MultiDawn.Launcher
         private async Task PublishProfileAsync()
         {
             if (!session.IsPaired || cancellation.IsCancellationRequested) return;
-            bool running; long generation; int protocol; string epoch; ulong revision;
+            bool running, worldCap; long generation; int protocol; string epoch; ulong revision;
             lock (sync) {
                 generation = boundGeneration; running = CurrentNativeLocked(native);
-                // Protocol three adds a local-pipe query; its remote invitation capability
-                // remains version two so existing paired launchers remain compatible.
+                // Protocol three advertises ticketed invitations as version two.
+                // The optional world exchange announces its own capability and epoch.
                 protocol = running ? Math.Min(native.Protocol, 2) : 0; epoch = running ? native.Epoch : "-"; revision = runtimeRevision;
+                worldCap = running && native.WorldProbeCapable;
             }
             try {
                 await session.SendControlAsync("SOCIAL1 PROFILE " + localId.ToString(CultureInfo.InvariantCulture) + " " + Hex(localName) + " " + (running ? "1" : "0"), generation).ConfigureAwait(false);
                 await session.SendControlAsync("SOCIAL2 RUNTIME " + localId.ToString(CultureInfo.InvariantCulture) + " " + Hex(localName) + " " + epoch + " " + protocol.ToString(CultureInfo.InvariantCulture) + " " + revision.ToString(CultureInfo.InvariantCulture), generation).ConfigureAwait(false);
+                if (worldCap) await session.SendControlAsync("WORLD1 CAP " + epoch, generation).ConfigureAwait(false);
             }
             catch (IOException) { }
             catch (OperationCanceledException) { }
@@ -567,7 +754,7 @@ namespace MultiDawn.Launcher
                     {
                         lock (sync) {
                             if (native == connection) {
-                                native = null; if (connection.Authenticated) AdvanceRuntimeLocked();
+                                native = null; worldProbe = null; if (connection.Authenticated) AdvanceRuntimeLocked();
                                 endedRecords = UpdateInvitationsLocked();
                             }
                         }
@@ -755,12 +942,12 @@ namespace MultiDawn.Launcher
                 invitations.SetContext(null); AdvanceRuntimeLocked(); generation = boundGeneration;
                 ended = "SOCIAL2 RUNTIME " + localId.ToString(CultureInfo.InvariantCulture) + " " + Hex(localName) + " - 0 " + runtimeRevision.ToString(CultureInfo.InvariantCulture);
             }
-            Observe(PublishEndedAsync(ended, generation));
+            Observe(TrySendControlAsync(ended, generation));
             session.ConnectionControlReceived -= ControlReceived; session.PeerChanged -= PeerChanged;
             lifetime.Cancel();
             if (close != null) close.Pipe.Dispose();
         }
-        private async Task PublishEndedAsync(string message, long generation)
+        private async Task TrySendControlAsync(string message, long generation)
         { try { await session.SendControlAsync(message, generation).ConfigureAwait(false); } catch (IOException) { } catch (OperationCanceledException) { } catch (ObjectDisposedException) { } }
     }
 

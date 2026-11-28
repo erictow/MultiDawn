@@ -7,7 +7,10 @@
 #include "../../server/bap/runtime.h"
 #include "../../server/gameplay/resolution/address_resolution_host.h"
 
-namespace dawn::core::multiplayer { struct InvitationPreflightObservation; }
+namespace dawn::core::multiplayer {
+struct InvitationPreflightObservation;
+struct WorldProbeEvent;
+}
 
 namespace dawn::core::multiplayer::activity_binding {
 
@@ -63,6 +66,8 @@ struct WorldObservation final {
 
 /** Records whether a current accepted-ticket observation coincided with a proven local world. */
 void trace_invitation_world(const InvitationPreflightObservation& invitation) noexcept;
+/** Advances the invite-scoped readiness check after the current server service slice. */
+void service_world_probe(const WorldProbeEvent& event) noexcept;
 
 /** Bounded diagnostics only, enabled with DAWN_ACTIVITY_BINDING_TRACE=1. */
 void service(std::uint64_t now) noexcept;

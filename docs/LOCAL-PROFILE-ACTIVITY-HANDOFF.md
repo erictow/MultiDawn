@@ -148,13 +148,27 @@ authentication generations. Revalidation requires the same creator, region,
 native world, player and route. Tower regions can share one control transport
 while retaining separate world observations.
 
-Use the next paired run to confirm `stage=local_world result=observed` on each
-PC after landing and `stage=accepted_invite result=observed` on the inviter
-after acceptance. `no_authenticated_route` indicates the BAP and resolver
-checks found no eligible unique route. `no_local_route_source` indicates the
-selected UDP source failed the socket ownership check. The observations have
-`admission=0`. Exchanging the two players' handoff information and installing
-their shared activity routes are subsequent steps.
+In the paired `653e9775` run the updated host observed the route on arrival,
+after Tower travel and after all three accepted invitations. The guest archive
+came from `5e5d067c`, so guest-side verification of the route change is pending.
+
+### Verify the guest's world after an invite
+
+When the pairing host's invite preflight confirms a current world, its
+companion sends a one-shot nonce and the package, activity index and region to
+the invite recipient through the protected launcher pair. Both launchers
+recheck their current pairing, runtime capability, exact ticket and epochs.
+The guest checks for a current local human, world connection and control route
+at the requested destination before replying. The host reobserves its world
+when it receives the matching reply. A region or route change invalidates
+the earlier observation even if the guest replied successfully.
+
+In the paired test, land both Guardians at the same Tower Courtyard spawn
+before sending one host-to-guest invite. The guest's log can report
+`ev=world_probe stage=guest result=observed`. The host's corresponding result
+is `both_worlds_observed`. The result establishes readiness for a handoff
+between two local worlds. Publishing the guest to the host activity and
+replicating the Guardians' gameplay remain the next runtime integration.
 
 ## Recipient roster projection
 

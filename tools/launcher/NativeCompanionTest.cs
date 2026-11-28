@@ -13,11 +13,12 @@ namespace MultiDawn.Launcher
         private static async Task<string> RunAsync(string harness)
         {
             if (!File.Exists(harness)) throw new FileNotFoundException("Build the native companion_bridge_harness project first.", harness);
-            return await RunVersionAsync(harness, 3).ConfigureAwait(false)
+            return await RunVersionAsync(harness, 3, worldProbe: true).ConfigureAwait(false)
+                + await RunVersionAsync(harness, 3).ConfigureAwait(false)
                 + await RunVersionAsync(harness, 2).ConfigureAwait(false)
                 + await RunVersionAsync(harness, 1).ConfigureAwait(false);
         }
-        private static async Task<string> RunVersionAsync(string harness, int protocol)
+        private static async Task<string> RunVersionAsync(string harness, int protocol, bool worldProbe = false)
         {
             using (PairSession host = new PairSession())
             using (PairSession guest = new PairSession())
@@ -33,13 +34,13 @@ namespace MultiDawn.Launcher
                     Process first = null, second = null;
                     try
                     {
-                        first = Start(harness, "side-a", firstBridge, protocol);
-                        second = Start(harness, "side-b", secondBridge, protocol);
+                        first = Start(harness, "side-a", firstBridge, protocol, worldProbe);
+                        second = Start(harness, "side-b", secondBridge, protocol, worldProbe);
                         Task<string> firstOut = first.StandardOutput.ReadToEndAsync(), firstError = first.StandardError.ReadToEndAsync();
                         Task<string> secondOut = second.StandardOutput.ReadToEndAsync(), secondError = second.StandardError.ReadToEndAsync();
                         bool[] completed = await Task.WhenAll(Task.Run(delegate { return first.WaitForExit(25000); }), Task.Run(delegate { return second.WaitForExit(25000); })).ConfigureAwait(false);
                         if (!completed[0] || !completed[1]) throw new TimeoutException("Native companion test workers exceeded 25 seconds.");
-                        string output = "Companion protocol " + protocol + Environment.NewLine + "Native side A:" + Environment.NewLine + await firstOut.ConfigureAwait(false) + await firstError.ConfigureAwait(false)
+                        string output = "Companion protocol " + protocol + (worldProbe ? " with world probe" : "") + Environment.NewLine + "Native side A:" + Environment.NewLine + await firstOut.ConfigureAwait(false) + await firstError.ConfigureAwait(false)
                             + "Native side B:" + Environment.NewLine + await secondOut.ConfigureAwait(false) + await secondError.ConfigureAwait(false);
                         if (first.ExitCode != 0 || second.ExitCode != 0)
                             throw new IOException("Native companion test worker failed (" + first.ExitCode + ", " + second.ExitCode + ")." + Environment.NewLine + output);
@@ -48,9 +49,12 @@ namespace MultiDawn.Launcher
                             await Task.Delay(25).ConfigureAwait(false);
                         if (!Clean(firstBridge, secondBridge)) throw new IOException("Native exit did not retire both runtime epochs and invitation contexts.");
                         if (!host.IsPaired || !guest.IsPaired) throw new IOException("Native worker exit incorrectly terminated launcher pairing.");
-                        return output + "PASS: actual C++ companion framing, nonce authentication, identity publication, bidirectional invitations, and native exit cleanup."
-                            + (protocol == 3 ? " Current accepted-invitation preflight was observed after intent consumption; no gameplay grant."
-                                : protocol == 2 ? " Invitation acceptance reached the host as intent only; no gameplay grant." : " Legacy protocol 1 remains compatible.") + Environment.NewLine
+                        string summary = worldProbe
+                            ? "PASS: the host's native world probe reached the guest and returned through both launchers."
+                            : "PASS: actual C++ companion framing, nonce authentication, identity publication, bidirectional invitations, and native exit cleanup."
+                                + (protocol == 3 ? " Current accepted-invitation preflight was observed after intent consumption."
+                                    : protocol == 2 ? " Invitation acceptance reached the host." : " Legacy protocol 1 remains compatible.");
+                        return output + summary + Environment.NewLine
                             + "No Destiny process or game DLL was started. No account or save was opened." + Environment.NewLine;
                     }
                     finally { Stop(first); Stop(second); }
@@ -65,7 +69,7 @@ namespace MultiDawn.Launcher
                 && !first.AcceptedIntentForTest && !second.AcceptedIntentForTest
                 && first.IncomingTicketForTest.Length == 0 && second.IncomingTicketForTest.Length == 0;
         }
-        private static Process Start(string harness, string side, RuntimeBridge bridge, int protocol)
+        private static Process Start(string harness, string side, RuntimeBridge bridge, int protocol, bool worldProbe)
         {
             ProcessStartInfo start = new ProcessStartInfo(harness, side);
             start.WorkingDirectory = Path.GetDirectoryName(harness);
@@ -74,6 +78,8 @@ namespace MultiDawn.Launcher
             start.RedirectStandardOutput = start.RedirectStandardError = true;
             bridge.ApplyEnvironment(start);
             start.EnvironmentVariables["DAWN_COMPANION_PROTOCOL"] = protocol.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (worldProbe) start.EnvironmentVariables["DAWN_COMPANION_WORLD_PROBE"] = "1";
+            else start.EnvironmentVariables.Remove("DAWN_COMPANION_WORLD_PROBE");
             Process process = Process.Start(start);
             if (process == null) throw new IOException("Native companion test worker did not start.");
             return process;

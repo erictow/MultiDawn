@@ -70,7 +70,8 @@ launcher reports its native game connected, whether each game sees the paired
 friend, and any error code. Keep pair codes, pipe nonces and account databases
 out of reports. Open **Collect-Test-Log.cmd** in the extracted kit. Explorer
 selects a ZIP containing the complete current `dawn.log`. Send the ZIP as
-a file attachment. While Destiny is running, the helper
+a file attachment. Its filename includes the kit commit so you can check that
+both PCs used the same kit. While Destiny is running, the helper
 uses the loaded test DLL. After exit, it checks the last prepared folder.
 It checks the log's runtime hash against the kit in both cases.
 

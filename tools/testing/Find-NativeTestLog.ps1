@@ -109,7 +109,8 @@ try {
     if ($PathOnly) { return $log.FullName }
     $source.Position = 0
     $output = [IO.Directory]::CreateDirectory((Join-Path $kit 'build/test-logs'))
-    $zip = Join-Path $output.FullName ('MultiDawn-log-' + [Guid]::NewGuid().ToString('N') + '.zip')
+    $kitCommit = $manifest.sourceCommit.Substring(0, 8)
+    $zip = Join-Path $output.FullName ('MultiDawn-log-' + $kitCommit + '-' + [Guid]::NewGuid().ToString('N') + '.zip')
     Add-Type -AssemblyName System.IO.Compression
     $file = [IO.File]::Open($zip, 'CreateNew', 'Write', 'None')
     try {

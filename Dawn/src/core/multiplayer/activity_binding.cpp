@@ -1,6 +1,7 @@
 #include "activity_binding.h"
 
 #include <Windows.h>
+#include <algorithm>
 #include <array>
 #include <cstdio>
 
@@ -95,9 +96,43 @@ struct DiagnosticHistory {
 };
 
 SRWLOCK g_traceLock = SRWLOCK_INIT;
+SRWLOCK g_worldProbeLock = SRWLOCK_INIT;
 std::uint64_t g_lastPoll{};
 bool g_polled{};
 DiagnosticHistory g_managedHistory{}, g_worldHistory{};
+
+struct PendingWorldProbe {
+    WorldProbeToken token{};
+    InvitationPreflightObservation invitation{};
+    WorldObservation world{};
+    std::uint64_t deadline{};
+};
+
+PendingWorldProbe g_pendingWorldProbe{};
+
+[[nodiscard]] WorldDestination destination_of(const server::bap::CreatorActivitySnapshot& creator) noexcept {
+    WorldDestination destination{};
+    if (creator.destination.packageNameLength > creator.destination.packageName.size()) return destination;
+    for (std::size_t index = 0; index < creator.destination.packageNameLength; ++index)
+        destination.package[index] = static_cast<char>(creator.destination.packageName[index]);
+    destination.activity = creator.destination.activityIndex;
+    destination.region = creator.reportedRegion;
+    return destination;
+}
+
+[[nodiscard]] bool same_world(const WorldObservation& a, const WorldObservation& b) noexcept {
+    return a.creator == b.creator && a.host == b.host && a.lineageGeneration == b.lineageGeneration
+        && a.world == b.world && identity_activity::same_world_human(a.human, b.human)
+        && same_route(a.route, b.route);
+}
+
+void report_world_probe(const char* stage, const char* result) noexcept {
+    std::array<char, 128> line{};
+    const int count = std::snprintf(line.data(), line.size(),
+        "ev=world_probe stage=%s result=%s admission=0", stage, result);
+    if (count > 0 && static_cast<std::size_t>(count) < line.size())
+        log::write(log::Channel::core, log::Level::info, {line.data(), static_cast<std::size_t>(count)});
+}
 
 [[nodiscard]] Result inspect_source(Source& source, DiagnosticSource* diagnostic) noexcept {
     if (diagnostic != nullptr) *diagnostic = {};
@@ -274,10 +309,7 @@ bool validate_world(const WorldObservation& previous, std::uint64_t now) noexcep
         || now - previous.human.sampledAt > identity_observation::kMaximumAgeMs) return false;
     WorldObservation current{};
     if (inspect_world(now, current) != Result::observed) return false;
-    return current.creator == previous.creator && current.host == previous.host
-        && current.lineageGeneration == previous.lineageGeneration
-        && current.world == previous.world && identity_activity::same_world_human(current.human, previous.human)
-        && same_route(current.route, previous.route);
+    return same_world(current, previous);
 }
 
 void trace_invitation_world(const InvitationPreflightObservation& invitation) noexcept {
@@ -290,6 +322,52 @@ void trace_invitation_world(const InvitationPreflightObservation& invitation) no
         "ev=world_activity_binding stage=accepted_invite result=%s admission=0", name(result));
     if (size > 0 && static_cast<std::size_t>(size) < line.size())
         log::write(log::Channel::core, log::Level::info, {line.data(), static_cast<std::size_t>(size)});
+    if (result != Result::observed) return;
+    WorldProbeToken token{};
+    AcquireSRWLockExclusive(&g_worldProbeLock);
+    const bool sent = request_world_probe(invitation, destination_of(observed.creator), token);
+    if (sent) g_pendingWorldProbe = {token, invitation, observed,
+        (std::min)(invitation.deadline, GetTickCount64() + kWorldProbeTimeoutMs)};
+    ReleaseSRWLockExclusive(&g_worldProbeLock);
+    if (sent) report_world_probe("host", "request_sent");
+}
+
+void service_world_probe(const WorldProbeEvent& event) noexcept {
+    const auto now = GetTickCount64();
+    if (event.kind == WorldProbeKind::none) {
+        AcquireSRWLockExclusive(&g_worldProbeLock);
+        const bool expired = g_pendingWorldProbe.deadline != 0 && now >= g_pendingWorldProbe.deadline;
+        if (expired) g_pendingWorldProbe = {};
+        ReleaseSRWLockExclusive(&g_worldProbeLock);
+        if (expired) report_world_probe("host", "timeout");
+        return;
+    }
+    if (now >= event.deadline) return;
+    if (event.kind == WorldProbeKind::request) {
+        WorldObservation guest{};
+        const auto result = inspect_world(now, guest);
+        const bool matching = result == Result::observed && event.destination == destination_of(guest.creator);
+        const bool ready = matching && validate_world(guest, GetTickCount64());
+        const char* reason = result != Result::observed ? name(result)
+            : !matching ? "different_destination" : ready ? "observed" : "changed_during_capture";
+        if (respond_world_probe(event, ready)) report_world_probe("guest", reason);
+        return;
+    }
+
+    PendingWorldProbe pending{};
+    AcquireSRWLockExclusive(&g_worldProbeLock);
+    if (event.token == g_pendingWorldProbe.token
+        && event.generation == g_pendingWorldProbe.invitation.companionGeneration) {
+        pending = g_pendingWorldProbe;
+        g_pendingWorldProbe = {};
+    }
+    ReleaseSRWLockExclusive(&g_worldProbeLock);
+    if (pending.deadline <= now || !validate_traced_invitation_preflight(pending.invitation)) return;
+    WorldObservation host{};
+    const bool current = inspect_world(now, host) == Result::observed && same_world(host, pending.world)
+        && validate_traced_invitation_preflight(pending.invitation);
+    if (!current) report_world_probe("host", "world_changed");
+    else report_world_probe("host", event.kind == WorldProbeKind::ready ? "both_worlds_observed" : "guest_unavailable");
 }
 
 void service(std::uint64_t now) noexcept {
@@ -335,6 +413,9 @@ void reset() noexcept {
     g_managedHistory = {};
     g_worldHistory = {};
     ReleaseSRWLockExclusive(&g_traceLock);
+    AcquireSRWLockExclusive(&g_worldProbeLock);
+    g_pendingWorldProbe = {};
+    ReleaseSRWLockExclusive(&g_worldProbeLock);
 }
 
 } // namespace dawn::core::multiplayer::activity_binding
