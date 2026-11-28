@@ -48,9 +48,11 @@ function Assert-Writable([string] $Path) {
 
 # Deterministically cover process refusal without starting any executable.
 $global:NativePreflightPretendRunning = $false
+$global:NativePreflightLogProcess = $null
 function Get-Process {
     [CmdletBinding()] param([string] $Name)
     if ($Name -ne 'destiny2') { throw 'Unexpected process query.' }
+    if ($global:NativePreflightLogProcess) { return $global:NativePreflightLogProcess }
     if ($global:NativePreflightPretendRunning) { [pscustomobject]@{ Id = 123; ProcessName = 'destiny2' } }
 }
 $stub = @'
@@ -130,7 +132,7 @@ if (-not (Test-Path -LiteralPath $compiler)) { $compiler = Join-Path $env:WINDIR
 & $compiler /nologo /target:winexe "/out:$launcher" $captureSource
 Assert ($LASTEXITCODE -eq 0) 'Could not compile the synthetic launcher'
 $launcherHash = (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash
-Write-File $manifestPath (([ordered]@{ schema=1; sourceCommit=$commit; runtimeSha256=$hash; launcherSha256=$launcherHash }) | ConvertTo-Json)
+Write-File $manifestPath (([ordered]@{ schema=1; sourceCommit=$commit; gameVersion='fixture-version'; runtimeSha256=$hash; launcherSha256=$launcherHash }) | ConvertTo-Json)
 $lockMarker = Join-Path $kit 'expect-save-locks.txt'
 Write-File $lockMarker 'required'
 $source = New-Source 'own game [literal]'
@@ -265,6 +267,40 @@ $emptyOutput = & $prepare -SourceGame $noDatabase
 $emptyRecord = Get-Content -LiteralPath (Join-Path $emptyOutput 'native-test-install.json') -Raw | ConvertFrom-Json
 Assert ($emptyRecord.playerState -ceq 'fresh') 'Missing progress was not marked fresh'
 Pass 'A source without a database creates a fresh fixture'
+$findLog = Join-Path $repo 'tools/testing/Find-NativeTestLog.ps1'
+$closedLog = Join-Path $emptyOutput 'bin/x64/Dawn/logs/dawn.log'
+$identity = "core level=info ev=build_identity module_sha256=$hash"
+Write-File $closedLog $identity
+Assert ((& $findLog -KitRoot $kit -PathOnly) -ieq $closedLog) 'Closed game log must come from last prepared fixture'
+$contents = $identity + [Environment]::NewLine + ('a' * 100000) + [Environment]::NewLine + 'invite accepted'
+Write-File $closedLog $contents
+$zip = & $findLog -KitRoot $kit -NoExplorer
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$archive = [IO.Compression.ZipFile]::OpenRead($zip)
+try {
+    Assert ($archive.Entries.Count -eq 1 -and $archive.Entries[0].FullName -ceq 'dawn.log') 'Include only the test log in the ZIP'
+    $reader = [IO.StreamReader]::new($archive.Entries[0].Open())
+    try { Assert ($reader.ReadToEnd() -ceq $contents) 'The ZIP omitted log bytes after the attachment preview limit' }
+    finally { $reader.Dispose() }
+} finally { $archive.Dispose() }
+$badHash = '0' * 64
+Write-File $closedLog "core level=info ev=build_identity module_sha256=$badHash"
+Refuses { & $findLog -KitRoot $kit -PathOnly } '*does not match this test kit*'
+Pass 'Closed test log uses the kit pointer and refuses a regular Dawn log'
+$liveLog = Join-Path $dualOutput 'Dawn/logs/dawn.log'
+Write-File $liveLog $identity
+Write-File (Join-Path $dualOutput 'bin/x64/Dawn/logs/dawn.log') $identity
+$global:NativePreflightLogProcess = [pscustomobject]@{
+    Path = (Join-Path $dualOutput 'destiny2.exe')
+    Modules = @([pscustomobject]@{ ModuleName='steam_api64.dll'; FileName=(Join-Path $dualOutput 'steam_api64.dll') })
+    StartTime = (Get-Date).AddMinutes(-1)
+}
+try {
+    Assert ((& $findLog -KitRoot $kit -PathOnly) -ieq $liveLog) 'Running game must use its loaded DLL, even if the pointer or another layout is newer'
+    $global:NativePreflightLogProcess.Path = Join-Path $source 'destiny2.exe'
+    Refuses { & $findLog -KitRoot $kit -PathOnly } '*running Destiny 2 from this kit*'
+} finally { $global:NativePreflightLogProcess = $null }
+Pass 'Running game log follows the loaded DLL and refuses an unrelated game'
 Remove-Item -LiteralPath $manifestPath
 $calls = Calls
 Refuses { & $prepare -SourceGame $noDatabase } '*Supply ExpectedRuntimeSha256*'

@@ -34,7 +34,7 @@ Add-KitInput $runtime.FullName 'runtime/steam_api64.dll'
 Add-KitInput $launcher.FullName 'MultiDawn.Launcher.exe'
 Add-KitInput (Join-Path $repo 'LICENSE') 'LICENSE'
 Add-KitInput (Join-Path $repo 'docs/TWO-PC-NATIVE-PREFLIGHT.md') 'README.md'
-foreach ($helper in @('Prepare-NativeGamePreflight.ps1', 'New-IsolatedDawnTestInstall.ps1')) {
+foreach ($helper in @('Prepare-NativeGamePreflight.ps1', 'New-IsolatedDawnTestInstall.ps1', 'Find-NativeTestLog.ps1')) {
     Add-KitInput (Join-Path $PSScriptRoot $helper) ('tools/testing/' + $helper)
 }
 foreach ($name in @('settings', 'hud', 'movement', 'player')) {
@@ -82,6 +82,15 @@ $prepareLines = @(
     ')'
 )
 [IO.File]::WriteAllText((Join-Path $output 'Prepare-Test-Game.cmd'), (($prepareLines -join "`r`n") + "`r`n"), $utf8)
+$logLines = @(
+    '@echo off'
+    'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\testing\Find-NativeTestLog.ps1"'
+    'if errorlevel 1 ('
+    '    pause'
+    '    exit /b 1'
+    ')'
+)
+[IO.File]::WriteAllText((Join-Path $output 'Collect-Test-Log.cmd'), (($logLines -join "`r`n") + "`r`n"), $utf8)
 $files = @(Get-ChildItem -LiteralPath $output -Recurse -File | Sort-Object FullName | ForEach-Object {
     [ordered]@{ path = $_.FullName.Substring($output.Length + 1).Replace([char]92, [char]47); size = $_.Length; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
 })

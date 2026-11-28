@@ -129,6 +129,21 @@ process-local observation with no remote admission. The next integration is to
 use the verified local bindings to exchange the two players' scoped handoff
 information and install the host's activity routes.
 
+In the November 27 host run on `5e5d067c`, the embedded resolver authenticated
+its control datagram at 115.156 seconds. The Guardian had control at 122.859
+seconds. At 384.093 seconds the host verified the accepted invitation and
+reported `stage=accepted_invite result=no_authenticated_route`. Reaching
+that result requires both the native world connection and the corroborated
+local player to have passed. The resolver created its route on BAP connection
+1. The activity-host connection had opened separately on connection 2.
+
+The current lookup asks for the activity creator's exact authentication
+lifetime. No matching control route was returned at acceptance. The next
+transport check is how the game associates its primary BAP channel with
+its activity-host channel and retains or replaces that association on travel.
+A route observed on a different channel needs that relationship before it
+can be used for an activity handoff.
+
 ## Recipient roster projection
 
 `world_roster::Projection` prepares a BAP membership snapshot for one exact

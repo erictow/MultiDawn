@@ -68,9 +68,16 @@ this test does not expose it or change router settings.
 Record both PCs' LAN IPv4 addresses, the kit's `sourceCommit`, whether each
 launcher reports its native game connected, whether each game sees the paired
 friend, and any error code. Keep pair codes, pipe nonces and account databases
-out of reports. Look for the log under `bin/x64/Dawn/logs/` or `Dawn/logs/`, next
-to the loaded runtime. Preparation enables core, client and server information
-logging in the test settings.
+out of reports. Open **Collect-Test-Log.cmd** in the extracted kit. Explorer
+selects a ZIP containing the complete current `dawn.log`. Send the ZIP as
+a file attachment. While Destiny is running, the helper
+uses the loaded test DLL. After exit, it checks the last prepared folder.
+It checks the log's runtime hash against the kit in both cases.
+
+For older kits, use Task Manager's **Details** tab. Right-click the running
+`destiny2.exe`, choose **Open file location**, and look under
+`bin/x64/Dawn/logs/` or `Dawn/logs/`. Preparation enables core, client and
+server information logging in the test settings.
 
 The launcher enables the existing bounded native session, identity and activity
 traces in this explicit test launch. It does not enable the legacy unsafe probe
